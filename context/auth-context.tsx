@@ -2,14 +2,14 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef } from "react"
 import { useRouter, usePathname } from "next/navigation"
+import { UserRole } from "@/lib/enums"
 
-type UserRole = "technician" | "reporter" | "admin" | "warehouse" | "business" | null
 type AuthStatus = "authenticated" | "unauthenticated" | "loading"
 
 interface User {
   id: string
   realName: string
-  role: UserRole
+  role: UserRole | null
   avatar?: string
   phone?: string
 }
@@ -46,19 +46,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             phone?: string
           }
 
-          // 将数据库中的角色字符串映射为前端使用的联合类型
+          // 将数据库中的角色字符串映射为前端使用的枚举
           const dbRole = (backendUser.role || "").toLowerCase().trim()
-          const mappedRole: UserRole =
+          const mappedRole: UserRole | null =
             dbRole === "admin"
-              ? "admin"
+              ? UserRole.ADMIN
               : dbRole === "technician" || dbRole === "维修工程师" || dbRole === "维修人员"
-              ? "technician"
+              ? UserRole.TECHNICIAN
               : dbRole === "warehouse" || dbRole === "warehouse_manager" || dbRole === "warehousemanager" || dbRole === "warehouse_admin" || dbRole === "warehouseadmin" || dbRole === "仓库管理员" || dbRole === "仓库"
-              ? "warehouse"
+              ? UserRole.WAREHOUSE
               : dbRole === "reporter" || dbRole === "site" || dbRole === "fieldreporter" || dbRole === "现场报告人员" || dbRole === "现场人员"
-              ? "reporter"
+              ? UserRole.REPORTER
               : dbRole === "business" || dbRole === "商务" || dbRole === "商务人员" || dbRole === "商务管理员"
-              ? "business"
+              ? UserRole.BUSINESS
               : null
 
           if (mappedRole) {
@@ -135,15 +135,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       redirectingRef.current = true
       // 延迟重定向，确保状态稳定
       setTimeout(() => {
-        if (user.role === "technician") {
+        if (user.role === UserRole.TECHNICIAN) {
           router.push("/technician/tasks")
-        } else if (user.role === "reporter") {
+        } else if (user.role === UserRole.REPORTER) {
           router.push("/report")
-        } else if (user.role === "admin") {
+        } else if (user.role === UserRole.ADMIN) {
           router.push("/admin/users")
-        } else if (user.role === "warehouse") {
+        } else if (user.role === UserRole.WAREHOUSE) {
           router.push("/warehouse/dashboard")
-        } else if (user.role === "business") {
+        } else if (user.role === UserRole.BUSINESS) {
           router.push("/business")
         } else {
           router.push("/")
@@ -180,20 +180,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         phone?: string
       }
 
-      // 将数据库中的角色字符串映射为前端使用的联合类型
-      const dbRole = (backendUser.role || "").toLowerCase().trim()
-      const mappedRole: UserRole =
-        dbRole === "admin"
-          ? "admin"
-          : dbRole === "technician" || dbRole === "维修工程师" || dbRole === "维修人员"
-          ? "technician"
-          : dbRole === "warehouse" || dbRole === "warehouse_manager" || dbRole === "warehousemanager" || dbRole === "warehouse_admin" || dbRole === "warehouseadmin" || dbRole === "仓库管理员" || dbRole === "仓库"
-          ? "warehouse"
-          : dbRole === "reporter" || dbRole === "site" || dbRole === "fieldreporter" || dbRole === "现场报告人员" || dbRole === "现场人员"
-          ? "reporter"
-          : dbRole === "business" || dbRole === "商务" || dbRole === "商务人员" || dbRole === "商务管理员"
-          ? "business"
-          : null
+          // 将数据库中的角色字符串映射为前端使用的枚举
+          const dbRole = (backendUser.role || "").toLowerCase().trim()
+          const mappedRole: UserRole | null =
+            dbRole === "admin"
+              ? UserRole.ADMIN
+              : dbRole === "technician" || dbRole === "维修工程师" || dbRole === "维修人员"
+              ? UserRole.TECHNICIAN
+              : dbRole === "warehouse" || dbRole === "warehouse_manager" || dbRole === "warehousemanager" || dbRole === "warehouse_admin" || dbRole === "warehouseadmin" || dbRole === "仓库管理员" || dbRole === "仓库"
+              ? UserRole.WAREHOUSE
+              : dbRole === "reporter" || dbRole === "site" || dbRole === "fieldreporter" || dbRole === "现场报告人员" || dbRole === "现场人员"
+              ? UserRole.REPORTER
+              : dbRole === "business" || dbRole === "商务" || dbRole === "商务人员" || dbRole === "商务管理员"
+              ? UserRole.BUSINESS
+              : null
 
       if (!mappedRole) {
         setStatus("unauthenticated")
@@ -227,15 +227,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           // 重定向
-          if (mappedRole === "technician") {
+          if (mappedRole === UserRole.TECHNICIAN) {
             router.push("/technician/tasks")
-          } else if (mappedRole === "reporter") {
+          } else if (mappedRole === UserRole.REPORTER) {
             router.push("/report")
-          } else if (mappedRole === "admin") {
+          } else if (mappedRole === UserRole.ADMIN) {
             router.push("/admin/users")
-          } else if (mappedRole === "warehouse") {
+          } else if (mappedRole === UserRole.WAREHOUSE) {
             router.push("/warehouse/dashboard")
-          } else if (mappedRole === "business") {
+          } else if (mappedRole === UserRole.BUSINESS) {
             router.push("/business")
           } else {
             router.push("/")

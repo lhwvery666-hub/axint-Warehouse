@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
+import { UserRole } from "@/lib/enums";
 import UserManager from "@/components/admin/user-manager";
 
 export default function AdminUsersPage() {
@@ -20,7 +21,7 @@ export default function AdminUsersPage() {
       return;
     }
     
-    if (user?.role !== "admin") {
+    if (user?.role !== UserRole.ADMIN) {
       router.push("/login");
       return;
     }

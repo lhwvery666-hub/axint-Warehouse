@@ -7,6 +7,7 @@ export async function POST() {
   try {
     const cookieStore = await cookies()
     cookieStore.delete("userId")
+    cookieStore.delete("userRole")  // 同时清除角色 cookie
 
     return NextResponse.json({
       success: true,

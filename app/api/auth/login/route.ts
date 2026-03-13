@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import { cookies } from "next/headers"
+import { getUserQueryConfig } from "@/lib/field-checks"
 
 // POST /api/auth/login
 // 使用 SQL Server Users 表进行真实登录校验
@@ -18,37 +19,22 @@ export async function POST(request: Request) {
 
     const pool = await getDbConnection()
 
-    // 检查表是否有 PhoneNumber 和 IsDeleted 字段
-    const columnCheck = await pool
-      .request()
-      .query(`
-        SELECT COLUMN_NAME 
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_NAME = 'Users' AND COLUMN_NAME IN ('PhoneNumber', 'IsDeleted')
-      `)
-    const hasPhoneNumber = columnCheck.recordset.some((r: any) => r.COLUMN_NAME === "PhoneNumber")
-    const hasIsDeleted = columnCheck.recordset.some((r: any) => r.COLUMN_NAME === "IsDeleted")
+    // 使用统一的字段检查工具
+    const queryConfig = await getUserQueryConfig(['UserID', 'Username', 'Password', 'Role', 'RealName'])
 
     const result = await pool
       .request()
       .input("username", username)
-      .query(
-        `
-        SELECT TOP 1 
-          UserID, 
-          Username, 
-          Password, 
-          Role, 
-          RealName${hasPhoneNumber ? ", PhoneNumber" : ""}
+      .query(`
+        SELECT TOP 1 ${queryConfig.fields}
         FROM Users
         WHERE Username = @username
-        ${hasIsDeleted ? "AND IsDeleted = 0" : ""}
-      `
-      )
+        ${queryConfig.conditions}
+      `)
 
     if (result.recordset.length === 0) {
       // 如果存在 IsDeleted 字段，再精确检查是否是已注销账号，给出更清晰提示
-      if (hasIsDeleted) {
+      if (queryConfig.hasIsDeleted) {
         const deletedCheck = await pool
           .request()
           .input("username", username)
@@ -99,7 +85,7 @@ export async function POST(request: Request) {
       )
     }
 
-    // 设置 session cookie（存储用户ID）
+    // 设置 session cookie（存储用户ID和角色）
     // 使用会话 cookie，关闭浏览器后自动失效，需要重新登录
     const cookieStore = await cookies()
     cookieStore.set("userId", row.UserID.toString(), {
@@ -109,6 +95,27 @@ export async function POST(request: Request) {
       // 不设置 maxAge，使用会话 cookie（关闭浏览器后失效）
       // 如果需要"记住我"功能，可以添加 maxAge: 60 * 60 * 24 * 7 (7天)
     })
+    
+    // 设置用户角色 cookie，用于权限验证
+    cookieStore.set("userRole", row.Role || "", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+    })
+
+    // 兼容依赖 "user" JSON cookie 的新接口（如 /api/upload、workflow-action）
+    // 结构：{ id, username, realName, role }，后续通过 normalizeUserRole 进行规范化
+    const userPayload = {
+      id: row.UserID.toString(),
+      username: row.Username,
+      realName: row.RealName || "",
+      role: row.Role || "",
+    }
+    cookieStore.set("user", JSON.stringify(userPayload), {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+    })
 
     return NextResponse.json({
       success: true,
@@ -117,7 +124,7 @@ export async function POST(request: Request) {
         username: row.Username,
         role: row.Role,
         realName: row.RealName,
-        phone: hasPhoneNumber ? (row.PhoneNumber || "") : "",
+        phone: queryConfig.hasPhoneNumber ? (row.PhoneNumber || "") : "",
       },
     })
   } catch (error: any) {

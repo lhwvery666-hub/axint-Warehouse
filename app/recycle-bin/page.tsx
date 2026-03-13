@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { AlertCircle, Trash2, RotateCcw, Clock, ArrowLeft } from "lucide-react";
+import { AlertCircle, Trash2, RotateCcw, Clock } from "lucide-react";
 
 interface RecycleTicket {
   id: string;
@@ -101,21 +101,11 @@ export default function RecycleBinPage() {
   return (
     <div className="p-4 md:p-6 space-y-6 min-h-screen bg-background">
       <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="shrink-0"
-            onClick={() => router.back()}
-          >
-            <ArrowLeft className="w-5 h-5" />
-          </Button>
-          <div>
-            <h1 className="text-2xl font-bold">工单回收站</h1>
-            <p className="text-sm text-muted-foreground">
-              这里只显示已删除的工单，正常页面中不会再出现。
-            </p>
-          </div>
+        <div>
+          <h1 className="text-2xl font-bold">工单回收站</h1>
+          <p className="text-sm text-muted-foreground">
+            这里只显示已删除的工单，正常页面中不会再出现。
+          </p>
         </div>
       </div>
 

@@ -60,6 +60,9 @@ const fieldsToAdd: FieldDefinition[] = [
   { name: 'CancelRequestDate', type: 'DATETIME', nullable: true, description: '取消申请日期', category: '系统' },
   { name: 'CancelApprovedBy', type: 'NVARCHAR(100)', nullable: true, description: '审批人', category: '系统' },
   { name: 'CancelApprovedDate', type: 'DATETIME', nullable: true, description: '审批日期', category: '系统' },
+
+  // [工单号字段] —— 同一次报修中多台设备共享的业务工单号
+  { name: 'WorkOrderNumber', type: 'NVARCHAR(100)', nullable: true, description: '工单号（同一报修共享的业务编号）', category: '系统' },
 ];
 
 /**

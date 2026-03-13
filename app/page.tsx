@@ -7,31 +7,39 @@ import BottomNav from "@/components/bottom-nav";
 import ProfilePage from "@/components/profile-page";
 import ReporterProfile from "@/components/reporter-profile";
 import AppSidebar from "@/components/app-sidebar";
+import RecycleBinPage from "@/app/recycle-bin/page";
 import { useAuth } from "@/context/auth-context";
+import { UserRole, ROUTES } from "@/lib/enums";
 
 export default function Home() {
   const { user } = useAuth();
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<"home" | "repair" | "profile">("home");
+  const [activeTab, setActiveTab] = useState<"home" | "repair" | "profile" | "recycle">("home");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  // 批次上下文：记住用户来自哪个批次工单
+  const [batchContext, setBatchContext] = useState<{
+    batchId: string;
+    devices: any[];
+  } | null>(null);
 
   // 在组件加载时检查用户角色并设置初始标签或重定向
   useEffect(() => {
     // 从 user context 获取用户角色（不再使用 localStorage）
-    if (user?.role === "reporter") {
+    const role = user?.role as UserRole | undefined;
+    if (role === UserRole.REPORTER) {
       setActiveTab("repair");
-    } else if (user?.role === "business") {
+    } else if (role === UserRole.BUSINESS) {
       // 商务人员应该访问 /business 页面，而不是首页
-      router.push("/business");
+      router.push(ROUTES.BUSINESS_DASHBOARD);
       return;
-    } else if (user?.role === "admin") {
+    } else if (role === UserRole.ADMIN) {
       // 管理员应该访问 /admin/users 页面
-      router.push("/admin/users");
+      router.push(ROUTES.ADMIN_USERS);
       return;
-    } else if (user?.role === "warehouse") {
+    } else if (role === UserRole.WAREHOUSE) {
       // 仓库管理员应该访问 /warehouse/dashboard 页面
-      router.push("/warehouse/dashboard");
+      router.push(ROUTES.WAREHOUSE_DASHBOARD);
       return;
     } else {
       setActiveTab("home");
@@ -40,19 +48,30 @@ export default function Home() {
     setIsLoading(false);
   }, [user, router]);
 
-  const handleStartRepair = (taskId: string) => {
+  const handleStartRepair = (taskId: string, batchCtx?: { batchId: string; devices: any[] }) => {
     // 如果是"all"，则只切换到维修页面，不设置特定任务ID
     if (taskId === "all") {
       setSelectedTaskId(null);
+      setBatchContext(null);
     } else {
       setSelectedTaskId(taskId);
+      // 保存批次上下文（如果有）
+      setBatchContext(batchCtx || null);
     }
     setActiveTab("repair");
   }
 
   const handleBackToDashboard = () => {
+    // 如果有批次上下文，返回到批次选择（停留在维修工单页面但清除taskId）
+    // 如果没有批次上下文，返回到首页
+    if (batchContext) {
+      setSelectedTaskId(null); // 清除选中的设备，但保持在维修工单页面
+      // 不设置 setActiveTab("home")，保持在 repair 标签
+    } else {
     setSelectedTaskId(null);
+      setBatchContext(null);
     setActiveTab("home");
+    }
   }
 
   // 如果正在加载，显示加载指示器
@@ -103,10 +122,14 @@ export default function Home() {
               onBack={handleBackToDashboard} 
               userType={user?.role}
               taskId={selectedTaskId}
+              batchContext={batchContext}
             />
           )}
         {activeTab === "profile" && (
-          user?.role === "reporter" ? <ReporterProfile /> : <ProfilePage />
+          user?.role === UserRole.REPORTER ? <ReporterProfile /> : <ProfilePage />
+        )}
+        {activeTab === "recycle" && user?.role !== UserRole.REPORTER && (
+          <RecycleBinPage />
         )}
       </main>
         

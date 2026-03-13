@@ -1,5 +1,74 @@
 import { NextResponse } from "next/server"
-import { getDbConnection } from "@/lib/db-config"
+import { prisma } from "@/lib/prisma"
+import { Prisma } from "@prisma/client"
+import { DB_FIELDS, TicketStatus, TicketActionType, normalizeTicketStatus } from "@/lib/enums"
+import { TICKET_QUERY_MESSAGES, API_ERROR_MESSAGES } from "@/lib/api-messages"
+
+// 禁用该路由的缓存，确保详情页每次请求都命中数据库
+export const dynamic = "force-dynamic"
+export const revalidate = 0
+export const fetchCache = "force-no-store"
+
+// ==================== 类型定义 ====================
+interface TicketRecord extends Record<string, unknown> {
+  Id?: number
+  BatchId?: string
+  DeviceSN?: string
+  ModelName?: string
+  ProjectLocation?: string
+  Problem?: string
+  ReportByUserID?: number
+  ExpressCompany?: string
+  CourierCompany?: string
+  TrackingNumber?: string
+  CourierNumber?: string
+  Status?: string
+  CreatedAt?: Date
+  DeviceName?: string
+  MaterialCode?: string
+  Warehouse?: string
+  DeviceImages?: string
+  DevicePhotos?: string
+  DamageImages?: string
+  SubmitDate?: Date
+  TrackingNumber_In?: string
+  SenderAddress?: string
+  ContactInfo?: string
+  ProjectName?: string
+  Category?: string
+  Quantity?: number
+  FullSpec?: string
+  FaultPoint?: string
+  IsChargeable?: number | boolean
+  IsOutsourced?: number | boolean
+  FactoryRepairDate?: Date
+  FactoryTrackingNum?: string
+  SupplierName?: string
+  RepairCost?: number
+  ClientName?: string
+  IsInvoiced?: number | boolean
+  FactoryReceivedDate?: Date
+  ReceivedDate?: Date
+  FactoryShipDate?: Date
+  ReturnDate?: Date
+  ReturnQuantity?: number
+  ReturnTrackingNum?: string
+  CancelRequestStatus?: string
+  CancelRequestReason?: string
+  CancelRequestDate?: Date
+  CancelApprovedBy?: string
+  CancelApprovedDate?: Date
+  SignedReportPhoto?: string
+}
+
+interface HistoryRecord {
+  actionType: string
+  oldStatus?: string | null
+  newStatus?: string | null
+  delayTo?: string | null
+  delayReason?: string | null
+  createdAt: string
+}
 
 // GET /api/tickets/[id]
 // 获取单个维修工单详情
@@ -10,7 +79,7 @@ export async function GET(
   try {
     // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
     const resolvedParams =
-      "then" in (context as any).params
+      "then" in (context as Record<string, unknown>).params
         ? await (context as { params: Promise<{ id: string }> }).params
         : (context as { params: { id: string } }).params
 
@@ -18,216 +87,115 @@ export async function GET(
 
     if (!ticketId) {
       return NextResponse.json(
-        { success: false, message: "工单ID不能为空" },
+        { success: false, message: TICKET_QUERY_MESSAGES.ticketIdEmpty },
         { status: 400 }
       )
     }
 
-    const pool = await getDbConnection()
+    // 判断 ticketId 是数字还是字符串
+    const isNumericId = /^\d+$/.test(ticketId)
+    console.log(isNumericId 
+      ? TICKET_QUERY_MESSAGES.queryByIdLog(ticketId) 
+      : TICKET_QUERY_MESSAGES.queryBySnLog(ticketId)
+    )
 
-    // 动态获取 Repair_Tickets 表的列名，避免大小写或命名不一致导致错误
-    const columnsResult = await pool.request().query(`
-      SELECT COLUMN_NAME
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_NAME = 'Repair_Tickets'
-    `)
-    const columnNames = columnsResult.recordset.map(row => row.COLUMN_NAME as string)
+    // 查询工单信息（使用 Prisma $queryRaw 以支持动态字段）
+    let ticket: TicketRecord | null = null
 
-    // 优先使用主键列，其次使用名字中包含 "id" 的列，最后退回第一列
-    const pkResult = await pool.request().query(`
-      SELECT kcu.COLUMN_NAME
-      FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-        ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-      WHERE tc.TABLE_NAME = 'Repair_Tickets' AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-    `)
-
-    let idColumn: string
-    if (pkResult.recordset.length > 0) {
-      idColumn = pkResult.recordset[0].COLUMN_NAME as string
-    } else {
-      idColumn =
-        columnNames.find((c) => c.toLowerCase().endsWith("id")) ||
-        columnNames.find((c) => c.toLowerCase().includes("id")) ||
-        columnNames[0]
-    }
-
-    const mapColumn = (preferredName: string, fallbackName: string) => {
-      const foundColumn = columnNames.find(col => col.toLowerCase() === preferredName.toLowerCase())
-      return foundColumn || fallbackName
-    }
-
-    const deviceSnColumn = mapColumn("DeviceSN", "DeviceSN")
-    const modelNameColumn = mapColumn("ModelName", "ModelName")
-    const projectLocationColumn = mapColumn("ProjectLocation", "ProjectLocation")
-    const faultDescriptionColumn = mapColumn("FaultDescription", "FaultDescription")
-    const reportByUserIdColumn = mapColumn("ReportByUserID", "ReportByUserID")
-    const courierCompanyColumn = mapColumn("CourierCompany", "CourierCompany")
-    const courierNumberColumn = mapColumn("CourierNumber", "CourierNumber")
-    const statusColumn = mapColumn("Status", "Status")
-    const reportTimeColumn = mapColumn("ReportTime", "ReportTime")
-    const deviceNameColumn = mapColumn("DeviceName", "DeviceName")
-    const materialCodeColumn = mapColumn("MaterialCode", "MaterialCode")
-    const warehouseColumn = mapColumn("Warehouse", "Warehouse")
-    const deviceImagesColumn = mapColumn("DeviceImages", "DeviceImages")
-    const damageImagesColumn = mapColumn("DamageImages", "DamageImages")
-    const productSnColumn = mapColumn("ProductSN", "ProductSN")
-    
-    // 新字段映射
-    const submitDateColumn = mapColumn("SubmitDate", "SubmitDate")
-    const trackingNumberInColumn = mapColumn("TrackingNumber_In", "TrackingNumber_In")
-    const senderAddressColumn = mapColumn("SenderAddress", "SenderAddress")
-    const contactInfoColumn = mapColumn("ContactInfo", "ContactInfo")
-    const projectNameColumn = mapColumn("ProjectName", "ProjectName")
-    const categoryColumn = mapColumn("Category", "Category")
-    const quantityColumn = mapColumn("Quantity", "Quantity")
-    const fullSpecColumn = mapColumn("FullSpec", "FullSpec")
-    const faultPointColumn = mapColumn("FaultPoint", "FaultPoint")
-    const isChargeableColumn = mapColumn("IsChargeable", "IsChargeable")
-    const isOutsourcedColumn = mapColumn("IsOutsourced", "IsOutsourced")
-    const factoryRepairDateColumn = mapColumn("FactoryRepairDate", "FactoryRepairDate")
-    const factoryTrackingNumColumn = mapColumn("FactoryTrackingNum", "FactoryTrackingNum")
-    const supplierNameColumn = mapColumn("SupplierName", "SupplierName")
-    const repairCostColumn = mapColumn("RepairCost", "RepairCost")
-    const clientNameColumn = mapColumn("ClientName", "ClientName")
-    const isInvoicedColumn = mapColumn("IsInvoiced", "IsInvoiced")
-    const factoryReceivedDateColumn = mapColumn("FactoryReceivedDate", "FactoryReceivedDate")
-    const receivedDateColumn = mapColumn("ReceivedDate", "ReceivedDate")
-    const factoryShipDateColumn = mapColumn("FactoryShipDate", "FactoryShipDate")
-    const returnDateColumn = mapColumn("ReturnDate", "ReturnDate")
-    const returnQuantityColumn = mapColumn("ReturnQuantity", "ReturnQuantity")
-    const returnTrackingNumColumn = mapColumn("ReturnTrackingNum", "ReturnTrackingNum")
-    // 取消申请相关字段
-    const cancelRequestStatusColumn = mapColumn("CancelRequestStatus", "CancelRequestStatus")
-    const cancelRequestReasonColumn = mapColumn("CancelRequestReason", "CancelRequestReason")
-    const cancelRequestDateColumn = mapColumn("CancelRequestDate", "CancelRequestDate")
-    const cancelApprovedByColumn = mapColumn("CancelApprovedBy", "CancelApprovedBy")
-    const cancelApprovedDateColumn = mapColumn("CancelApprovedDate", "CancelApprovedDate")
-
-    const selectColumns = [
-      idColumn,
-      deviceSnColumn,
-      modelNameColumn,
-      projectLocationColumn,
-      faultDescriptionColumn,
-      reportByUserIdColumn,
-      courierCompanyColumn,
-      courierNumberColumn,
-      statusColumn,
-      reportTimeColumn,
-      ...(columnNames.includes(deviceNameColumn) ? [deviceNameColumn] : []),
-      ...(columnNames.includes(materialCodeColumn) ? [materialCodeColumn] : []),
-      ...(columnNames.includes(warehouseColumn) ? [warehouseColumn] : []),
-      ...(columnNames.includes(deviceImagesColumn) ? [deviceImagesColumn] : []),
-      ...(columnNames.includes(damageImagesColumn) ? [damageImagesColumn] : []),
-      ...(columnNames.includes(productSnColumn) ? [productSnColumn] : []),
-      // 新字段
-      ...(columnNames.includes(submitDateColumn) ? [submitDateColumn] : []),
-      ...(columnNames.includes(trackingNumberInColumn) ? [trackingNumberInColumn] : []),
-      ...(columnNames.includes(senderAddressColumn) ? [senderAddressColumn] : []),
-      ...(columnNames.includes(contactInfoColumn) ? [contactInfoColumn] : []),
-      ...(columnNames.includes(projectNameColumn) ? [projectNameColumn] : []),
-      ...(columnNames.includes(categoryColumn) ? [categoryColumn] : []),
-      ...(columnNames.includes(quantityColumn) ? [quantityColumn] : []),
-      ...(columnNames.includes(fullSpecColumn) ? [fullSpecColumn] : []),
-      ...(columnNames.includes(faultPointColumn) ? [faultPointColumn] : []),
-      ...(columnNames.includes(isChargeableColumn) ? [isChargeableColumn] : []),
-      ...(columnNames.includes(isOutsourcedColumn) ? [isOutsourcedColumn] : []),
-      ...(columnNames.includes(factoryRepairDateColumn) ? [factoryRepairDateColumn] : []),
-      ...(columnNames.includes(factoryTrackingNumColumn) ? [factoryTrackingNumColumn] : []),
-      ...(columnNames.includes(supplierNameColumn) ? [supplierNameColumn] : []),
-      ...(columnNames.includes(repairCostColumn) ? [repairCostColumn] : []),
-      ...(columnNames.includes(clientNameColumn) ? [clientNameColumn] : []),
-      ...(columnNames.includes(isInvoicedColumn) ? [isInvoicedColumn] : []),
-      ...(columnNames.includes(factoryReceivedDateColumn) ? [factoryReceivedDateColumn] : []),
-      ...(columnNames.includes(receivedDateColumn) ? [receivedDateColumn] : []),
-      ...(columnNames.includes(factoryShipDateColumn) ? [factoryShipDateColumn] : []),
-      ...(columnNames.includes(returnDateColumn) ? [returnDateColumn] : []),
-      ...(columnNames.includes(returnQuantityColumn) ? [returnQuantityColumn] : []),
-      ...(columnNames.includes(returnTrackingNumColumn) ? [returnTrackingNumColumn] : []),
-      // 取消申请相关字段
-      ...(columnNames.includes(cancelRequestStatusColumn) ? [cancelRequestStatusColumn] : []),
-      ...(columnNames.includes(cancelRequestReasonColumn) ? [cancelRequestReasonColumn] : []),
-      ...(columnNames.includes(cancelRequestDateColumn) ? [cancelRequestDateColumn] : []),
-      ...(columnNames.includes(cancelApprovedByColumn) ? [cancelApprovedByColumn] : []),
-      ...(columnNames.includes(cancelApprovedDateColumn) ? [cancelApprovedDateColumn] : []),
-    ]
-      .filter(Boolean)
-      .join(", ")
-
-    // 查询工单信息
-    const result = await pool
-      .request()
-      .input("ticketId", ticketId)
-      .query(`
-        SELECT
-          ${selectColumns}
+    if (isNumericId) {
+      // 通过 ID 查询
+      const result = await prisma.$queryRaw<TicketRecord[]>(Prisma.sql`
+        SELECT TOP 1 *
         FROM Repair_Tickets
-        WHERE ${idColumn} = @ticketId
+        WHERE Id = ${parseInt(ticketId, 10)}
       `)
+      ticket = result[0] || null
+    } else {
+      // 通过 DeviceSN 查询
+      const result = await prisma.$queryRaw<TicketRecord[]>(Prisma.sql`
+        SELECT TOP 1 *
+        FROM Repair_Tickets
+        WHERE DeviceSN = ${ticketId}
+      `)
+      ticket = result[0] || null
+    }
 
-    if (result.recordset.length === 0) {
+    if (!ticket) {
       return NextResponse.json(
-        { success: false, message: "工单不存在" },
+        { success: false, message: TICKET_QUERY_MESSAGES.ticketNotFound },
         { status: 404 }
       )
     }
 
-    const ticket = result.recordset[0]
-
     // 根据设备序列号查询设备详细信息
     let deviceInfo = {
-      deviceName: ticket[modelNameColumn] || "",
+      deviceName: (ticket.ModelName as string) || "",
       modelName: "",
       materialCode: "",
       warehouse: "",
     }
 
-    // 查询历史记录（如果存在）
+    if (ticket.DeviceSN) {
+      try {
+        const device = await prisma.device_Inventory.findFirst({
+          where: {
+            serialNumber: ticket.DeviceSN as string
+          },
+          select: {
+            deviceName: true,
+            modelName: true,
+            materialCode: true
+          }
+        })
+
+        if (device) {
+          deviceInfo = {
+            deviceName: device.deviceName || (ticket.ModelName as string) || "",
+            modelName: device.modelName || "",
+            materialCode: device.materialCode || "",
+            warehouse: "", // Device_Inventory 表中没有 warehouse 字段，从 Repair_Tickets 表获取
+          }
+        }
+      } catch (deviceError: unknown) {
+        const errorMessage = deviceError instanceof Error ? deviceError.message : "查询设备信息失败"
+        console.error("查询设备信息失败:", errorMessage)
+        // 查询失败时，继续使用工单表中的数据
+      }
+    }
+
+    // 查询历史记录
     let expectedCompletionDate: string | null = null
     let delayReason: string | null = null
-    let history: {
-      actionType: string
-      oldStatus?: string | null
-      newStatus?: string | null
-      delayTo?: string | null
-      delayReason?: string | null
-      createdAt: string
-    }[] = []
+    let history: HistoryRecord[] = []
 
     try {
-      const historyResult = await pool
-        .request()
-        .input("ticketId", ticketId.toString())
-        .query(`
-          IF OBJECT_ID('dbo.Repair_Ticket_History', 'U') IS NOT NULL
-          BEGIN
-            SELECT TicketID, ActionType, OldStatus, NewStatus, DelayTo, DelayReason, CreatedAt
-            FROM [dbo].[Repair_Ticket_History]
-            WHERE TicketID = @ticketId
-            ORDER BY CreatedAt ASC
-          END
-          ELSE
-          BEGIN
-            SELECT CAST(NULL AS NVARCHAR(50)) AS TicketID,
-                   CAST(NULL AS NVARCHAR(50)) AS ActionType,
-                   CAST(NULL AS NVARCHAR(50)) AS OldStatus,
-                   CAST(NULL AS NVARCHAR(50)) AS NewStatus,
-                   CAST(NULL AS DATETIME) AS DelayTo,
-                   CAST(NULL AS NVARCHAR(500)) AS DelayReason,
-                   CAST(NULL AS DATETIME) AS CreatedAt
-          END
-        `)
+      const ticketIdForHistory = ticket.Id?.toString() || ticketId
+      const historyLogs = await prisma.repair_Ticket_History.findMany({
+        where: {
+          ticketId: ticketIdForHistory
+        },
+        orderBy: {
+          createdAt: 'asc'
+        },
+        select: {
+          actionType: true,
+          oldStatus: true,
+          newStatus: true,
+          delayTo: true,
+          delayReason: true,
+          createdAt: true
+        }
+      })
 
-      history = historyResult.recordset
-        .filter((row: any) => row.ActionType)
-        .map((row: any) => ({
-          actionType: row.ActionType,
-          oldStatus: row.OldStatus,
-          newStatus: row.NewStatus,
-          delayTo: row.DelayTo ? new Date(row.DelayTo).toISOString() : null,
-          delayReason: row.DelayReason || null,
-          createdAt: row.CreatedAt ? new Date(row.CreatedAt).toISOString() : new Date().toISOString(),
+      history = historyLogs
+        .filter((record) => record.actionType)
+        .map((record) => ({
+          actionType: record.actionType || "",
+          oldStatus: record.oldStatus || null,
+          newStatus: record.newStatus || null,
+          delayTo: record.delayTo ? (record.delayTo instanceof Date ? record.delayTo.toISOString() : new Date(record.delayTo).toISOString()) : null,
+          delayReason: record.delayReason || null,
+          createdAt: record.createdAt ? (record.createdAt instanceof Date ? record.createdAt.toISOString() : new Date(record.createdAt).toISOString()) : new Date().toISOString(),
         }))
 
       const lastDelay = history
@@ -238,174 +206,176 @@ export async function GET(
         expectedCompletionDate = lastDelay.delayTo || null
         delayReason = lastDelay.delayReason || null
       }
-    } catch (historyError: any) {
-      console.error("查询延期记录失败:", historyError?.message)
-    }
-
-    if (ticket[deviceSnColumn]) {
-      try {
-        const deviceResult = await pool
-          .request()
-          .input("serialNumber", ticket[deviceSnColumn])
-          .query(`
-            SELECT TOP 1 DeviceName, ModelName, MaterialCode, Warehouse
-            FROM Device_Inventory
-            WHERE SerialNumber = @serialNumber
-          `)
-
-        if (deviceResult.recordset.length > 0) {
-          const device = deviceResult.recordset[0]
-          deviceInfo = {
-            deviceName: device.DeviceName || ticket[modelNameColumn] || "",
-            modelName: device.ModelName || "",
-            materialCode: device.MaterialCode || "",
-            warehouse: device.Warehouse || "",
-          }
-        }
-      } catch (deviceError: any) {
-        console.error("查询设备信息失败:", deviceError?.message)
-        // 查询失败时，继续使用工单表中的数据
-      }
+    } catch (historyError: unknown) {
+      const errorMessage = historyError instanceof Error ? historyError.message : "查询延期记录失败"
+      console.error("查询延期记录失败:", errorMessage)
     }
 
     // 根据 ReportByUserID 查询报告人的真实姓名和手机号
-    let reporterName = ticket[reportByUserIdColumn]?.toString() || ""
+    let reporterName = ticket.ReportByUserID?.toString() || ""
     let reporterPhone = ""
 
-    // 检查 Users 表是否有 PhoneNumber 字段
-    let hasPhoneNumberColumn = false
-    try {
-      const phoneColumnCheck = await pool
-        .request()
-        .query(`
-          SELECT COLUMN_NAME
-          FROM INFORMATION_SCHEMA.COLUMNS
-          WHERE TABLE_NAME = 'Users' AND COLUMN_NAME = 'PhoneNumber'
-        `)
-      hasPhoneNumberColumn = phoneColumnCheck.recordset.length > 0
-    } catch (phoneCheckError: any) {
-      console.error("检查 Users.PhoneNumber 字段失败:", phoneCheckError?.message)
-    }
-
-    if (ticket[reportByUserIdColumn]) {
+    if (ticket.ReportByUserID) {
       try {
-        const userResult = await pool
-          .request()
-          .input("userId", ticket[reportByUserIdColumn])
-          .query(`
-            SELECT TOP 1 RealName, Username${hasPhoneNumberColumn ? ", PhoneNumber" : ""}
-            FROM Users
-            WHERE UserID = @userId
-          `)
-
-        if (userResult.recordset.length > 0) {
-          const user = userResult.recordset[0]
-          // 优先使用 RealName，如果没有则使用 Username
-          reporterName = user.RealName || user.Username || ticket[reportByUserIdColumn]?.toString() || ""
-          if (hasPhoneNumberColumn) {
-            reporterPhone = user.PhoneNumber || ""
+        const user = await prisma.users.findUnique({
+          where: {
+            userId: ticket.ReportByUserID
+          },
+          select: {
+            realName: true,
+            Username: true,
+            phoneNumber: true
           }
+        })
+
+        if (user) {
+          // 优先使用 realName，如果没有则使用 Username（注意大小写）
+          reporterName = user.realName || user.Username || ticket.ReportByUserID.toString()
+          reporterPhone = user.phoneNumber || ""
         }
-      } catch (userError: any) {
-        console.error("查询报告人信息失败:", userError?.message)
+      } catch (userError: unknown) {
+        const errorMessage = userError instanceof Error ? userError.message : "查询报告人信息失败"
+        console.error("查询报告人信息失败:", errorMessage)
         // 查询失败时，使用用户ID作为后备
-        reporterName = ticket[reportByUserIdColumn]?.toString() || ""
+        reporterName = ticket.ReportByUserID.toString()
       }
     }
 
-    // 状态映射：统一状态值
-    const dbStatus = ticket[statusColumn] || "Created"
-    const statusLower = (dbStatus || "").toLowerCase().trim()
-    let mappedStatus = dbStatus // 默认使用原始值
+    // 状态映射：统一状态值，复用全局状态规范化工具
+    const dbStatus = (ticket.Status as string) || "Created"
+    const normalizedStatus = normalizeTicketStatus(dbStatus) || TicketStatus.CREATED
+    const mappedStatus = normalizedStatus
     
-    // 统一状态值
-    if (statusLower === "created" || statusLower === "pending") {
-      mappedStatus = "Created"
-    } else if (statusLower === "in_repair" || statusLower === "processing") {
-      mappedStatus = "In_Repair"
-    } else if (statusLower === "pending_factory") {
-      mappedStatus = "Pending_Factory"
-    } else if (statusLower === "factory_finished") {
-      mappedStatus = "Factory_Finished"
-    } else if (statusLower === "admin_review") {
-      mappedStatus = "Admin_Review"
-    } else if (statusLower === "pending_shipment") {
-      mappedStatus = "Pending_Shipment"
-    } else if (statusLower === "completed") {
-      mappedStatus = "Completed"
-    } else if (statusLower === "unrepairable") {
-      mappedStatus = "Unrepairable"
-    } else {
-      // 如果状态未知，默认设为 Created
-      mappedStatus = "Created"
+    // 调试：记录关键字段值
+    console.log("🔍 [API] 票据字段原始值:", {
+      ticketId,
+      Problem: ticket.Problem,
+      ContactInfo: ticket.ContactInfo,
+      SenderAddress: ticket.SenderAddress,
+      ProjectLocation: ticket.ProjectLocation,
+      ModelName: ticket.ModelName
+    })
+
+    // 辅助函数：安全获取字段值
+    const getField = <T>(field: keyof TicketRecord, defaultValue: T): T => {
+      const value = ticket[field]
+      if (value === null || value === undefined) {
+        return defaultValue
+      }
+      return value as T
     }
+
+    const getDateField = (field: keyof TicketRecord): string | undefined => {
+      const value = ticket[field]
+      if (value instanceof Date) {
+        return value.toISOString()
+      }
+      if (value) {
+        const date = new Date(value as string | number)
+        if (!isNaN(date.getTime())) {
+          return date.toISOString()
+        }
+      }
+      return undefined
+    }
+
+    const getBooleanField = (field: keyof TicketRecord): boolean => {
+      const value = ticket[field]
+      if (typeof value === "boolean") {
+        return value
+      }
+      if (typeof value === "number") {
+        return value === 1
+      }
+      if (typeof value === "string") {
+        return value === "true" || value === "1"
+      }
+      return false
+    }
+
+    // 照片字段：优先使用 DeviceImages，如果没有则使用 DevicePhotos（兼容旧数据）
+    const deviceImages = (ticket.DeviceImages as string) || (ticket.DevicePhotos as string) || ""
+    const damageImages = (ticket.DamageImages as string) || ""
+    const signedReportPhoto = (ticket.SignedReportPhoto as string) || null
+
+    const responseData = {
+      id: ticket.Id?.toString() || "",
+      batchId: (ticket.BatchId as string) || null,
+      deviceSerialNumber: (ticket.DeviceSN as string) || "",
+      productSN: (ticket.DeviceSN as string) || "",  // productSN 和 deviceSN 是同一列
+      deviceName: deviceInfo.deviceName || (ticket.DeviceName as string) || "",
+      deviceModel: deviceInfo.modelName || (ticket.ModelName as string) || "",
+      projectLocation: (ticket.ProjectLocation as string) || "",
+      problem: (ticket.Problem as string) || "",
+      status: mappedStatus, // 使用映射后的状态值
+      reportedBy: reporterName,
+      reporterPhone,
+      reportedAt: getDateField("CreatedAt") || new Date().toISOString(),
+      courierCompany: (ticket.CourierCompany as string) || (ticket.ExpressCompany as string) || "",
+      trackingNumber: (ticket.CourierNumber as string) || (ticket.TrackingNumber as string) || "",
+      materialCode: deviceInfo.materialCode || (ticket.MaterialCode as string) || "",
+      warehouse: deviceInfo.warehouse || (ticket.Warehouse as string) || "",
+      deviceImages, // 修复照片字段
+      damageImages, // 修复照片字段
+      expectedCompletionDate,
+      delayReason,
+      history,
+      // 新字段
+      submitDate: getDateField("SubmitDate"),
+      trackingNumberIn: (ticket.TrackingNumber_In as string) || "",
+      senderAddress: (ticket.SenderAddress as string) || "",
+      contactInfo: (ticket.ContactInfo as string) || "",
+      projectName: (ticket.ProjectName as string) || "",
+      category: (ticket.Category as string) || "",
+      modelName: (ticket.ModelName as string) || "",
+      quantity: (ticket.Quantity as number) || 1,
+      faultDescription: (ticket.Problem as string) || "",
+      fullSpec: (ticket.FullSpec as string) || "",
+      faultPoint: (ticket.FaultPoint as string) || "",
+      isChargeable: getBooleanField("IsChargeable"),
+      isOutsourced: getBooleanField("IsOutsourced"),
+      factoryRepairDate: getDateField("FactoryRepairDate"),
+      factoryTrackingNum: (ticket.FactoryTrackingNum as string) || "",
+      supplierName: (ticket.SupplierName as string) || "",
+      repairCost: (ticket.RepairCost as number) || null,
+      clientName: (ticket.ClientName as string) || "",
+      isInvoiced: getBooleanField("IsInvoiced"),
+      factoryReceivedDate: getDateField("FactoryReceivedDate"),
+      receivedDate: getDateField("ReceivedDate"),
+      factoryShipDate: getDateField("FactoryShipDate"),
+      returnDate: getDateField("ReturnDate"),
+      returnQuantity: (ticket.ReturnQuantity as number) || 1,
+      returnTrackingNum: (ticket.ReturnTrackingNum as string) || "",
+      // 取消申请相关字段
+      cancelRequestStatus: (ticket.CancelRequestStatus as string) || null,
+      cancelRequestReason: (ticket.CancelRequestReason as string) || null,
+      cancelRequestDate: getDateField("CancelRequestDate") || null,
+      cancelApprovedBy: (ticket.CancelApprovedBy as string) || null,
+      cancelApprovedDate: getDateField("CancelApprovedDate") || null,
+      // 签字报告照片
+      signedReportPhoto, // 修复照片字段
+      // 3W1H 相关字段（如果已有历史数据，则一并返回）
+      warrantyStatus: (ticket.WarrantyStatus as string) || null,
+      warrantyStatusOverride: (ticket.WarrantyStatusOverride as string) || null,
+      faultCategory: (ticket.FaultCategory as string) || null,
+      repairAction: (ticket.RepairAction as string) || null,
+      repairNotes: (ticket.RepairNotes as string) || null,
+    }
+
+    console.log("✅ [API] 返回数据:", responseData)
     
     return NextResponse.json({
       success: true,
-      data: {
-        id: ticket[idColumn]?.toString() || "",
-        deviceSerialNumber: ticket[deviceSnColumn] || "",
-        productSN: ticket[productSnColumn] || ticket[deviceSnColumn] || "",
-        deviceName: deviceInfo.deviceName || ticket[deviceNameColumn] || "",
-        deviceModel: deviceInfo.modelName || ticket[modelNameColumn] || "",
-        projectLocation: ticket[projectLocationColumn] || "",
-        problem: ticket[faultDescriptionColumn] || "",
-        status: mappedStatus, // 使用映射后的状态值
-        reportedBy: reporterName,
-        reporterPhone,
-        reportedAt: ticket[reportTimeColumn]
-          ? new Date(ticket[reportTimeColumn]).toISOString()
-          : new Date().toISOString(),
-        courierCompany: ticket[courierCompanyColumn] || "",
-        trackingNumber: ticket[courierNumberColumn] || "",
-        materialCode: deviceInfo.materialCode || ticket[materialCodeColumn] || "",
-        warehouse: deviceInfo.warehouse || ticket[warehouseColumn] || "",
-        deviceImages: ticket[deviceImagesColumn] || "",
-        damageImages: ticket[damageImagesColumn] || "",
-        expectedCompletionDate,
-        delayReason,
-        history,
-        // 新字段
-        submitDate: ticket[submitDateColumn] ? new Date(ticket[submitDateColumn]).toISOString() : undefined,
-        trackingNumberIn: ticket[trackingNumberInColumn] || "",
-        senderAddress: ticket[senderAddressColumn] || "",
-        contactInfo: ticket[contactInfoColumn] || "",
-        projectName: ticket[projectNameColumn] || "",
-        category: ticket[categoryColumn] || "",
-        modelName: ticket[modelNameColumn] || "",
-        quantity: ticket[quantityColumn] || 1,
-        faultDescription: ticket[faultDescriptionColumn] || "",
-        fullSpec: ticket[fullSpecColumn] || "",
-        faultPoint: ticket[faultPointColumn] || "",
-        isChargeable: ticket[isChargeableColumn] === 1 || ticket[isChargeableColumn] === true,
-        isOutsourced: ticket[isOutsourcedColumn] === 1 || ticket[isOutsourcedColumn] === true,
-        factoryRepairDate: ticket[factoryRepairDateColumn] ? new Date(ticket[factoryRepairDateColumn]).toISOString() : undefined,
-        factoryTrackingNum: ticket[factoryTrackingNumColumn] || "",
-        supplierName: ticket[supplierNameColumn] || "",
-        repairCost: ticket[repairCostColumn] || null,
-        clientName: ticket[clientNameColumn] || "",
-        isInvoiced: ticket[isInvoicedColumn] === 1 || ticket[isInvoicedColumn] === true,
-        factoryReceivedDate: ticket[factoryReceivedDateColumn] ? new Date(ticket[factoryReceivedDateColumn]).toISOString() : undefined,
-        receivedDate: ticket[receivedDateColumn] ? new Date(ticket[receivedDateColumn]).toISOString() : undefined,
-        factoryShipDate: ticket[factoryShipDateColumn] ? new Date(ticket[factoryShipDateColumn]).toISOString() : undefined,
-        returnDate: ticket[returnDateColumn] ? new Date(ticket[returnDateColumn]).toISOString() : undefined,
-        returnQuantity: ticket[returnQuantityColumn] || 1,
-        returnTrackingNum: ticket[returnTrackingNumColumn] || "",
-        // 取消申请相关字段
-        cancelRequestStatus: ticket[cancelRequestStatusColumn] || null,
-        cancelRequestReason: ticket[cancelRequestReasonColumn] || null,
-        cancelRequestDate: ticket[cancelRequestDateColumn] ? new Date(ticket[cancelRequestDateColumn]).toISOString() : null,
-        cancelApprovedBy: ticket[cancelApprovedByColumn] || null,
-        cancelApprovedDate: ticket[cancelApprovedDateColumn] ? new Date(ticket[cancelApprovedDateColumn]).toISOString() : null,
-      },
+      data: responseData,
     })
-  } catch (error: any) {
-    console.error("获取维修工单详情失败:", error)
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "获取工单详情失败"
+    console.error(TICKET_QUERY_MESSAGES.getFailed, error)
     return NextResponse.json(
       {
         success: false,
-        message: "获取维修工单详情时发生错误",
-        error: error?.message || "未知错误",
+        message: TICKET_QUERY_MESSAGES.getError,
+        error: errorMessage || API_ERROR_MESSAGES.unknownError,
       },
       { status: 500 }
     )
@@ -423,7 +393,7 @@ export async function PUT(
     
     // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
     const resolvedParams =
-      "then" in (context as any).params
+      "then" in (context as Record<string, unknown>).params
         ? await (context as { params: Promise<{ id: string }> }).params
         : (context as { params: { id: string } }).params
 
@@ -431,111 +401,98 @@ export async function PUT(
 
     if (!ticketId) {
       return NextResponse.json(
-        { success: false, message: "工单ID不能为空" },
+        { success: false, message: TICKET_QUERY_MESSAGES.ticketIdEmpty },
         { status: 400 }
       )
     }
 
-    const pool = await getDbConnection()
-
-    // 获取表结构
-    const columnsResult = await pool.request().query(`
-      SELECT COLUMN_NAME
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_NAME = 'Repair_Tickets'
-    `)
-    const columnNames = columnsResult.recordset.map((row: any) => row.COLUMN_NAME as string)
-
-    // 获取主键列
-    const pkResult = await pool.request().query(`
-      SELECT kcu.COLUMN_NAME
-      FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-        ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-      WHERE tc.TABLE_NAME = 'Repair_Tickets' AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-    `)
-
-    let idColumn: string
-    if (pkResult.recordset.length > 0) {
-      idColumn = pkResult.recordset[0].COLUMN_NAME as string
-    } else {
-      idColumn =
-        columnNames.find((c) => c.toLowerCase().endsWith("id")) ||
-        columnNames.find((c) => c.toLowerCase().includes("id")) ||
-        columnNames[0]
-    }
+    // 判断 ticketId 是数字还是字符串
+    const isNumericId = /^\d+$/.test(ticketId)
+    console.log(`🔍 [PUT] ` + (isNumericId 
+      ? TICKET_QUERY_MESSAGES.queryByIdLog(ticketId) 
+      : TICKET_QUERY_MESSAGES.queryBySnLog(ticketId)
+    ))
 
     // 检查工单是否存在，并获取当前状态
-    const checkResult = await pool
-      .request()
-      .input("ticketId", ticketId)
-      .query(`
-        SELECT ${idColumn} as Id, Status, ProductSN, ModelName, MaterialCode, FullSpec, FaultPoint
-        FROM Repair_Tickets
-        WHERE ${idColumn} = @ticketId
-      `)
+    let currentTicket: TicketRecord | null = null
 
-    if (checkResult.recordset.length === 0) {
+    if (isNumericId) {
+      const result = await prisma.$queryRaw<TicketRecord[]>(Prisma.sql`
+        SELECT TOP 1 Id, Status, DeviceSN as ProductSN, ModelName, MaterialCode, FullSpec, FaultPoint
+        FROM Repair_Tickets
+        WHERE Id = ${parseInt(ticketId, 10)}
+      `)
+      currentTicket = result[0] || null
+    } else {
+      const result = await prisma.$queryRaw<TicketRecord[]>(Prisma.sql`
+        SELECT TOP 1 Id, Status, DeviceSN as ProductSN, ModelName, MaterialCode, FullSpec, FaultPoint
+        FROM Repair_Tickets
+        WHERE DeviceSN = ${ticketId}
+      `)
+      currentTicket = result[0] || null
+    }
+
+    if (!currentTicket || !currentTicket.Id) {
       return NextResponse.json(
-        { success: false, message: "工单不存在" },
+        { success: false, message: TICKET_QUERY_MESSAGES.ticketNotFound },
         { status: 404 }
       )
     }
 
-    const currentTicket = checkResult.recordset[0] as {
-      Id: number
-      Status?: string
-      ProductSN?: string
-      ModelName?: string
-      MaterialCode?: string
-      FullSpec?: string
-      FaultPoint?: string
-    }
+    const actualTicketId = currentTicket.Id as number
+    console.log(`✅ [PUT] 找到工单，实际ID: ${actualTicketId}, DeviceSN: ${currentTicket.ProductSN}`)
 
-    const currentStatus = (currentTicket.Status || "").toString()
-    const mapColumn = (preferredName: string) => {
-      return columnNames.find((col) => col.toLowerCase() === preferredName.toLowerCase()) || preferredName
-    }
+    const currentStatus = (currentTicket.Status as string) || ""
 
-    // 构建动态更新语句
-    const updateFields: string[] = []
-    const updateRequest = pool.request().input("ticketId", ticketId)
+    // 构建更新数据对象（使用 Prisma 的 update 方法）
+    const updateData: Record<string, unknown> = {}
 
-    // 字段映射：前端字段名 -> 数据库列名
+    // ===== 状态流转逻辑变量初始化 =====
+    // 状态变更只允许通过两种方式触发：
+    //   1. 前端显式传入 body.status（各工作流节点的专用操作）
+    //   2. 专用工作流 API（如 warehouse-confirm-batch、reporter-confirm、batch-repair-report 等）
+    //   3. 填写返厂快递单号时自动更新为 PENDING_FACTORY（新增）
+    let newStatus: string | null = null
+    const statusAutoUpdated = false
+
+    // 字段映射：前端字段名 -> Prisma 字段名
     const fieldMappings: Record<string, string> = {
-      // 现场人员填报区
-      submitDate: mapColumn("SubmitDate"),
-      trackingNumberIn: mapColumn("TrackingNumber_In"),
-      senderAddress: mapColumn("SenderAddress"),
-      contactInfo: mapColumn("ContactInfo"),
-      projectName: mapColumn("ProjectName"),
-      category: mapColumn("Category"),
-      modelName: mapColumn("ModelName"),
-      quantity: mapColumn("Quantity"),
-      productSN: mapColumn("ProductSN"),
-      faultDescription: mapColumn("FaultDescription"),
-      // 维修人员填写区
-      materialCode: mapColumn("MaterialCode"),
-      deviceName: mapColumn("DeviceName"),
-      fullSpec: mapColumn("FullSpec"),
-      faultPoint: mapColumn("FaultPoint"),
-      // 管理员填写区
-      isChargeable: mapColumn("IsChargeable"),
-      factoryRepairDate: mapColumn("FactoryRepairDate"),
-      factoryTrackingNum: mapColumn("FactoryTrackingNum"),
-      supplierName: mapColumn("SupplierName"),
-      repairCost: mapColumn("RepairCost"),
-      clientName: mapColumn("ClientName"),
-      isInvoiced: mapColumn("IsInvoiced"),
-      factoryReceivedDate: mapColumn("FactoryReceivedDate"),
-      // 仓库管理员填写区
-      receivedDate: mapColumn("ReceivedDate"),
-      factoryShipDate: mapColumn("FactoryShipDate"),
-      returnDate: mapColumn("ReturnDate"),
-      returnQuantity: mapColumn("ReturnQuantity"),
-      returnTrackingNum: mapColumn("ReturnTrackingNum"),
-      // 其他字段
-      status: mapColumn("Status"),
+      submitDate: "SubmitDate",
+      trackingNumberIn: "TrackingNumber_In",
+      senderAddress: "SenderAddress",
+      contactInfo: "ContactInfo",
+      projectName: "ProjectName",
+      category: "Category",
+      modelName: "ModelName",
+      quantity: "Quantity",
+      productSN: "DeviceSN",
+      faultDescription: "Problem",
+      materialCode: "MaterialCode",
+      deviceName: "DeviceName",
+      fullSpec: "FullSpec",
+      faultPoint: "FaultPoint",
+      isChargeable: "IsChargeable",
+      factoryRepairDate: "FactoryRepairDate",
+      factoryTrackingNum: "FactoryTrackingNum",
+      supplierName: "SupplierName",
+      repairCost: "RepairCost",
+      clientName: "ClientName",
+      isInvoiced: "IsInvoiced",
+      factoryReceivedDate: "FactoryReceivedDate",
+      receivedDate: "ReceivedDate",
+      factoryShipDate: "FactoryShipDate",
+      returnDate: "ReturnDate",
+      returnQuantity: "ReturnQuantity",
+      returnTrackingNum: "ReturnTrackingNum",
+      status: "Status",
+      // 照片字段
+      deviceImages: "DeviceImages",
+      damageImages: "DamageImages",
+      // 3W1H 新字段（维修工作台）
+      warrantyStatusOverride: "WarrantyStatusOverride",
+      faultCategory: "FaultCategory",
+      repairAction: "RepairAction",
+      repairNotes: "RepairNotes",
     }
 
     // 记录哪些字段被更新了（用于自动状态流转和物料代码匹配）
@@ -545,13 +502,7 @@ export async function PUT(
     let modelNameUpdated = false
 
     // 处理每个字段
-    for (const [fieldName, dbColumnName] of Object.entries(fieldMappings)) {
-      // 检查字段是否存在
-      if (!columnNames.some((col) => col.toLowerCase() === dbColumnName.toLowerCase())) {
-        continue
-      }
-
-      // 检查前端是否传了这个字段
+    for (const [fieldName, dbFieldName] of Object.entries(fieldMappings)) {
       if (!(fieldName in body)) {
         continue
       }
@@ -575,25 +526,22 @@ export async function PUT(
       // 处理不同类型的值
       if (value === null || value === undefined || value === "") {
         // 空值：设置为 NULL
-        updateFields.push(`[${dbColumnName}] = NULL`)
+        updateData[dbFieldName] = null
       } else if (fieldName === "isChargeable" || fieldName === "isInvoiced") {
         // 布尔值
-        const boolValue = value === true || value === "true" || value === 1 || value === "1" ? 1 : 0
-        updateFields.push(`[${dbColumnName}] = @${fieldName}`)
-        updateRequest.input(fieldName, boolValue)
+        const boolValue = value === true || value === "true" || value === 1 || value === "1"
+        updateData[dbFieldName] = boolValue
       } else if (fieldName === "quantity" || fieldName === "returnQuantity") {
         // 整数
         const intValue = Number(value)
         if (!isNaN(intValue)) {
-          updateFields.push(`[${dbColumnName}] = @${fieldName}`)
-          updateRequest.input(fieldName, intValue)
+          updateData[dbFieldName] = intValue
         }
       } else if (fieldName === "repairCost") {
         // 小数
         const decimalValue = Number(value)
         if (!isNaN(decimalValue)) {
-          updateFields.push(`[${dbColumnName}] = @${fieldName}`)
-          updateRequest.input(fieldName, decimalValue)
+          updateData[dbFieldName] = decimalValue
         }
       } else if (
         fieldName === "submitDate" ||
@@ -605,21 +553,48 @@ export async function PUT(
         // 日期时间
         const dateValue = value instanceof Date ? value : new Date(value)
         if (!isNaN(dateValue.getTime())) {
-          updateFields.push(`[${dbColumnName}] = @${fieldName}`)
-          updateRequest.input(fieldName, dateValue)
+          updateData[dbFieldName] = dateValue
+        }
+      } else if (fieldName === "deviceImages" || fieldName === "damageImages") {
+        // 照片字段：如果是数组，转换为 JSON 字符串；如果是字符串，直接使用
+        if (Array.isArray(value)) {
+          updateData[dbFieldName] = JSON.stringify(value)
+        } else if (typeof value === "string") {
+          // 如果已经是 JSON 字符串，直接使用；否则包装成数组
+          try {
+            JSON.parse(value) // 验证是否为有效 JSON
+            updateData[dbFieldName] = value
+          } catch {
+            // 不是有效 JSON，包装成数组
+            updateData[dbFieldName] = JSON.stringify([value])
+          }
+        } else {
+          updateData[dbFieldName] = null
         }
       } else {
         // 字符串
-        updateFields.push(`[${dbColumnName}] = @${fieldName}`)
-        updateRequest.input(fieldName, String(value).trim())
+        updateData[dbFieldName] = String(value).trim()
+      }
+    }
+
+    // 检查是否填写了返厂快递单号（在字段处理完成后）
+    if (body.factoryTrackingNum !== undefined && body.factoryTrackingNum !== null && body.factoryTrackingNum !== "") {
+      // 如果填写了返厂快递单号，且当前状态不是 PENDING_FACTORY，则自动更新状态
+      const normalizedCurrentStatus = normalizeTicketStatus(currentStatus)
+      if (normalizedCurrentStatus !== TicketStatus.PENDING_FACTORY) {
+        newStatus = TicketStatus.PENDING_FACTORY
+        // 使用 fieldMappings 中定义的数据库列名（确保一致性）
+        const statusDbField = fieldMappings.status
+        updateData[statusDbField] = TicketStatus.PENDING_FACTORY
+        console.log(`✅ [返厂申请] 检测到返厂快递单号填写，自动更新状态为 ${TicketStatus.PENDING_FACTORY}`)
       }
     }
 
     // 如果没有要更新的字段，直接返回
-    if (updateFields.length === 0) {
+    if (Object.keys(updateData).length === 0) {
       return NextResponse.json({
         success: true,
-        message: "没有需要更新的字段",
+        message: TICKET_QUERY_MESSAGES.updateNoFields,
       })
     }
 
@@ -627,147 +602,192 @@ export async function PUT(
     // 如果 ProductSN 或 ModelName 被更新，尝试从 Inventory 表自动补全 MaterialCode 和 FullSpec
     if ((productSNUpdated || modelNameUpdated) && (!currentTicket.MaterialCode || !currentTicket.FullSpec)) {
       try {
-        const productSN = body.productSN || currentTicket.ProductSN
-        const modelName = body.modelName || currentTicket.ModelName
+        const productSN = (body.productSN as string) || (currentTicket.ProductSN as string)
+        const modelName = (body.modelName as string) || (currentTicket.ModelName as string)
 
         if (productSN && productSN !== "PENDING") {
-          const deviceResult = await pool
-            .request()
-            .input("serialNumber", productSN)
-            .query(`
-              SELECT TOP 1 MaterialCode, ModelName, DeviceName
-              FROM Device_Inventory
-              WHERE SerialNumber = @serialNumber
-            `)
-
-          if (deviceResult.recordset.length > 0) {
-            const device = deviceResult.recordset[0] as {
-              MaterialCode?: string
-              ModelName?: string
-              DeviceName?: string
+          const device = await prisma.device_Inventory.findFirst({
+            where: {
+              serialNumber: productSN
+            },
+            select: {
+              materialCode: true,
+              modelName: true,
+              deviceName: true
             }
+          })
 
+          if (device) {
             // 如果 MaterialCode 为空，尝试从 Inventory 补全
-            if (!currentTicket.MaterialCode && device.MaterialCode) {
-              const materialCodeCol = mapColumn("MaterialCode")
-              if (columnNames.some((col) => col.toLowerCase() === materialCodeCol.toLowerCase())) {
-                updateFields.push(`[${materialCodeCol}] = @autoMaterialCode`)
-                updateRequest.input("autoMaterialCode", device.MaterialCode)
-              }
+            if (!currentTicket.MaterialCode && device.materialCode) {
+              updateData["MaterialCode"] = device.materialCode
             }
 
             // 如果 FullSpec 为空，尝试从 Inventory 补全（使用 ModelName 或 DeviceName）
             if (!currentTicket.FullSpec) {
-              const fullSpecValue = device.ModelName || device.DeviceName || modelName
+              const fullSpecValue = device.modelName || device.deviceName || modelName
               if (fullSpecValue) {
-                const fullSpecCol = mapColumn("FullSpec")
-                if (columnNames.some((col) => col.toLowerCase() === fullSpecCol.toLowerCase())) {
-                  updateFields.push(`[${fullSpecCol}] = @autoFullSpec`)
-                  updateRequest.input("autoFullSpec", fullSpecValue)
-                }
+                updateData["FullSpec"] = fullSpecValue
               }
             }
           }
         }
-      } catch (inventoryError: any) {
-        console.error("自动补全物料代码失败:", inventoryError?.message)
+      } catch (inventoryError: unknown) {
+        const errorMessage = inventoryError instanceof Error ? inventoryError.message : "自动补全物料代码失败"
+        console.error("自动补全物料代码失败:", errorMessage)
         // 不影响主流程，继续执行
       }
     }
 
-    // ===== 自动状态流转逻辑 =====
-    let newStatus: string | null = null
-    let statusAutoUpdated = false
+    // ===== 状态流转逻辑说明 =====
+    // ⚠️ 所有自动流转规则已禁用（遗留逻辑，与新工作流冲突）：
+    //
+    // ❌ 原规则1（已删除）：填写 FaultPoint 时自动跳转到 Admin_Review
+    //    → 与新流程冲突：维修人员保存报告后状态应保持 In_Repair，
+    //      必须通过"发送给现场人员"显式操作才能推进流程。
+    //
+    // ❌ 原规则2（已删除）：填写 repairCost/clientName 时从 Admin_Review 跳转到 Pending_Shipment
+    //    → 商务流转由专用商务审核 API 负责。
+    //
+    // ❌ 原规则3（已删除）：填写 ReturnTrackingNum 时自动标记为 Completed
+    //    → 仓库发货由专用 warehouse-shipping-batch API 负责。
+    //
+    // ✅ 新增规则：填写返厂快递单号（factoryTrackingNum）时，自动更新状态为 PENDING_FACTORY
+    //    → 这样批次会出现在仓库的"待发货批次"列表中
 
-    // 规则1：维修人员填完 FaultPoint 时，如果状态是待处理或维修中，自动转为待商务处理
-    if (faultPointUpdated && (currentStatus === "Created" || currentStatus === "Pending" || currentStatus === "In_Repair")) {
-      // 如果前端没有传 status，才自动更新
-      if (!("status" in body)) {
-        newStatus = "Admin_Review"
-        statusAutoUpdated = true
-        const statusCol = mapColumn("Status")
-        if (columnNames.some((col) => col.toLowerCase() === statusCol.toLowerCase())) {
-          updateFields.push(`[${statusCol}] = @autoStatus1`)
-          updateRequest.input("autoStatus1", "Admin_Review")
+    // 执行更新（使用 Prisma $executeRaw 配合 Prisma.sql 确保参数安全）
+    // 参考 batch-update 的实现方式，使用 Prisma.sql 模板
+    if (Object.keys(updateData).length > 0) {
+      const updateFields: string[] = []
+
+      for (const [key, value] of Object.entries(updateData)) {
+        if (value === null) {
+          updateFields.push(`[${key}] = NULL`)
+        } else if (typeof value === "string") {
+          // 转义单引号，防止 SQL 注入
+          const escapedValue = value.replace(/'/g, "''")
+          updateFields.push(`[${key}] = N'${escapedValue}'`)
+        } else if (value instanceof Date) {
+          updateFields.push(`[${key}] = '${value.toISOString()}'`)
+        } else if (typeof value === "number") {
+          updateFields.push(`[${key}] = ${value}`)
+        } else if (typeof value === "boolean") {
+          updateFields.push(`[${key}] = ${value ? 1 : 0}`)
         }
       }
+
+      // 使用 Prisma.sql 模板构建 SQL（字段名来自白名单 fieldMappings，值是类型安全的）
+      await prisma.$executeRaw(Prisma.sql`
+        UPDATE Repair_Tickets
+        SET ${Prisma.raw(updateFields.join(", "))}
+        WHERE Id = ${actualTicketId}
+      `)
     }
 
-    // 规则2：管理员填写商务信息后，如果状态是待商务处理，自动转为待发货
-    // 检查是否填写了关键商务字段（收费金额或客户名称）- 根据Excel表格，只有这两个字段是管理员填写的
-    const hasAdminInfo = body.repairCost !== undefined || body.clientName !== undefined
-    if (hasAdminInfo && currentStatus === "Admin_Review" && !statusAutoUpdated) {
-      // 如果前端没有传 status，才自动更新
-      if (!("status" in body)) {
-        newStatus = "Pending_Shipment"
-        statusAutoUpdated = true
-        const statusCol = mapColumn("Status")
-        if (columnNames.some((col) => col.toLowerCase() === statusCol.toLowerCase())) {
-          updateFields.push(`[${statusCol}] = @autoStatus3`)
-          updateRequest.input("autoStatus3", "Pending_Shipment")
-        }
-      }
-    }
-
-    // 规则3：仓库管理员填完 ReturnTrackingNum 时，自动转为已完成
-    if (returnTrackingNumUpdated && !statusAutoUpdated) {
-      // 如果前端没有传 status，才自动更新
-      if (!("status" in body)) {
-        newStatus = "Completed"
-        statusAutoUpdated = true
-        const statusCol = mapColumn("Status")
-        if (columnNames.some((col) => col.toLowerCase() === statusCol.toLowerCase())) {
-          updateFields.push(`[${statusCol}] = @autoStatus2`)
-          updateRequest.input("autoStatus2", "Completed")
-        }
-      }
-    }
-
-    // 执行更新
-    const updateSql = `
-      UPDATE Repair_Tickets
-      SET ${updateFields.join(", ")}
-      WHERE ${idColumn} = @ticketId
-    `
-
-    await updateRequest.query(updateSql)
-
-    // 记录状态变更历史（如果有状态变更）
-    // 优先使用前端传入的 status，其次使用自动流转的 status，最后使用当前 status
-    const finalStatus = body.status || newStatus || currentStatus
+    // 记录状态变更历史（如果有状态变更）或填写返厂快递单号
+    const finalStatus = (body.status as string) || newStatus || currentStatus
     const statusChanged = finalStatus !== currentStatus
-    if (statusChanged) {
+    const factoryTrackingNumUpdated = body.factoryTrackingNum !== undefined && 
+                                       body.factoryTrackingNum !== null && 
+                                       body.factoryTrackingNum !== ""
+    
+    // 如果状态变更或填写了返厂快递单号，都需要写入操作记录
+    if (statusChanged || factoryTrackingNumUpdated) {
       try {
-        const historyRequest = pool
-          .request()
-          .input("ticketId", ticketId.toString())
-          .input("actionType", "StatusChange")
-          .input("oldStatus", currentStatus || null)
-          .input("newStatus", finalStatus)
-          .input("delayTo", null)
-          .input("delayReason", null)
-
-        await historyRequest.query(`
-          IF OBJECT_ID('dbo.Repair_Ticket_History', 'U') IS NOT NULL
-          BEGIN
-            INSERT INTO [dbo].[Repair_Ticket_History] (
-              TicketID, ActionType, OldStatus, NewStatus, DelayTo, DelayReason
-            )
-            VALUES (
-              @ticketId, @actionType, @oldStatus, @newStatus, @delayTo, @delayReason
-            )
-          END
+        // 获取用户信息用于操作记录
+        const cookieStore = await import("next/headers").then(m => m.cookies())
+        const userIdCookie = cookieStore.get("userId")?.value
+        
+        if (!userIdCookie) {
+          throw new Error("未找到用户ID，无法记录操作历史")
+        }
+        
+        const userIdNum = parseInt(userIdCookie, 10)
+        if (isNaN(userIdNum)) {
+          throw new Error(`无效的用户ID：${userIdCookie}`)
+        }
+        
+        // 查询用户信息
+        const userResult = await prisma.$queryRaw<Array<{ RealName?: string; Username?: string }>>(Prisma.sql`
+          SELECT TOP 1 RealName, Username FROM Users WHERE UserID = ${userIdNum}
         `)
-      } catch (historyError: any) {
-        console.error("记录状态变更历史失败:", historyError?.message)
+        
+        if (userResult.length === 0) {
+          throw new Error(`用户不存在：UserID=${userIdNum}`)
+        }
+        
+        const operatorName = userResult[0].RealName || userResult[0].Username
+        if (!operatorName) {
+          throw new Error(`用户信息不完整：UserID=${userIdNum}，RealName 和 Username 均为空`)
+        }
+        
+        const operatorId = userIdNum
+        
+        // 获取批次ID（如果有）
+        const batchResult = await prisma.$queryRaw<Array<{ BatchId?: string }>>(Prisma.sql`
+          SELECT TOP 1 BatchId FROM Repair_Tickets WHERE Id = ${actualTicketId}
+        `)
+        const batchId = batchResult[0]?.BatchId || null
+        
+        // 判断是否是返厂申请（状态变更为 PENDING_FACTORY 或填写了返厂快递单号）
+        const normalizedFinalStatus = normalizeTicketStatus(finalStatus)
+        const isRMARequest = normalizedFinalStatus === TicketStatus.PENDING_FACTORY || factoryTrackingNumUpdated
+        
+        // 构建操作描述
+        let description: string
+        if (factoryTrackingNumUpdated && statusChanged) {
+          // 填写快递单号并更新状态
+          description = `返厂维修申请已提交（快递单号：${body.factoryTrackingNum}），状态已更新为待返厂`
+        } else if (factoryTrackingNumUpdated) {
+          // 只填写快递单号，状态未变化（可能已经是 PENDING_FACTORY）
+          description = `填写返厂快递单号：${body.factoryTrackingNum}`
+        } else {
+          // 普通状态变更
+          description = `状态变更：${currentStatus} → ${finalStatus}`
+        }
+        
+        // 构建操作记录数据
+        const historyData: {
+          ticketId: string
+          batchId: string | null
+          actionType: string
+          oldStatus: string | null
+          newStatus: string
+          operatorName: string
+          description: string
+          operatorId: number
+          delayTo?: null
+          delayReason?: null
+        } = {
+          ticketId: actualTicketId.toString(),
+          batchId: batchId,
+          actionType: isRMARequest ? TicketActionType.RMA_REQUEST : TicketActionType.STATUS_CHANGE,
+          oldStatus: currentStatus || null,
+          newStatus: finalStatus,
+          operatorName: operatorName,
+          description: description,
+          operatorId: operatorId,
+          delayTo: null,
+          delayReason: null
+        }
+        
+        await prisma.repair_Ticket_History.create({
+          data: historyData
+        })
+        
+        console.log(`✅ [操作记录] 已写入：${description}`)
+      } catch (historyError: unknown) {
+        const errorMessage = historyError instanceof Error ? historyError.message : "记录状态变更历史失败"
+        console.error("记录状态变更历史失败:", errorMessage)
+        // 操作记录失败不影响主流程，只记录错误日志
       }
     }
 
     return NextResponse.json({
       success: true,
-      message: "工单更新成功",
+      message: TICKET_QUERY_MESSAGES.updateSuccess,
       data: {
-        updatedFields: updateFields.length,
+        updatedFields: Object.keys(updateData).length,
         statusChanged: statusChanged,
         oldStatus: currentStatus,
         newStatus: finalStatus,
@@ -775,13 +795,14 @@ export async function PUT(
         materialCodeAutoFilled: productSNUpdated || modelNameUpdated,
       },
     })
-  } catch (error: any) {
-    console.error("更新工单失败:", error)
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "更新工单失败"
+    console.error(TICKET_QUERY_MESSAGES.updateFailed, error)
     return NextResponse.json(
       {
         success: false,
-        message: "更新工单时发生错误",
-        error: error?.message || "未知错误",
+        message: TICKET_QUERY_MESSAGES.updateError,
+        error: errorMessage || API_ERROR_MESSAGES.unknownError,
       },
       { status: 500 }
     )
@@ -796,7 +817,7 @@ export async function DELETE(
 ) {
   try {
     const resolvedParams =
-      "then" in (context as any).params
+      "then" in (context as Record<string, unknown>).params
         ? await (context as { params: Promise<{ id: string }> }).params
         : (context as { params: { id: string } }).params
 
@@ -804,64 +825,45 @@ export async function DELETE(
 
     if (!ticketId) {
       return NextResponse.json(
-        { success: false, message: "工单ID不能为空" },
+        { success: false, message: TICKET_QUERY_MESSAGES.ticketIdEmpty },
         { status: 400 }
       )
     }
 
-    const pool = await getDbConnection()
+    // 判断 ticketId 是数字还是字符串
+    const isNumericId = /^\d+$/.test(ticketId)
+    console.log(`🔍 [DELETE] ` + (isNumericId 
+      ? TICKET_QUERY_MESSAGES.queryByIdLog(ticketId) 
+      : TICKET_QUERY_MESSAGES.queryBySnLog(ticketId)
+    ))
 
-    // 获取真实主键列名
-    const columnsResult = await pool.request().query(`
-      SELECT COLUMN_NAME
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_NAME = 'Repair_Tickets'
-    `)
-    const columnNames = columnsResult.recordset.map(
-      (row: any) => row.COLUMN_NAME as string
-    )
-
-    const pkResult = await pool.request().query(`
-      SELECT kcu.COLUMN_NAME
-      FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-        ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-      WHERE tc.TABLE_NAME = 'Repair_Tickets' AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-    `)
-
-    let idColumn: string
-    if (pkResult.recordset.length > 0) {
-      idColumn = pkResult.recordset[0].COLUMN_NAME as string
-    } else {
-      idColumn =
-        columnNames.find((c) => c.toLowerCase().endsWith("id")) ||
-        columnNames.find((c) => c.toLowerCase().includes("id")) ||
-        columnNames[0]
-    }
-
-    // 执行物理删除
-    await pool
-      .request()
-      .input("ticketId", ticketId)
-      .query(`
+    // 执行物理删除（使用 Prisma $executeRaw）
+    if (isNumericId) {
+      await prisma.$executeRaw(Prisma.sql`
         DELETE FROM Repair_Tickets
-        WHERE ${idColumn} = @ticketId
+        WHERE Id = ${parseInt(ticketId, 10)}
       `)
+    } else {
+      await prisma.$executeRaw(Prisma.sql`
+        DELETE FROM Repair_Tickets
+        WHERE DeviceSN = ${ticketId}
+      `)
+    }
 
     return NextResponse.json({
       success: true,
-      message: "工单已彻底删除",
+      message: TICKET_QUERY_MESSAGES.deleteSuccess,
     })
-  } catch (error: any) {
-    console.error("彻底删除维修工单失败:", error)
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "删除工单失败"
+    console.error(TICKET_QUERY_MESSAGES.deleteFailed, error)
     return NextResponse.json(
       {
         success: false,
-        message: "彻底删除维修工单时发生错误",
-        error: error?.message || "未知错误",
+        message: TICKET_QUERY_MESSAGES.deleteError,
+        error: errorMessage || API_ERROR_MESSAGES.unknownError,
       },
       { status: 500 }
     )
   }
 }
-

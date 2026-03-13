@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { getDbConnection } from "@/lib/db-config"
+import { prisma } from "@/lib/prisma"
 
 // GET /api/device/check?sn={sn}
 // 根据序列号检查设备是否存在于 Device_Inventory，并返回基础信息
@@ -15,56 +15,44 @@ export async function GET(request: Request) {
       )
     }
 
-    const pool = await getDbConnection()
+    // 使用 Prisma ORM 查询设备
+    const device = await prisma.device_Inventory.findUnique({
+      where: {
+        serialNumber: sn
+      },
+      select: {
+        serialNumber: true,
+        modelName: true,
+        deviceName: true,
+        materialCode: true,
+        status: true,
+        location: true, // 修正：使用 location 字段
+        specification: true,
+        category: true,
+        subCategory: true
+      }
+    })
 
-    // 先检查 FullSpec 字段是否存在
-    let hasFullSpecColumn = false
-    try {
-      const columnCheck = await pool.request().query(`
-        SELECT COLUMN_NAME
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = 'Device_Inventory' AND COLUMN_NAME = 'FullSpec'
-      `)
-      hasFullSpecColumn = columnCheck.recordset.length > 0
-    } catch (checkError) {
-      console.error("检查 FullSpec 字段失败:", checkError)
-    }
-
-    // 动态构建查询字段
-    const selectFields = hasFullSpecColumn
-      ? "SerialNumber, ModelName, DeviceName, ProjectLocation, MaterialCode, Status, Warehouse, FullSpec"
-      : "SerialNumber, ModelName, DeviceName, ProjectLocation, MaterialCode, Status, Warehouse"
-
-    const result = await pool
-      .request()
-      .input("serialNumber", sn)
-      .query(
-        `
-        SELECT TOP 1 ${selectFields}
-        FROM Device_Inventory
-        WHERE SerialNumber = @serialNumber
-      `
-      )
-
-    if (result.recordset.length === 0) {
+    if (!device) {
       return NextResponse.json({ exists: false })
     }
 
-    const row = result.recordset[0] as any
-    const status = row.Status || ''
+    const status = device.status || ''
     const isInStock = status === '在库' || status === 'In Stock' || status.toLowerCase() === 'instock'
 
     return NextResponse.json({
       exists: true,
       data: {
-        serialNumber: row.SerialNumber,
-        modelName: row.ModelName || '',
-        deviceName: row.DeviceName || row.ModelName || '', // 物料名称（优先使用 DeviceName）
-        location: row.ProjectLocation || '',
-        materialCode: row.MaterialCode || '', // 物料代码
+        serialNumber: device.serialNumber,
+        modelName: device.modelName || '',
+        deviceName: device.deviceName || device.modelName || '', // 物料名称（优先使用 deviceName）
+        location: device.location || '', // 修正：返回 location
+        materialCode: device.materialCode || '', // 物料代码
         status: status, // 状态
-        warehouse: row.Warehouse || '', // 仓库
-        fullSpec: row.FullSpec || row.ModelName || '', // 规格型号（优先使用 FullSpec，否则使用 ModelName）
+        warehouse: device.location || '', // 兼容旧字段名（前端可能用 warehouse）
+        fullSpec: device.specification || device.modelName || '', // 规格型号
+        category: device.category || '',
+        subCategory: device.subCategory || ''
       },
       warning: isInStock ? '该设备状态为"在库"，通常不需要报修，请确认是否继续？' : null, // 在库警告
     })
@@ -78,6 +66,8 @@ export async function GET(request: Request) {
       },
       { status: 500 }
     )
+  } finally {
+    await prisma.$disconnect()
   }
 }
 

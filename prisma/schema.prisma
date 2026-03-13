@@ -1,0 +1,311 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+model System_Config {
+  ConfigKey   String    @id @map("ConfigKey") @db.VarChar(100)
+  ConfigValue String    @map("ConfigValue") @db.VarChar(Max)
+  ConfigType  String    @default("string") @map("ConfigType") @db.VarChar(50)
+  Category    String    @default("general") @map("Category") @db.VarChar(50)
+  Description String?   @map("Description") @db.VarChar(500)
+  IsEditable  Boolean   @default(true) @map("IsEditable")
+  CreatedAt   DateTime? @default(now()) @map("CreatedAt")
+  UpdatedAt   DateTime? @updatedAt @map("UpdatedAt")
+  CreatedBy   String?   @map("CreatedBy") @db.VarChar(100)
+  UpdatedBy   String?   @map("UpdatedBy") @db.VarChar(100)
+
+  @@map("System_Config")
+}
+
+model Batch {
+  id          String    @id @default(cuid()) @map("Id") @db.VarChar(50)
+  batchNumber String    @unique @map("BatchNumber") @db.VarChar(100)
+  projectId   String?   @map("ProjectId") @db.VarChar(50)
+  customerId  String?   @map("CustomerId") @db.VarChar(50)
+  status      String    @default("created") @map("Status") @db.VarChar(50)
+  description String?   @db.VarChar(Max)
+  createdAt   DateTime  @default(now()) @map("CreatedAt")
+  updatedAt   DateTime  @updatedAt @map("UpdatedAt")
+  createdBy   String?   @map("CreatedBy") @db.VarChar(100)
+  customer    Customer? @relation(fields: [customerId], references: [id])
+  project     Project?  @relation(fields: [projectId], references: [id])
+
+  @@map("Batch")
+}
+
+model Project {
+  id          String   @id @default(cuid()) @map("Id") @db.VarChar(50)
+  name        String   @map("Name") @db.VarChar(200)
+  description String?  @db.VarChar(Max)
+  location    String?  @map("Location") @db.VarChar(500)
+  createdAt   DateTime @default(now()) @map("CreatedAt")
+  updatedAt   DateTime @updatedAt @map("UpdatedAt")
+  batches     Batch[]
+
+  @@map("Project")
+}
+
+model Customer {
+  id        String   @id @default(cuid()) @map("Id") @db.VarChar(50)
+  name      String   @map("Name") @db.VarChar(200)
+  address   String?  @db.VarChar(500)
+  phone     String?  @db.VarChar(100)
+  email     String?  @db.VarChar(200)
+  createdAt DateTime @default(now()) @map("CreatedAt")
+  updatedAt DateTime @updatedAt @map("UpdatedAt")
+  batches   Batch[]
+
+  @@map("Customer")
+}
+
+model Repair_Tickets {
+  id                  Int       @id(map: "PK__Repair_T__3214EC07EB756D2F") @default(autoincrement()) @map("Id")
+  deviceSn            String    @map("DeviceSN") @db.NVarChar(100)
+  status              String    @default("created", map: "DF__Repair_Ti__Statu__4D5F7D71") @map("Status") @db.NVarChar(50)
+  priority            String    @default("medium", map: "DF__Repair_Ti__Prior__4E53A1AA") @map("Priority") @db.NVarChar(20)
+  createdAt           DateTime  @default(now(), map: "DF__Repair_Ti__Creat__4F47C5E3") @map("CreatedAt")
+  ticketId            String?   @map("TicketId") @db.NVarChar(50)
+  modelName           String?   @map("ModelName") @db.NVarChar(200)
+  deviceName          String?   @map("DeviceName") @db.NVarChar(200)
+  problem             String?   @map("Problem") @db.NVarChar(Max)
+  location            String?   @map("Location") @db.NVarChar(200)
+  reportedBy          String?   @map("ReportedBy") @db.NVarChar(100)
+  expressCompany      String?   @map("ExpressCompany") @db.NVarChar(100)
+  trackingNumber      String?   @map("TrackingNumber") @db.NVarChar(100)
+  devicePhotos        String?   @map("DevicePhotos") @db.NVarChar(Max)
+  updatedAt           DateTime? @updatedAt @map("UpdatedAt")
+  projectLocation     String?   @map("ProjectLocation") @db.NVarChar(200)
+  materialCode        String?   @map("MaterialCode") @db.NVarChar(100)
+  senderAddress       String?   @map("SenderAddress") @db.NVarChar(500)
+  contactInfo         String?   @map("ContactInfo") @db.NVarChar(200)
+  courierInfo         String?   @map("CourierInfo") @db.NVarChar(200)
+  trackingNumberIn    String?   @map("TrackingNumber_In") @db.NVarChar(100)
+  repairReportContent String?   @map("RepairReportContent") @db.NVarChar(Max)
+  devicesList         String?   @map("DevicesList") @db.NVarChar(Max)
+  deviceCount         Int?      @map("DeviceCount")
+  batchId             String?   @map("BatchId") @db.NVarChar(50)
+  ReportByUserID      Int?
+  ProjectName         String?   @db.NVarChar(500)
+  SubmitDate          DateTime?
+  Quantity            Int?      @default(1, map: "DF__Repair_Ti__Quant__503BEA1C")
+  Category            String?   @db.NVarChar(200)
+  SubCategory         String?   @db.NVarChar(200)
+  FullSpec            String?   @db.NVarChar(500)
+  FaultPoint          String?   @db.NVarChar(500)
+  IsChargeable        Boolean?  @default(false, map: "DF__Repair_Ti__IsCha__51300E55")
+  IsOutsourced        Boolean?  @default(false, map: "DF__Repair_Ti__IsOut__5224328E")
+  FactoryRepairDate   DateTime?
+  FactoryTrackingNum  String?   @db.NVarChar(200)
+  SupplierName        String?   @db.NVarChar(200)
+  RepairCost          Decimal?  @db.Decimal(18, 2)
+  ClientName          String?   @db.NVarChar(200)
+  IsInvoiced          Boolean?  @default(false, map: "DF__Repair_Ti__IsInv__531856C7")
+  FactoryReceivedDate DateTime?
+  FactoryShipDate     DateTime?
+  ReturnDate          DateTime?
+  ReturnQuantity      Int?      @default(1, map: "DF__Repair_Ti__Retur__540C7B00")
+  ReturnTrackingNum   String?   @db.NVarChar(200)
+  CancelRequestStatus String?   @db.NVarChar(50)
+  CancelRequestReason String?
+  CancelRequestDate   DateTime?
+  CancelApprovedBy    String?   @db.NVarChar(200)
+  CancelApprovedDate  DateTime?
+  ReceivedDate        DateTime?
+  CourierCompany      String?   @db.NVarChar(200)
+  CourierNumber       String?   @db.NVarChar(200)
+  RevisionRequestedBy String?   @db.NVarChar(100)
+  RevisionRequestReason String? @db.NVarChar(500)
+  RevisionRequestDate DateTime?
+  RevisionCount       Int?      @default(0, map: "DF__Repair_Ti__Revis__00000001")
+  IsPaymentReceived   Boolean?  @map("IsPaymentReceived")
+  ManufactureDate     DateTime? @map("ManufactureDate")
+  WarehouseConfirmedAt DateTime? @map("WarehouseConfirmedAt")
+  WarehouseConfirmedBy String?   @map("WarehouseConfirmedBy") @db.NVarChar(100)
+  
+  // 签字报告照片相关字段
+  SignedReportPhoto   String?   @map("SignedReportPhoto") @db.NVarChar(Max)
+  SignedPhotoViewedBy String?   @map("SignedPhotoViewedBy") @db.NVarChar(100)
+  SignedPhotoViewedAt DateTime? @map("SignedPhotoViewedAt")
+  SignedPhotoModifyRequest String? @map("SignedPhotoModifyRequest") @db.NVarChar(Max)
+  
+  // 工作流时间戳字段
+  TechnicianCompletedAt DateTime? @map("TechnicianCompletedAt")
+  TechnicianCompletedBy String?   @map("TechnicianCompletedBy") @db.NVarChar(100)
+  BusinessReviewedAt    DateTime? @map("BusinessReviewedAt")
+  BusinessReviewedBy    String?   @map("BusinessReviewedBy") @db.NVarChar(100)
+  WarehouseShippedAt    DateTime? @map("WarehouseShippedAt")
+  WarehouseShippedBy    String?   @map("WarehouseShippedBy") @db.NVarChar(100)
+  ReporterConfirmedAt   DateTime? @map("ReporterConfirmedAt")
+  
+  // 其他字段
+  DamageImages         String?   @map("DamageImages") @db.NVarChar(Max)
+  WorkOrderNumber      String?   @map("WorkOrderNumber") @db.NVarChar(50)
+  ShippingType         String?   @map("ShippingType") @db.NVarChar(50)
+  WarrantyStatus       String?   @map("WarrantyStatus") @db.NVarChar(50)
+
+  // 维修工作台 3W1H 相关字段
+  /// 人工覆盖的保修判定（与系统计算的 WarrantyStatus 区分）
+  WarrantyStatusOverride String?  @map("WarrantyStatusOverride") @db.NVarChar(50)
+  /// 故障分类（硬件/软件/人为/老化/其他）
+  FaultCategory          String?  @map("FaultCategory")          @db.NVarChar(50)
+  /// 维修动作（现场修复/更换配件/返厂维修/报废处理）
+  RepairAction           String?  @map("RepairAction")           @db.NVarChar(50)
+  /// 处理说明（维修过程与方案描述）
+  RepairNotes            String?  @map("RepairNotes")            @db.NVarChar(Max)
+
+  @@map("Repair_Tickets")
+}
+
+model Users {
+  userId          Int                @id(map: "PK__Users__1788CCAC177B85E0") @default(autoincrement()) @map("UserID")
+  Username        String             @unique(map: "UQ__Users__536C85E4396D1D66") @db.NVarChar(100)
+  Password        String             @db.NVarChar(255)
+  Role            String             @default("User", map: "DF__Users__Role__1EA48E88") @db.NVarChar(50)
+  realName        String?            @map("RealName") @db.NVarChar(100)
+  phoneNumber     String?            @map("PhoneNumber") @db.NVarChar(20)
+  isDeleted       Boolean?           @default(false, map: "DF__Users__IsDeleted__1F98B2C1") @map("IsDeleted")
+  createdAt       DateTime?          @default(now(), map: "DF__Users__CreatedAt__208CD6FA") @map("CreatedAt")
+  updatedAt       DateTime?          @default(now(), map: "DF__Users__UpdatedAt__2180FB33") @updatedAt @map("UpdatedAt")
+  customerHistory Customer_History[]
+
+  @@map("Users")
+}
+
+model Device_Inventory {
+  inventoryId          Int       @id(map: "PK__Device_I__F5FDE6D3B95A5167") @default(autoincrement()) @map("InventoryID")
+  serialNumber         String    @unique(map: "UQ__Device_I__048A00085527CBB9") @map("SerialNumber") @db.NVarChar(100)
+  deviceName           String?   @map("DeviceName") @db.NVarChar(200)
+  modelName            String?   @map("ModelName") @db.NVarChar(200)
+  category             String?   @map("Category") @db.NVarChar(100)
+  subCategory          String?   @map("SubCategory") @db.NVarChar(100)
+  materialCode         String?   @map("MaterialCode") @db.NVarChar(100)
+  specification        String?   @map("Specification") @db.NVarChar(500)
+  manufactureDate      DateTime? @map("ManufactureDate")
+  warrantyStartDate    DateTime? @map("WarrantyStartDate")
+  warrantyEndDate      DateTime? @map("WarrantyEndDate")
+  warrantyPeriodMonths Int?      @map("WarrantyPeriodMonths")
+  status               String?   @default("In_Stock", map: "DF__Device_In__Statu__25518C17") @map("Status") @db.NVarChar(50)
+  location             String?   @map("Location") @db.NVarChar(200)
+  supplier             String?   @map("Supplier") @db.NVarChar(200)
+  purchaseDate         DateTime? @map("PurchaseDate")
+  purchasePrice        Decimal?  @map("PurchasePrice") @db.Decimal(18, 2)
+  notes                String?   @map("Notes") @db.NVarChar(Max)
+  createdAt            DateTime? @default(now(), map: "DF__Device_In__Creat__2645B050") @map("CreatedAt")
+  updatedAt            DateTime? @default(now(), map: "DF__Device_In__Updat__2739D489") @updatedAt @map("UpdatedAt")
+
+  @@map("Device_Inventory")
+}
+
+model Product_Catalog {
+  productId             Int       @id(map: "PK__Product___B40CC6EDCA15FA18") @default(autoincrement()) @map("ProductID")
+  category              String    @map("Category") @db.NVarChar(100)
+  subCategory           String?   @map("SubCategory") @db.NVarChar(100)
+  modelName             String    @map("ModelName") @db.NVarChar(200)
+  modelCode             String?   @map("ModelCode") @db.NVarChar(100)
+  specification         String?   @map("Specification") @db.NVarChar(500)
+  description           String?   @map("Description") @db.NVarChar(Max)
+  manufacturer          String?   @map("Manufacturer") @db.NVarChar(200)
+  defaultWarrantyMonths Int?      @default(12, map: "DF__Product_C__Defau__2A164134") @map("DefaultWarrantyMonths")
+  isActive              Boolean?  @default(true, map: "DF__Product_C__IsAct__2B0A656D") @map("IsActive")
+  createdAt             DateTime? @default(now(), map: "DF__Product_C__Creat__2BFE89A6") @map("CreatedAt")
+  updatedAt             DateTime? @default(now(), map: "DF__Product_C__Updat__2CF2ADDF") @updatedAt @map("UpdatedAt")
+
+  @@map("Product_Catalog")
+}
+
+model Repair_Ticket_History {
+  historyId   Int       @id(map: "PK__Repair_T__4D7B4ADDFFE3E0DF") @default(autoincrement()) @map("HistoryID")
+  ticketId    String?   @map("TicketID") @db.NVarChar(50)
+  actionType  String    @map("ActionType") @db.NVarChar(50)
+  oldStatus   String?   @map("OldStatus") @db.NVarChar(50)
+  newStatus   String?   @map("NewStatus") @db.NVarChar(50)
+  actionBy    String?   @map("ActionBy") @db.NVarChar(100)
+  actionNote  String?   @map("ActionNote") @db.NVarChar(Max)
+  delayTo     DateTime? @map("DelayTo")
+  delayReason String?   @map("DelayReason") @db.NVarChar(500)
+  createdAt   DateTime? @default(now(), map: "DF__Repair_Ti__Creat__2FCF1A8A") @map("CreatedAt")
+  
+  // 批次级别审计字段（新版操作记录系统）
+  batchId     String?   @map("BatchId") @db.NVarChar(50)
+  operatorId  Int?      @map("OperatorId")
+  operatorName String?  @map("OperatorName") @db.NVarChar(100)
+  description String?   @map("Description") @db.NVarChar(Max)
+
+  @@index([ticketId], map: "IX_Repair_Ticket_History_TicketID")
+  @@index([actionType], map: "IX_Repair_Ticket_History_ActionType")
+  @@map("Repair_Ticket_History")
+}
+
+model Customer_History {
+  id            Int      @id @default(autoincrement()) @map("ID")
+  userId        Int      @map("UserID")
+  customerName  String   @map("CustomerName") @db.NVarChar(200)
+  contactPerson String?  @map("ContactPerson") @db.NVarChar(100)
+  contactPhone  String?  @map("ContactPhone") @db.NVarChar(50)
+  address       String?  @map("Address") @db.NVarChar(500)
+  lastUsedAt    DateTime @default(now()) @map("LastUsedAt")
+  useCount      Int      @default(1) @map("UseCount")
+  createdAt     DateTime @default(now()) @map("CreatedAt")
+  user          Users    @relation(fields: [userId], references: [userId])
+
+  @@unique([userId, customerName], name: "UQ_User_Customer")
+  @@index([userId], map: "IX_Customer_History_UserID")
+  @@map("Customer_History")
+}
+
+model Repair_Tickets_New {
+  Id                  Int       @id(map: "PK__Repair_T__3214EC078F98E0EA") @default(autoincrement())
+  TicketId            String?   @db.NVarChar(50)
+  DeviceSN            String    @db.NVarChar(100)
+  ModelName           String?   @db.NVarChar(200)
+  DeviceName          String?   @db.NVarChar(200)
+  Problem             String?   @db.NVarChar(Max)
+  Status              String    @default("created", map: "DF__Repair_Ti__Statu__47A6A41B") @db.NVarChar(50)
+  Priority            String    @default("medium", map: "DF__Repair_Ti__Prior__489AC854") @db.NVarChar(20)
+  Location            String?   @db.NVarChar(200)
+  ReportedBy          String?   @default("", map: "DF__Repair_Ti__Repor__498EEC8D") @db.NVarChar(100)
+  ExpressCompany      String?   @db.NVarChar(100)
+  TrackingNumber      String?   @db.NVarChar(100)
+  DevicePhotos        String?   @db.NVarChar(Max)
+  CreatedAt           DateTime  @default(now(), map: "DF__Repair_Ti__Creat__4A8310C6")
+  UpdatedAt           DateTime?
+  ProjectLocation     String?   @db.NVarChar(200)
+  MaterialCode        String?   @db.NVarChar(100)
+  SenderAddress       String?   @db.NVarChar(500)
+  ContactInfo         String?   @db.NVarChar(200)
+  CourierInfo         String?   @db.NVarChar(200)
+  TrackingNumber_In   String?   @db.NVarChar(100)
+  RepairReportContent String?   @db.NVarChar(Max)
+  DevicesList         String?   @db.NVarChar(Max)
+  DeviceCount         Int?
+  BatchId             String?   @db.NVarChar(50)
+}
+
+// ==================== 工单聊天消息模型 ====================
+/// 工单绑定的聊天消息记录
+/// 用于维修人员、现场人员、客户等在特定工单下进行沟通
+model TicketMessage {
+  id         Int      @id @default(autoincrement()) @map("Id")
+  ticketId   String   @map("TicketId") @db.NVarChar(100)
+  senderName String   @map("SenderName") @db.NVarChar(100)
+  senderRole String   @map("SenderRole") @db.NVarChar(50)
+  content    String   @map("Content") @db.NVarChar(Max)
+  createdAt  DateTime @default(now()) @map("CreatedAt")
+
+  @@index([ticketId], map: "IX_TicketMessage_TicketId")
+  @@map("TicketMessage")
+}
+
+model Ticket_Sequence {
+  sequenceType String   @id @map("SequenceType") @db.NVarChar(50)
+  currentValue Int      @default(0) @map("CurrentValue")
+  prefix       String   @default("wx") @map("Prefix") @db.NVarChar(10)
+  updatedAt    DateTime @default(now()) @map("UpdatedAt") @db.DateTime2
+
+  @@map("Ticket_Sequence")
+}

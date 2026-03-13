@@ -3,6 +3,7 @@
 import { useAuth } from "@/context/auth-context";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
+import { UserRole } from "@/lib/enums";
 
 export default function TechnicianTasks() {
   const { user, status } = useAuth();
@@ -10,7 +11,7 @@ export default function TechnicianTasks() {
 
   // 重定向到首页，因为维修人员的主要功能在首页
   useEffect(() => {
-    if (status === "authenticated" && user?.role === "technician") {
+    if (status === "authenticated" && user?.role === UserRole.TECHNICIAN) {
       router.push("/");
     }
   }, [status, user, router]);

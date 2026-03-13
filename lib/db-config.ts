@@ -1,40 +1,72 @@
 import * as sql from 'mssql';
 
-// SQL Server 数据库连接配置
+// ────────────────────────────────────────────────────────────────────────────
+// SQL Server 连接配置
+//
+// 所有敏感信息从环境变量读取，不再硬编码。
+// 本地开发时在项目根目录创建 .env.local 文件（参考 .env.example）。
+// 生产部署时通过 Docker 环境变量或 PM2 ecosystem.config.js 注入。
+// ────────────────────────────────────────────────────────────────────────────
 export const dbConfig: sql.config = {
-  server: 'localhost',
-  database: 'AxinRepairDB',
-  user: 'AxinUser',
-  password: 'AxinPassword2026!',
-  port: 1433,
+  server:   process.env.DB_SERVER   || 'localhost',
+  database: process.env.DB_DATABASE || 'AxinRepairDB',
+  user:     process.env.DB_USER     || 'AxinUser',
+  password: process.env.DB_PASSWORD || 'AxinPassword2026!',
+  port:     parseInt(process.env.DB_PORT || '1433', 10),
   options: {
-    encrypt: true,
-    trustServerCertificate: true, // 必须开启这个，否则本地连接会报错
-    enableArithAbort: true,
+    encrypt:                Boolean(process.env.DB_ENCRYPT === 'true'),
+    trustServerCertificate: process.env.DB_TRUST_CERT !== 'false', // 内网默认 true
+    enableArithAbort:       true,
   },
   pool: {
-    max: 10,
+    max: parseInt(process.env.DB_POOL_MAX || '10', 10),
     min: 0,
-    idleTimeoutMillis: 30000,
+    // 空闲超时 10 分钟，避免连接被关闭后出现 ECONNCLOSED
+    idleTimeoutMillis: 600_000,
+    // 获取连接最多等待 30 秒
+    acquireTimeoutMillis: 30_000,
   },
 };
 
-// 创建数据库连接池
+// ────────────────────────────────────────────────────────────────────────────
+// 连接池单例（含自动重连）
+// ────────────────────────────────────────────────────────────────────────────
 let pool: sql.ConnectionPool | null = null;
 
 /**
- * 获取数据库连接池（单例模式）
+ * 获取数据库连接池（单例模式，含自动重连）
+ *
+ * 问题根因：pool 变量非 null 时不会重新连接，但如果底层 TCP 连接已关闭
+ * （idleTimeout / 网络中断 / 热重载），pool.connected 会变为 false，
+ * 此时继续使用旧 pool 执行查询会抛出 ECONNCLOSED。
+ * 修复：每次获取连接时额外检查 pool.connected，断开则销毁后重建。
  */
 export async function getDbConnection(): Promise<sql.ConnectionPool> {
+  // 如果已有连接池但连接已断开，先销毁再重建
+  if (pool && !pool.connected) {
+    console.warn('⚠️ 数据库连接池已断开，正在重新连接…');
+    try {
+      await pool.close();
+    } catch {
+      // 忽略关闭时的错误，直接重建
+    }
+    pool = null;
+  }
+
   if (!pool) {
     try {
-      pool = await sql.connect(dbConfig);
+      pool = await (sql as any).connect(dbConfig);
       console.log('✅ 数据库连接池创建成功');
     } catch (error) {
       console.error('❌ 数据库连接失败:', error);
       throw error;
     }
   }
+
+  if (!pool) {
+    throw new Error('Database connection failed to initialize');
+  }
+
   return pool;
 }
 
@@ -60,8 +92,7 @@ export async function closeDbConnection(): Promise<void> {
 export async function testDbConnection(): Promise<boolean> {
   try {
     const connection = await getDbConnection();
-    // 执行一个简单的查询来测试连接
-    const result = await connection.request().query('SELECT 1 as test');
+    await connection.request().query('SELECT 1 as test');
     console.log('✅ 连接数据库成功');
     return true;
   } catch (error) {

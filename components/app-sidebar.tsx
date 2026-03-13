@@ -12,8 +12,8 @@ interface NavItem {
 }
 
 interface AppSidebarProps {
-  activeTab: "home" | "repair" | "profile"
-  onTabChange: (tab: "home" | "repair" | "profile") => void
+  activeTab: "home" | "repair" | "profile" | "recycle"
+  onTabChange: (tab: "home" | "repair" | "profile" | "recycle") => void
   userType?: "technician" | "reporter" | "admin" | "warehouse"
 }
 
@@ -52,13 +52,10 @@ export default function AppSidebar({ activeTab, onTabChange, userType }: AppSide
   return (
     <aside className="fixed left-0 top-0 z-30 h-full w-64 flex-col border-r border-border dark:border-border bg-card dark:bg-card hidden md:flex">
       <div className="flex h-16 items-center border-b border-border dark:border-border px-6">
-        <button 
-          onClick={() => onTabChange("home")} 
-          className="flex items-center gap-2"
-        >
+        <div className="flex items-center gap-2">
           <img src="/icon.svg" alt="Logo" className="h-6 w-6" />
           <span className="text-lg font-semibold">智能维修系统</span>
-        </button>
+        </div>
       </div>
       <nav className="flex flex-1 flex-col p-4">
         <ul className="space-y-2">
@@ -89,17 +86,15 @@ export default function AppSidebar({ activeTab, onTabChange, userType }: AppSide
         {effectiveUserType !== "reporter" && (
           <div className="mt-4">
             <button
-              onClick={() => {
-                if (typeof window !== "undefined") {
-                  window.location.href = "/recycle-bin"
-                }
-              }}
+              onClick={() => onTabChange("recycle")}
               className={cn(
                 "flex w-full items-center gap-3 rounded-md px-3 py-2 transition-colors text-left",
-                "hover:bg-muted dark:hover:bg-muted"
+                activeTab === "recycle"
+                  ? "bg-primary text-primary-foreground dark:bg-primary dark:text-primary-foreground"
+                  : "hover:bg-muted dark:hover:bg-muted"
               )}
             >
-              <Trash2 className="h-5 w-5 text-muted-foreground" />
+              <Trash2 className={cn("h-5 w-5", activeTab === "recycle" ? "" : "text-muted-foreground")} />
               <span>工单回收站</span>
             </button>
           </div>

@@ -1,42 +1,32 @@
 import { NextResponse } from "next/server"
-import { getDbConnection } from "@/lib/db-config"
+import { prisma } from "@/lib/prisma"
 
 // GET /api/models
 // 从 SQL Server 的 Product_Catalog 表获取设备型号列表（支持分类，用于三级联动）
 export async function GET() {
   try {
-    const pool = await getDbConnection()
-
-    const result = await pool.request().query(`
-      SELECT *
-      FROM Product_Catalog
-      ORDER BY DisplayOrder
-    `)
-
-    const models = result.recordset.map((row: any) => {
-      const id =
-        row.Id ?? row.ID ?? row.id ?? row.Code ?? row.ModelCode ?? row.DisplayName
-
-      const code = row.ModelCode ?? row.Code ?? null
-      const name = row.DisplayName ?? row.ModelName ?? row.Name ?? ""
-
-      // 兼容多种命名的一级分类/二级分类/详细规格字段
-      const category =
-        row.Category ?? row.DeviceCategory ?? row.PrimaryCategory ?? null
-      const subCategory =
-        row.SubCategory ?? row.DeviceSubCategory ?? row.SecondaryCategory ?? null
-      const fullSpec =
-        row.FullSpec ?? row.Specification ?? row.Spec ?? row.ModelName ?? null
-
-      return {
-        id,
-        code,
-        name,
-        category,
-        subCategory,
-        fullSpec,
-      }
+    // 使用 Prisma ORM 查询 Product_Catalog
+    const products = await prisma.product_Catalog.findMany({
+      where: {
+        isActive: true, // 只返回激活的产品
+      },
+      orderBy: [
+        { category: 'asc' },
+        { subCategory: 'asc' },
+        { modelName: 'asc' },
+      ],
     })
+
+    // 映射到前端需要的字段格式
+    const models = products.map((product) => ({
+      id: product.productId,
+      code: product.modelCode,
+      name: product.modelName,
+      category: product.category,
+      subCategory: product.subCategory,
+      fullSpec: product.specification || product.description,
+      manufacturer: product.manufacturer,
+    }))
 
     return NextResponse.json({ success: true, data: models })
   } catch (error: any) {

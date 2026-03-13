@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import * as XLSX from "xlsx"
+import { TICKET_STATUS_LABELS, normalizeTicketStatus, DB_FIELDS } from "@/lib/enums"
+
+/** 将 UTC Date 转为北京时间 (UTC+8)，格式 YYYY-MM-DD HH:mm */
+function formatDateBJ(date: Date): string {
+  const bjMs = date.getTime() + 8 * 3600 * 1000
+  return new Date(bjMs).toISOString().slice(0, 16).replace("T", " ")
+}
 
 // GET /api/tickets/export
 // 导出所有工单数据为Excel文件
@@ -20,6 +27,15 @@ export async function GET(request: Request) {
     `)
     const columnNames = columnsResult.recordset.map(row => row.COLUMN_NAME as string)
 
+    // 动态检测排序字段（优先使用 SubmitDate，其次 CreatedAt，最后是 Id）
+    const orderByColumn = columnNames.find(col => 
+      col.toLowerCase() === 'submitdate'
+    ) || columnNames.find(col => 
+      col.toLowerCase() === 'createdat'
+    ) || columnNames.find(col => 
+      col.toLowerCase() === 'id'
+    ) || 'Id'
+
     // 构建查询SQL - 查询所有字段
     const selectColumns = columnNames.map(col => `[${col}]`).join(', ')
     
@@ -30,10 +46,10 @@ export async function GET(request: Request) {
     
     // 如果指定了状态过滤
     if (statusFilter) {
-      query += ` WHERE Status = @status`
+      query += ` WHERE ${DB_FIELDS.STATUS} = @status`
     }
     
-    query += ` ORDER BY ReportTime DESC, SubmitDate DESC`
+    query += ` ORDER BY [${orderByColumn}] DESC`
 
     const requestObj = pool.request()
     if (statusFilter) {
@@ -54,7 +70,7 @@ export async function GET(request: Request) {
       // 基础信息
       Id: "工单ID",
       Status: "状态",
-      ReportTime: "报修时间",
+      CreatedAt: "创建时间",
       
       // 现场人员填报区
       SubmitDate: "提交日期",
@@ -68,7 +84,6 @@ export async function GET(request: Request) {
       ProductSN: "产品序列号",
       FaultDescription: "故障描述",
       DeviceImages: "设备照片",
-      DamageImages: "故障照片",
       
       // 维修人员填写区
       MaterialCode: "物料代码",
@@ -85,11 +100,10 @@ export async function GET(request: Request) {
       IsChargeable: "是否收费",
       ClientName: "客户名称",
       IsInvoiced: "是否开票",
-      FactoryReceivedDate: "收到原厂寄回日期",
-      
       // 仓库管理员填写区
       ReceivedDate: "收到日期",
-      FactoryShipDate: "出厂日期",
+      ManufactureDate: "出厂日期",
+      FactoryShipDate: "出厂日期", // 兼容旧字段名
       ReturnDate: "返还客户日期",
       ReturnQuantity: "返还客户数量",
       ReturnTrackingNum: "返还客户快递单号",
@@ -107,19 +121,21 @@ export async function GET(request: Request) {
         // 处理不同类型的值
         if (value === null || value === undefined) {
           excelRow[excelColName] = ""
+        } else if (colName === DB_FIELDS.STATUS) {
+          // 状态汉化：优先从枚举标签表取中文，找不到则原样输出
+          const normalized = normalizeTicketStatus(String(value))
+          excelRow[excelColName] = (normalized && TICKET_STATUS_LABELS[normalized]) || String(value)
         } else if (value instanceof Date) {
-          // 日期格式化为 yyyy-MM-dd HH:mm:ss
-          excelRow[excelColName] = new Date(value).toLocaleString("zh-CN", {
-            year: "numeric",
-            month: "2-digit",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-            hour12: false,
-          }).replace(/\//g, "-")
-        } else if (typeof value === "boolean" || (typeof value === "number" && (value === 0 || value === 1))) {
+          // 日期统一转北京时间 (UTC+8)，格式 YYYY-MM-DD HH:mm
+          excelRow[excelColName] = formatDateBJ(value)
+        } else if (colName === DB_FIELDS.QUANTITY || colName === DB_FIELDS.RETURN_QUANTITY) {
+          // 数量和返还客户数量：直接使用数值，不转换为布尔值
+          excelRow[excelColName] = typeof value === "number" ? value : (value ? Number(value) || 0 : 0)
+        } else if (typeof value === "boolean") {
           // 布尔值转换为是/否
+          excelRow[excelColName] = value ? "是" : "否"
+        } else if (colName.toLowerCase().startsWith("is") && (value === 0 || value === 1)) {
+          // Is 开头的字段（如 IsChargeable, IsInvoiced）：0/1 转换为是/否
           excelRow[excelColName] = value ? "是" : "否"
         } else if (typeof value === "number") {
           excelRow[excelColName] = value
@@ -136,7 +152,7 @@ export async function GET(request: Request) {
       // 基础信息
       "工单ID",
       "状态",
-      "报修时间",
+      "创建时间",
       
       // 现场人员填报区（按用户要求顺序）
       "提交日期",
@@ -150,7 +166,6 @@ export async function GET(request: Request) {
       "产品序列号",
       "故障描述",
       "设备照片",
-      "故障照片",
       
       // 维修人员填写区（按用户要求顺序）
       "物料代码",
@@ -167,7 +182,6 @@ export async function GET(request: Request) {
       "是否收费",
       "客户名称",
       "是否开票",
-      "收到原厂寄回日期",
       
       // 仓库管理员填写区（按用户要求顺序）
       "出厂日期",
@@ -193,37 +207,8 @@ export async function GET(request: Request) {
       return orderedRow
     })
     
-    // 创建带分组标题的数据
-    // 第一行：分组标题
-    const headerRow: Record<string, any> = {}
-    existingColumns.forEach(col => {
-      // 根据列名判断分组
-      if (["工单ID", "状态", "报修时间"].includes(col)) {
-        headerRow[col] = "基础信息"
-      } else if (["提交日期", "发出快递单号", "寄件人地址", "联系人及电话", "项目/客户名称", "产品名称", "型号", "数量", "产品序列号", "故障描述", "设备照片", "故障照片"].includes(col)) {
-        headerRow[col] = "现场人员填报区"
-      } else if (["物料代码", "物料名称", "规格型号", "故障点", "收费金额", "是否需返厂"].includes(col)) {
-        headerRow[col] = "维修人员填写区"
-      } else if (["返厂维修日期", "返厂维修快递单号", "供应商名称", "是否收费", "客户名称", "是否开票", "收到原厂寄回日期"].includes(col)) {
-        headerRow[col] = "管理员填写区"
-      } else if (["出厂日期", "返还客户日期", "返还客户数量", "返还客户快递单号"].includes(col)) {
-        headerRow[col] = "仓库管理员填写区"
-      } else {
-        headerRow[col] = ""
-      }
-    })
-    
-    // 第二行：列标题
-    const titleRow: Record<string, any> = {}
-    existingColumns.forEach(col => {
-      titleRow[col] = col
-    })
-    
-    // 合并数据：分组标题行 + 列标题行 + 数据行
-    const allData = [headerRow, titleRow, ...orderedData]
-    
-    // 创建数据工作表
-    const worksheet = XLSX.utils.json_to_sheet(allData, {
+    // 创建数据工作表（只保留列标题行 + 数据行）
+    const worksheet = XLSX.utils.json_to_sheet(orderedData, {
       header: existingColumns,
       skipHeader: false,
     })

@@ -3,26 +3,38 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { 
-  Users, 
-  FileText, 
-  TrendingUp,
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UserRole, TicketStatus } from "@/lib/enums";
+import {
+  FileText,
   Clock,
   CheckCircle,
   AlertCircle,
   Package,
-  ArrowRight,
-  RefreshCw
+  ChevronRight,
+  DollarSign,
+  Loader2,
+  Search,
+  TrendingUp,
+  RefreshCw,
 } from "lucide-react";
 import { useRepairContext } from "@/context/RepairContext";
+import BusinessBatchReview from "@/components/business-batch-review";
+import { format } from "date-fns";
+import { zhCN } from "date-fns/locale";
 
-// 创建一个全局事件来打开工单管理面板
-declare global {
-  interface Window {
-    openRepairsPanel?: (status?: string) => void;
-  }
+interface BatchTicket {
+  batchId: string;
+  projectName: string;
+  projectLocation: string;
+  deviceCount: number;
+  category: string;
+  createdAt: string;
+  status: string;
 }
 
 export default function BusinessDashboard() {
@@ -30,130 +42,161 @@ export default function BusinessDashboard() {
   const router = useRouter();
   const { repairs } = useRepairContext();
   const [isAuthorized, setIsAuthorized] = useState(false);
-  const [stats, setStats] = useState({
-    totalUsers: 0,
-    totalTickets: 0,
-    pendingTickets: 0,
-    completedTickets: 0,
-    inRepairTickets: 0,
-    adminReviewTickets: 0
-  });
+  const [activeTab, setActiveTab] = useState("overview");
+
+  // ── 工单列表（数据总览 Tab 使用） ────────────────────────────────────────────
+  const [allBatches, setAllBatches] = useState<BatchTicket[]>([]);
+  const [loadingBatches, setLoadingBatches] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+
+  // ── 待审核批次（待审核批次 Tab 使用） ─────────────────────────────────────────
+  const [pendingBatches, setPendingBatches] = useState<BatchTicket[]>([]);
+  const [loadingPending, setLoadingPending] = useState(false);
+
+  // ── 选中批次打开审核详情 ──────────────────────────────────────────────────────
+  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+
+  // ── 统计数据（只需要两个卡片：待审批 + 总数） ─────────────────────────────────
+  const [stats, setStats] = useState({ totalTickets: 0, adminReviewTickets: 0 });
 
   useEffect(() => {
     if (status === "loading") return;
-    
-    if (status === "unauthenticated" || user?.role !== "business") {
+    if (status === "unauthenticated" || user?.role !== UserRole.BUSINESS) {
       router.push("/login");
       return;
     }
-    
     setIsAuthorized(true);
   }, [status, user, router]);
 
-  // 加载统计数据
+  // 统计数据来自 RepairContext
   useEffect(() => {
-    if (!isAuthorized) return;
-
-    // 加载用户数量
-    fetch("/api/users")
-      .then(res => res.json())
-      .then(data => {
-        if (data.success && Array.isArray(data.data)) {
-          setStats(prev => ({ ...prev, totalUsers: data.data.length }));
-        }
-      })
-      .catch(err => console.error("加载用户统计失败:", err));
-
-    // 从 RepairContext 获取工单统计
-    if (repairs && Array.isArray(repairs)) {
-      const totalTickets = repairs.length;
-      const pendingTickets = repairs.filter(r => 
-        r.status === "created" || r.status === "pending"
-      ).length;
-      const inRepairTickets = repairs.filter(r => 
-        r.status === "in_repair" || r.status === "processing"
-      ).length;
-      const adminReviewTickets = repairs.filter(r => 
-        r.status === "admin_review"
-      ).length;
-      const completedTickets = repairs.filter(r => 
-        r.status === "completed"
-      ).length;
-
-      setStats(prev => ({
-        ...prev,
-        totalTickets,
-        pendingTickets,
-        inRepairTickets,
-        adminReviewTickets,
-        completedTickets
-      }));
-    }
+    if (!isAuthorized || !repairs) return;
+    setStats({
+      totalTickets: repairs.length,
+      adminReviewTickets: repairs.filter(
+        (r) => r.status === "admin_review" || r.status === "business_review"
+      ).length,
+    });
   }, [isAuthorized, repairs]);
 
+  // 加载全部工单（数据总览 Tab）
+  const loadAllBatches = async () => {
+    setLoadingBatches(true);
+    try {
+      const res = await fetch("/api/tickets/all-batches");
+      const result = await res.json();
+      if (result.success) setAllBatches(result.data || []);
+    } catch (e) {
+      console.error("加载批次工单失败:", e);
+    } finally {
+      setLoadingBatches(false);
+    }
+  };
+
+  // 加载待审核批次（待审核批次 Tab）
+  const loadPendingBatches = async () => {
+    setLoadingPending(true);
+    try {
+      const res = await fetch("/api/tickets/business-pending-batches");
+      const result = await res.json();
+      if (result.success) setPendingBatches(result.data || []);
+    } catch (e) {
+      console.error("加载待审核批次失败:", e);
+    } finally {
+      setLoadingPending(false);
+    }
+  };
+
+  // Tab 切换时懒加载
+  useEffect(() => {
+    if (!isAuthorized) return;
+    if (activeTab === "overview") loadAllBatches();
+    if (activeTab === "pending") loadPendingBatches();
+  }, [activeTab, isAuthorized]);
+
+  // ── 工单状态徽章 ──────────────────────────────────────────────────────────────
+  const getStatusBadge = (s: string) => {
+    switch (s) {
+      case TicketStatus.CREATED:
+      case "pending":
+        return <Badge variant="outline" className="bg-yellow-50 border-yellow-300 text-yellow-800"><Clock className="w-3 h-3 mr-1" />待处理</Badge>;
+      case TicketStatus.WAREHOUSE_CONFIRMING:
+        return <Badge variant="outline" className="bg-blue-50 border-blue-300 text-blue-800"><Package className="w-3 h-3 mr-1" />待仓库确认</Badge>;
+      case TicketStatus.IN_REPAIR:
+      case TicketStatus.TECHNICIAN_REPAIRING:
+        return <Badge variant="outline" className="bg-cyan-50 border-cyan-300 text-cyan-800"><TrendingUp className="w-3 h-3 mr-1" />维修中</Badge>;
+      case TicketStatus.BUSINESS_REVIEW:
+      case TicketStatus.ADMIN_REVIEW:
+        return <Badge variant="outline" className="bg-purple-50 border-purple-300 text-purple-800"><DollarSign className="w-3 h-3 mr-1" />待商务审核</Badge>;
+      case TicketStatus.WAREHOUSE_SHIPPING:
+        return <Badge variant="outline" className="bg-orange-50 border-orange-300 text-orange-800"><Package className="w-3 h-3 mr-1" />待发货</Badge>;
+      case TicketStatus.COMPLETED:
+        return <Badge variant="outline" className="bg-green-50 border-green-300 text-green-800"><CheckCircle className="w-3 h-3 mr-1" />已完成</Badge>;
+      default:
+        return <Badge variant="outline"><AlertCircle className="w-3 h-3 mr-1" />{s}</Badge>;
+    }
+  };
+
+  // ── 加载 / 权限守卫 ───────────────────────────────────────────────────────────
   if (status === "loading" || !isAuthorized) {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">
-          <h1 className="text-2xl font-bold mb-4">加载中...</h1>
-          <p className="text-muted-foreground">请稍候，正在验证您的权限。</p>
+          <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4" />
+          <p className="text-muted-foreground">加载中...</p>
         </div>
       </div>
     );
   }
 
-  const pendingShipmentTickets = repairs?.filter(r => 
-    r.status === "pending_shipment" || r.status === "Pending_Shipment"
-  ).length || 0;
+  // ── 打开某个批次审核 ──────────────────────────────────────────────────────────
+  if (selectedBatchId) {
+    return (
+      <div className="flex-1 overflow-auto">
+        <div className="container mx-auto py-8 px-6">
+          <BusinessBatchReview
+            batchId={selectedBatchId}
+            onBack={() => {
+              setSelectedBatchId(null);
+              loadAllBatches();
+              loadPendingBatches();
+            }}
+            onCompleted={() => {
+              setSelectedBatchId(null);
+              loadAllBatches();
+              loadPendingBatches();
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
 
-  const quickActions = [
-    {
-      title: "待商务处理",
-      description: `查看 ${stats.adminReviewTickets} 个待审核的工单`,
-      icon: AlertCircle,
-      href: "/repairs?status=admin_review",
-      color: "text-purple-600",
-      bgColor: "bg-purple-50 dark:bg-purple-950/20",
-      borderColor: "border-purple-200 dark:border-purple-800",
-      count: stats.adminReviewTickets,
-      priority: stats.adminReviewTickets > 0
-    },
-    {
-      title: "工单管理",
-      description: "查看和管理所有维修工单",
-      icon: FileText,
-      href: "/repairs",
-      color: "text-blue-600",
-      bgColor: "bg-blue-50 dark:bg-blue-950/20",
-      borderColor: "border-blue-200 dark:border-blue-800"
-    },
-    {
-      title: "待发货工单",
-      description: `查看 ${pendingShipmentTickets} 个待发货的工单`,
-      icon: Package,
-      href: "/repairs?status=pending_shipment",
-      color: "text-orange-600",
-      bgColor: "bg-orange-50 dark:bg-orange-950/20",
-      borderColor: "border-orange-200 dark:border-orange-800",
-      count: pendingShipmentTickets
-    }
-  ];
+  const filteredBatches = allBatches.filter((b) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    return (
+      b.batchId.toLowerCase().includes(q) ||
+      (b.projectName || "").toLowerCase().includes(q) ||
+      (b.projectLocation || "").toLowerCase().includes(q)
+    );
+  });
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="container mx-auto py-8 px-6 space-y-8">
+      <div className="container mx-auto py-8 px-6 space-y-6">
         {/* 页面标题 */}
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-3xl font-bold">商务管理控制台</h1>
-            <p className="text-muted-foreground mt-2">
+            <p className="text-muted-foreground mt-1">
               欢迎回来，{user?.realName || "商务人员"}！这里是您的工单管理概览。
             </p>
           </div>
           <Button
             variant="outline"
             size="sm"
-            onClick={() => window.location.reload()}
+            onClick={() => { loadAllBatches(); loadPendingBatches(); }}
             className="flex items-center gap-2"
           >
             <RefreshCw className="h-4 w-4" />
@@ -161,78 +204,23 @@ export default function BusinessDashboard() {
           </Button>
         </div>
 
-        {/* 重点关注的统计卡片 - 待商务处理 */}
-        {stats.adminReviewTickets > 0 && (
-          <Card className={`border-2 ${quickActions[0].borderColor} ${quickActions[0].bgColor}`}>
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <div className={`p-3 rounded-lg ${quickActions[0].bgColor}`}>
-                    <AlertCircle className={`h-8 w-8 ${quickActions[0].color}`} />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-semibold">有待处理的工单</h3>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      您有 <span className="font-bold text-purple-600">{stats.adminReviewTickets}</span> 个工单等待您的审核和处理
-                    </p>
-                  </div>
-                </div>
-                <Button 
-                  className="flex items-center gap-2"
-                  onClick={() => handleOpenRepairsPanel("admin_review")}
-                >
-                  立即处理
-                  <ArrowRight className="h-4 w-4" />
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* 核心统计卡片 */}
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <Card className="hover:shadow-md transition-shadow">
+        {/* ── 核心统计卡片（只保留两个） ─────────────────────────────────────── */}
+        <div className="grid gap-4 md:grid-cols-2 max-w-2xl">
+          {/* 待商务处理 */}
+          <Card className="hover:shadow-md transition-shadow cursor-pointer" onClick={() => setActiveTab("pending")}>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">待商务处理</CardTitle>
               <div className="p-2 rounded-lg bg-purple-100 dark:bg-purple-900/30">
-                <AlertCircle className="h-4 w-4 text-purple-600" />
+                <DollarSign className="h-4 w-4 text-purple-600" />
               </div>
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-purple-600">{stats.adminReviewTickets}</div>
               <p className="text-xs text-muted-foreground mt-1">等待审核的工单</p>
-              {stats.adminReviewTickets > 0 && (
-                <button
-                  onClick={() => handleOpenRepairsPanel("admin_review")}
-                  className="text-xs text-purple-600 hover:underline mt-2 inline-block"
-                >
-                  查看详情 →
-                </button>
-              )}
             </CardContent>
           </Card>
 
-          <Card className="hover:shadow-md transition-shadow">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">待发货</CardTitle>
-              <div className="p-2 rounded-lg bg-orange-100 dark:bg-orange-900/30">
-                <Package className="h-4 w-4 text-orange-600" />
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold text-orange-600">{pendingShipmentTickets}</div>
-              <p className="text-xs text-muted-foreground mt-1">等待发货的工单</p>
-              {pendingShipmentTickets > 0 && (
-                <button
-                  onClick={() => handleOpenRepairsPanel("pending_shipment")}
-                  className="text-xs text-orange-600 hover:underline mt-2 inline-block"
-                >
-                  查看详情 →
-                </button>
-              )}
-            </CardContent>
-          </Card>
-
+          {/* 总工单数 */}
           <Card className="hover:shadow-md transition-shadow">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">总工单数</CardTitle>
@@ -245,100 +233,126 @@ export default function BusinessDashboard() {
               <p className="text-xs text-muted-foreground mt-1">所有工单</p>
             </CardContent>
           </Card>
+        </div>
 
-          <Card className="hover:shadow-md transition-shadow">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">已完成</CardTitle>
-              <div className="p-2 rounded-lg bg-green-100 dark:bg-green-900/30">
-                <CheckCircle className="h-4 w-4 text-green-600" />
+        {/* ── Tabs ────────────────────────────────────────────────────────────── */}
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+          <TabsList className="grid w-full md:w-auto grid-cols-2">
+            <TabsTrigger value="overview" className="flex items-center gap-2">
+              <FileText className="h-4 w-4" />
+              所有工单
+            </TabsTrigger>
+            <TabsTrigger value="pending" className="flex items-center gap-2">
+              <DollarSign className="h-4 w-4" />
+              待审核批次
+              {stats.adminReviewTickets > 0 && (
+                <Badge variant="destructive" className="ml-1">{stats.adminReviewTickets}</Badge>
+              )}
+            </TabsTrigger>
+          </TabsList>
+
+          {/* ── Tab 1：所有工单列表 ─────────────────────────────────────────────── */}
+          <TabsContent value="overview" className="space-y-4">
+            {/* 搜索框 */}
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="搜索工单号、批次号、序列号或故障描述..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-10"
+              />
+            </div>
+
+            {/* 列表 */}
+            {loadingBatches ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                <span className="ml-2 text-muted-foreground">加载中...</span>
               </div>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold text-green-600">{stats.completedTickets}</div>
-              <p className="text-xs text-muted-foreground mt-1">已完成工单</p>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* 其他状态统计 */}
-        <div className="grid gap-4 md:grid-cols-3">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm font-medium flex items-center gap-2">
-                <Clock className="h-4 w-4 text-yellow-600" />
-                待处理
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-yellow-600">{stats.pendingTickets}</div>
-              <p className="text-xs text-muted-foreground mt-1">待处理工单</p>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm font-medium flex items-center gap-2">
-                <TrendingUp className="h-4 w-4 text-blue-600" />
-                维修中
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-blue-600">{stats.inRepairTickets}</div>
-              <p className="text-xs text-muted-foreground mt-1">正在维修的工单</p>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm font-medium flex items-center gap-2">
-                <Users className="h-4 w-4 text-muted-foreground" />
-                总用户数
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">{stats.totalUsers}</div>
-              <p className="text-xs text-muted-foreground mt-1">已注册用户</p>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* 快速操作 */}
-        <div>
-          <h2 className="text-xl font-semibold mb-4">快速操作</h2>
-          <div className="grid gap-4 md:grid-cols-3">
-            {quickActions.map((action, index) => {
-              const Icon = action.icon;
-              return (
-                <Card
-                  key={index}
-                  onClick={action.onClick}
-                  className={`hover:shadow-lg transition-all cursor-pointer border-2 ${action.borderColor} ${action.priority ? action.bgColor : ''} hover:scale-[1.02]`}
-                >
-                  <CardHeader>
-                    <CardTitle className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Icon className={`h-5 w-5 ${action.color}`} />
-                        {action.title}
+            ) : filteredBatches.length === 0 ? (
+              <div className="text-center py-12">
+                <Package className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+                <p className="text-muted-foreground">
+                  {searchQuery ? "未找到匹配的工单" : "暂无批次工单"}
+                </p>
+              </div>
+            ) : (
+              <div className="grid gap-3">
+                {filteredBatches.map((batch, idx) => (
+                  <Card
+                    key={`batch-${batch.batchId}-${idx}`}
+                    className="hover:border-primary/50 transition-colors cursor-pointer"
+                    onClick={() => setSelectedBatchId(batch.batchId)}
+                  >
+                    <CardContent className="p-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex-1 space-y-2">
+                          <div className="flex items-center gap-3 flex-wrap">
+                            <h3 className="font-semibold text-lg">{batch.batchId}</h3>
+                            {getStatusBadge(batch.status)}
+                            <Badge variant="secondary">{batch.deviceCount} 台设备</Badge>
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-sm text-muted-foreground">
+                            <div><span className="font-medium">项目：</span>{batch.projectName || batch.projectLocation}</div>
+                            <div><span className="font-medium">类别：</span>{batch.category}</div>
+                            <div><span className="font-medium">创建时间：</span>{format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}</div>
+                          </div>
+                        </div>
+                        <ChevronRight className="h-5 w-5 text-muted-foreground ml-2 shrink-0" />
                       </div>
-                      {action.count !== undefined && action.count > 0 && (
-                        <span className={`text-xs px-2 py-1 rounded-full ${action.bgColor} ${action.color} font-semibold`}>
-                          {action.count}
-                        </span>
-                      )}
-                    </CardTitle>
-                    <CardDescription>{action.description}</CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="flex items-center text-sm text-primary hover:underline">
-                      立即前往
-                      <ArrowRight className="h-4 w-4 ml-1" />
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
-        </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </TabsContent>
+
+          {/* ── Tab 2：待审核批次 ───────────────────────────────────────────────── */}
+          <TabsContent value="pending" className="space-y-4">
+            {loadingPending ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                <span className="ml-2 text-muted-foreground">加载中...</span>
+              </div>
+            ) : pendingBatches.length === 0 ? (
+              <div className="text-center py-12">
+                <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />
+                <p className="text-muted-foreground">暂无待审核的批次工单</p>
+              </div>
+            ) : (
+              <div className="grid gap-3">
+                {pendingBatches.map((batch, idx) => (
+                  <Card
+                    key={`pending-${batch.batchId}-${idx}`}
+                    className="hover:border-primary/50 transition-colors cursor-pointer"
+                    onClick={() => setSelectedBatchId(batch.batchId)}
+                  >
+                    <CardContent className="p-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex-1 space-y-2">
+                          <div className="flex items-center gap-3 flex-wrap">
+                            <h3 className="font-semibold text-lg">{batch.batchId}</h3>
+                            <Badge variant="outline" className="bg-purple-50 border-purple-300 text-purple-800">
+                              <DollarSign className="w-3 h-3 mr-1" />待商务审核
+                            </Badge>
+                            <Badge variant="secondary">{batch.deviceCount} 台设备</Badge>
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-sm text-muted-foreground">
+                            <div><span className="font-medium">项目：</span>{batch.projectName || batch.projectLocation}</div>
+                            <div><span className="font-medium">类别：</span>{batch.category}</div>
+                            <div><span className="font-medium">创建时间：</span>{format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}</div>
+                          </div>
+                        </div>
+                        <ChevronRight className="h-5 w-5 text-muted-foreground ml-2 shrink-0" />
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
   );

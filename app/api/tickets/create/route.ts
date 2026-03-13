@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { getDbConnection } from "@/lib/db-config";   // ✅ 从这里拿连接池
-import { UPLOAD_DIR } from "@/app/api/config";       // ✅ 这里只导出 UPLOAD_DIR
+import { getDbConnection } from "@/lib/db-config";
+import { UPLOAD_DIR } from "@/app/api/config";
+import { TicketStatus, SPECIAL_VALUES } from "@/lib/enums"; // ✅ Rule 4 — 消除 Magic String
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
@@ -21,7 +22,11 @@ export async function POST(request: Request) {
 
     // --- 2. 提取现场人员填报区字段 ---
     const submitDate = formData.get("submitDate") ? new Date(formData.get("submitDate") as string) : new Date()
-    const trackingNumberIn = (formData.get("trackingNumberIn") || "").toString().trim() || null
+    let trackingNumberIn = (formData.get("trackingNumberIn") || "").toString().trim() || null
+    // 清理快递单号中的空格（防呆处理）
+    if (trackingNumberIn) {
+      trackingNumberIn = trackingNumberIn.replace(/\s+/g, '')
+    }
     const senderAddress = (formData.get("senderAddress") || "").toString().trim() || null
     const contactInfo = (formData.get("contactInfo") || "").toString().trim() || null
     const projectName = (formData.get("projectName") || "").toString().trim() || null
@@ -30,6 +35,9 @@ export async function POST(request: Request) {
     const quantityRaw = (formData.get("quantity") || "1").toString().trim()
     const quantity = quantityRaw && !Number.isNaN(Number(quantityRaw)) ? Number(quantityRaw) : 1
     const rawProductSn = (formData.get("productSn") || "").toString().trim() || deviceSn
+
+    // 统一工单号：同一次报修中多台设备共享的业务工单号
+    const workOrderNumber = (formData.get("workOrderNumber") || "").toString().trim() || null
 
     // --- 3. 提取产品信息类 (三级联动) ---
     const subCategory = (formData.get("subCategory") || "").toString().trim() || null
@@ -161,6 +169,7 @@ export async function POST(request: Request) {
     const hasDeviceImages = availableColumns.some((col: string) => col.toLowerCase() === "deviceimages")
     const hasDamageImages = availableColumns.some((col: string) => col.toLowerCase() === "damageimages")
     const hasWarehouse = availableColumns.some((col: string) => col.toLowerCase() === "warehouse")
+    const hasWorkOrderNumber = availableColumns.some((col: string) => col.toLowerCase() === "workordernumber")
     
     // 兼容旧字段
     const hasContactName = availableColumns.some((col: string) => col.toLowerCase() === "contactname")
@@ -179,11 +188,12 @@ export async function POST(request: Request) {
     // 分支 1：暂缓验证流程 (PENDING)
     // ==========================================
     if (isPendingVerify) {
+      // ✅ Rule 4 — 使用 TicketStatus 枚举替代 "Created" 字符串字面量
       const requestPending = pool.request()
         .input("deviceSn", "PENDING")
         .input("modelName", selectedModelName)
         .input("faultDesc", faultDesc)
-        .input("status", "Created") // 状态设为 Created (待维修)
+        .input("status", TicketStatus.CREATED)
 
       // 动态构建 PENDING 流程的 SQL
       let insertPending = `INSERT INTO Repair_Tickets (DeviceSN, ModelName, FaultDescription, Status`
@@ -225,6 +235,7 @@ export async function POST(request: Request) {
       if (hasCategory) { insertPending += `, Category`; valuesPending += `, @category`; requestPending.input("category", category) }
       if (hasQuantity) { insertPending += `, Quantity`; valuesPending += `, @quantity`; requestPending.input("quantity", quantity) }
       if (hasProductSn) { insertPending += `, ProductSN`; valuesPending += `, @productSn`; requestPending.input("productSn", "PENDING") }
+      if (hasWorkOrderNumber) { insertPending += `, WorkOrderNumber`; valuesPending += `, @workOrderNumber`; requestPending.input("workOrderNumber", workOrderNumber) }
       // 注意：FaultDescription 已经在基础字段中，不需要重复添加
       
       // 兼容旧字段
@@ -267,10 +278,16 @@ export async function POST(request: Request) {
     // 分支 2：正常 SN 验证流程 (严格校验库存)
     // ==========================================
     
-    // 1. 查库存
+    // 1. 查库存（✅ Rule 4 — 显式列出所需字段，禁止 SELECT *）
     const deviceResult = await pool.request()
       .input("serialNumber", deviceSn)
-      .query(`SELECT TOP 1 * FROM Device_Inventory WHERE SerialNumber = @serialNumber`)
+      .query(`
+        SELECT TOP 1
+          SerialNumber, Status, DeviceType,
+          ProjectLocation, ModelName, MaterialCode, Warehouse
+        FROM Device_Inventory
+        WHERE SerialNumber = @serialNumber
+      `)
 
     if (deviceResult.recordset.length === 0) {
       return NextResponse.json({ success: false, message: "设备序列号不存在于设备档案中，请先录入设备信息" }, { status: 400 })
@@ -278,10 +295,19 @@ export async function POST(request: Request) {
 
     const device = deviceResult.recordset[0]
     
-    // 2. 更新库存状态
-    const currentStatus = device.Status || ""
-    if (currentStatus === "在库" || currentStatus === "In Stock" || currentStatus.toLowerCase() === "instock" || currentStatus === "出库" || currentStatus === "Out Stock") {
-       await pool.request().input("serialNumber", deviceSn).input("newStatus", "维修中")
+    // 2. 更新库存状态（✅ Rule 4 — 使用 SPECIAL_VALUES 常量替代 Magic String）
+    const currentStatus: string = device.Status ?? ""
+    const isDeviceAvailable =
+      currentStatus === SPECIAL_VALUES.DEVICE_STATUS_IN_STOCK ||
+      currentStatus === SPECIAL_VALUES.DEVICE_STATUS_OUT_STOCK ||
+      currentStatus === SPECIAL_VALUES.DEVICE_STATUS_IN_STOCK_EN ||
+      currentStatus === SPECIAL_VALUES.DEVICE_STATUS_OUT_STOCK_EN ||
+      currentStatus.toLowerCase() === "instock"
+
+    if (isDeviceAvailable) {
+      await pool.request()
+        .input("serialNumber", deviceSn)
+        .input("newStatus", SPECIAL_VALUES.DEVICE_STATUS_REPAIRING)
         .query(`UPDATE Device_Inventory SET Status = @newStatus WHERE SerialNumber = @serialNumber`)
     }
 
@@ -294,11 +320,12 @@ export async function POST(request: Request) {
     const projectLocationForDb = projectLocation || device.ProjectLocation || null
 
     // 4. 构建正常流程的 SQL
+    // ✅ Rule 4 — 使用 TicketStatus 枚举替代 "Created" 字符串字面量
     const requestNormal = pool.request()
       .input("deviceSn", deviceSn)
       .input("modelName", finalModelName)
       .input("faultDesc", faultDesc)
-      .input("status", "Created") // 状态设为 Created (待维修)
+      .input("status", TicketStatus.CREATED)
 
     // 动态构建基础字段
     let insertQuery = `INSERT INTO Repair_Tickets (DeviceSN, ModelName, FaultDescription, Status`
@@ -349,6 +376,7 @@ export async function POST(request: Request) {
     if (hasCategory) { insertQuery += `, Category`; valuesQuery += `, @category`; requestNormal.input("category", category) }
     if (hasQuantity) { insertQuery += `, Quantity`; valuesQuery += `, @quantity`; requestNormal.input("quantity", quantity) }
     if (hasProductSn) { insertQuery += `, ProductSN`; valuesQuery += `, @productSn`; requestNormal.input("productSn", deviceSn) } // 正常流程存真实SN
+    if (hasWorkOrderNumber) { insertQuery += `, WorkOrderNumber`; valuesQuery += `, @workOrderNumber`; requestNormal.input("workOrderNumber", workOrderNumber) }
     // 注意：FaultDescription 已经在基础字段中，不需要重复添加
     
     // 兼容旧字段

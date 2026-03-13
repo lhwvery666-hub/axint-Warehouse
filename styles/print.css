@@ -1,0 +1,447 @@
+/* 打印样式 - 专业维修报告格式 */
+@media print {
+  @page {
+    size: A4;
+    margin: 15mm;
+  }
+  
+  body {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  
+  .no-print {
+    display: none !important;
+  }
+  
+  .print-container {
+    background: white !important;
+    padding: 0 !important;
+  }
+  
+  table {
+    page-break-inside: avoid;
+  }
+  
+  .contact-footer {
+    background-color: #f9f9f9 !important;
+    border: 1px solid #ddd !important;
+  }
+  
+  .signed-photo-section {
+    background-color: #eff6ff !important;
+    border: 2px solid #2563eb !important;
+    page-break-inside: avoid;
+  }
+  
+  .signed-photo-image {
+    max-height: 400px !important;
+    page-break-inside: avoid;
+  }
+}
+
+/* 屏幕显示样式 */
+.print-container {
+  max-width: 210mm;
+  margin: 0 auto;
+  padding: 20px;
+  background: white;
+}
+
+/* 公司抬头 */
+.report-header {
+  text-align: center;
+  margin-bottom: 20px;
+  border-bottom: 2px solid #000;
+  padding-bottom: 10px;
+}
+
+.company-name {
+  font-size: 24px;
+  font-weight: bold;
+  margin-bottom: 8px;
+  color: #000;
+}
+
+.report-title {
+  font-size: 20px;
+  font-weight: bold;
+  margin-bottom: 15px;
+  color: #000;
+}
+
+/* 信息表格 */
+.info-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 20px;
+  border: 1px solid #000;
+}
+
+.info-table td {
+  border: 1px solid #000;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+.info-table .label-cell {
+  background-color: #f5f5f5;
+  font-weight: 600;
+  width: 18%;
+  text-align: center;
+}
+
+.info-table .value-cell {
+  width: 32%;
+  color: #333;
+}
+
+/* 维修明细表 */
+.detail-table-container {
+  margin-bottom: 20px;
+}
+
+.detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid #000;
+  margin-top: 10px;
+}
+
+.detail-table th {
+  background-color: #f5f5f5;
+  border: 1px solid #000;
+  padding: 10px 8px;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.detail-table td {
+  border: 1px solid #000;
+  padding: 8px;
+  font-size: 13px;
+  text-align: center;
+}
+
+.detail-table td.text-left {
+  text-align: left;
+}
+
+.detail-table td.text-right {
+  text-align: right;
+}
+
+.detail-table .total-row {
+  border-top: 1px solid #000 !important;
+}
+
+.detail-table .total-row td {
+  font-weight: bold;
+  background-color: #f9f9f9;
+  border: 1px solid #000 !important;
+  border-top: 1px solid #000 !important;
+}
+
+/* 备注区域 */
+.remarks-section {
+  margin-bottom: 0;
+  border: 1px solid #000;
+  border-top: none;
+  padding: 10px 15px;
+  min-height: 100px;
+}
+
+.remarks-title {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 8px;
+  text-align: left;
+}
+
+.remarks-content {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #333;
+}
+
+/* 签字报告照片区域 */
+.signed-photo-section {
+  margin-bottom: 20px;
+  border: 2px solid #2563eb;
+  border-radius: 8px;
+  padding: 15px;
+  background-color: #eff6ff;
+}
+
+.signed-photo-title {
+  font-weight: 600;
+  font-size: 15px;
+  color: #1e40af;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.signed-photo-container {
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 10px;
+  text-align: center;
+  margin-bottom: 10px;
+}
+
+.signed-photo-image {
+  max-width: 100%;
+  max-height: 500px;
+  width: auto;
+  height: auto;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.signed-photo-note {
+  font-size: 12px;
+  color: #1e40af;
+  text-align: center;
+  font-style: italic;
+}
+
+/* 签字确认区域（新版网格布局） */
+.signature-section-grid {
+  margin-top: 20px;
+  border: 1px solid #000;
+  width: 100%;
+}
+
+.signature-row {
+  display: flex;
+  width: 100%;
+  border-bottom: 1px solid #000;
+}
+
+.signature-row:last-child {
+  border-bottom: none;
+}
+
+.signature-cell {
+  flex: 1;
+  padding: 10px 15px;
+  border-right: 1px solid #000;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+}
+
+.signature-cell:last-child {
+  border-right: none;
+}
+
+.signature-cell.customer-signature {
+  flex-direction: column;
+  align-items: flex-start;
+  position: relative;
+}
+
+.signature-label {
+  font-weight: 600;
+  color: #000;
+  margin-right: 5px;
+}
+
+.signature-label-block {
+  font-weight: 600;
+  color: #000;
+  margin-bottom: 8px;
+}
+
+.signature-value {
+  color: #333;
+}
+
+.signature-content {
+  width: 100%;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60px;
+}
+
+.customer-signature-img {
+  max-width: 100%;
+  max-height: 70px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border: 1px solid #ddd;
+  border-radius: 2px;
+}
+
+.signature-placeholder {
+  width: 100%;
+  height: 60px;
+  border: 1px dashed #ccc;
+  border-radius: 2px;
+  background-color: #fafafa;
+}
+
+/* 签字区域（底部旧版） */
+.signature-section {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0;
+  border: 1px solid #000;
+  border-top: none;
+}
+
+.signature-item {
+  flex: 1;
+  text-align: left;
+  padding: 15px;
+  border-left: 1px solid #000;
+  font-size: 14px;
+}
+
+.signature-item:first-child {
+  border-left: none;
+}
+
+/* 请确认是否维修区域 */
+.confirm-repair-section {
+  border: 1px solid #000;
+  border-top: none;
+  padding: 15px;
+  min-height: 120px;
+}
+
+.confirm-repair-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.confirm-repair-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.confirm-option {
+  font-size: 14px;
+  padding: 5px 0;
+}
+
+.confirm-option span {
+  margin-left: 20px;
+}
+
+/* 客户确认和日期区域 */
+.customer-signature-area {
+  border: 1px solid #000;
+  border-top: none;
+  padding: 15px;
+  min-height: 120px;
+}
+
+.signature-row-flex {
+  display: flex;
+  gap: 20px;
+}
+
+.signature-item-large {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.signature-label-top {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.signature-space {
+  flex: 1;
+  min-height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 提示文字区域 */
+.note-section {
+  padding: 10px 15px;
+  font-size: 12px;
+  color: #666;
+  text-align: left;
+}
+
+.note-section p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* 联系信息（新版横排） */
+.contact-footer-inline {
+  margin-top: 15px;
+  padding: 8px 15px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #333;
+}
+
+.contact-footer-inline strong {
+  font-weight: 600;
+  color: #000;
+  margin-right: 5px;
+}
+
+.contact-footer-address {
+  padding: 0 15px 10px 15px;
+  font-size: 13px;
+  color: #333;
+}
+
+.contact-footer-address strong {
+  font-weight: 600;
+  color: #000;
+  margin-right: 5px;
+}
+
+/* 响应式调整 */
+@media screen and (max-width: 768px) {
+  .print-container {
+    padding: 10px;
+  }
+  
+  .company-name {
+    font-size: 20px;
+  }
+  
+  .report-title {
+    font-size: 18px;
+  }
+  
+  .info-table td,
+  .detail-table th,
+  .detail-table td {
+    font-size: 12px;
+    padding: 6px;
+  }
+  
+  .signature-section {
+    flex-direction: column;
+  }
+  
+  .signature-item {
+    border-left: none;
+    border-top: 1px solid #000;
+  }
+  
+  .signature-item:first-child {
+    border-top: none;
+  }
+}

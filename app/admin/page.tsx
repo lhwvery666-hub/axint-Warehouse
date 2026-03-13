@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
+import { UserRole } from "@/lib/enums";
 
 export default function AdminDashboard() {
   const { user, status } = useAuth();
@@ -11,7 +12,7 @@ export default function AdminDashboard() {
   useEffect(() => {
     if (status === "loading") return;
     
-    if (status === "unauthenticated" || user?.role !== "admin") {
+    if (status === "unauthenticated" || user?.role !== UserRole.ADMIN) {
       router.push("/login");
       return;
     }

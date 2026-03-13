@@ -11,8 +11,20 @@ import {
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AlertCircle, RefreshCw, Database, FileSpreadsheet, Loader2, BarChart3, Home, Package, Wrench, LogOut, Download } from "lucide-react";
+import { Progress } from "@/components/ui/progress";
+import { AlertCircle, RefreshCw, Database, FileSpreadsheet, Loader2, BarChart3, Home, Package, Wrench, LogOut, Download, Trash2, ShieldAlert } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/context/auth-context";
 
 interface Statistics {
@@ -25,6 +37,7 @@ interface Statistics {
 
 export default function DatabaseManager() {
   const { user, logout } = useAuth();
+  const { toast } = useToast();
   const [statistics, setStatistics] = useState<Statistics | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   
@@ -36,6 +49,19 @@ export default function DatabaseManager() {
     stats?: any;
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Danger Zone 状态 ──
+  const [showClearDialog, setShowClearDialog] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+
+  // 导入进度
+  const [importProgress, setImportProgress] = useState({
+    stage: '',
+    message: '',
+    progress: 0,
+    total: 0,
+    percentage: 0
+  });
 
   // 加载统计信息
   useEffect(() => {
@@ -80,7 +106,7 @@ export default function DatabaseManager() {
   };
 
 
-  // Excel 导入处理
+  // Excel 导入处理（带进度条）
   const handleExcelImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -93,35 +119,78 @@ export default function DatabaseManager() {
 
     setIsImportingExcel(true);
     setExcelImportResult(null);
+    setImportProgress({ stage: '', message: '准备上传...', progress: 0, total: 0, percentage: 0 });
 
     try {
       const formData = new FormData();
       formData.append('file', file);
 
-      const response = await fetch('/api/import/excel', {
+      const response = await fetch('/api/import/excel-stream', {
         method: 'POST',
         body: formData,
       });
 
-      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
 
-      if (result.success) {
-        setExcelImportResult({
-          success: true,
-          message: result.message,
-          stats: result.stats,
-        });
-        // 刷新统计信息
-        loadStatistics();
-        // 清空文件输入
-        if (fileInputRef.current) {
-          fileInputRef.current.value = '';
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) {
+        throw new Error('无法读取响应流');
+      }
+
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = JSON.parse(line.slice(6));
+            
+            // 更新进度
+            if (data.stage === 'error') {
+              setExcelImportResult({
+                success: false,
+                message: data.message,
+              });
+              setIsImportingExcel(false);
+              return;
+            } else if (data.stage === 'complete') {
+              setExcelImportResult({
+                success: true,
+                message: data.message,
+                stats: data.stats,
+              });
+              // 刷新统计信息
+              loadStatistics();
+              // 清空文件输入
+              if (fileInputRef.current) {
+                fileInputRef.current.value = '';
+              }
+            } else {
+              // 更新进度条
+              const percentage = data.percentage || 
+                (data.total > 0 ? Math.floor((data.progress / data.total) * 100) : 0);
+              
+              setImportProgress({
+                stage: data.stage || '',
+                message: data.message || '',
+                progress: data.progress || 0,
+                total: data.total || 0,
+                percentage
+              });
+            }
+          }
         }
-      } else {
-        setExcelImportResult({
-          success: false,
-          message: result.message || result.error || '导入失败',
-        });
       }
     } catch (error: any) {
       console.error('Excel 导入错误:', error);
@@ -131,6 +200,7 @@ export default function DatabaseManager() {
       });
     } finally {
       setIsImportingExcel(false);
+      setImportProgress({ stage: '', message: '', progress: 0, total: 0, percentage: 0 });
     }
   };
 
@@ -225,8 +295,38 @@ export default function DatabaseManager() {
           </div>
         </CardHeader>
         <CardContent>
+          {/* Excel 导入进度条 */}
+          {isImportingExcel && (
+            <div className="mb-6">
+              <Card className="border-2 border-primary/20 bg-primary/5">
+                <CardContent className="pt-6">
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                        <span className="font-medium">正在导入 Excel 文件</span>
+                      </div>
+                      <span className="text-sm text-muted-foreground">
+                        {importProgress.percentage}%
+                      </span>
+                    </div>
+                    <Progress value={importProgress.percentage} className="h-2" />
+                    <div className="text-sm text-muted-foreground">
+                      {importProgress.message}
+                      {importProgress.total > 0 && (
+                        <span className="ml-2">
+                          ({importProgress.progress}/{importProgress.total})
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
+
           {/* Excel 导入结果提示 */}
-          {excelImportResult && (
+          {excelImportResult && !isImportingExcel && (
             <div className="mb-6">
               <Alert variant={excelImportResult.success ? "default" : "destructive"}>
                 <AlertCircle className="h-4 w-4" />
@@ -469,6 +569,121 @@ export default function DatabaseManager() {
           )}
         </CardContent>
       </Card>
+
+      {/* ══════════════════ Danger Zone ══════════════════ */}
+      <Card className="border-2 border-destructive/50 bg-destructive/5 dark:bg-destructive/10">
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-destructive text-base">
+            <ShieldAlert className="h-5 w-5" />
+            危险操作区（Danger Zone）
+          </CardTitle>
+          <CardDescription className="text-destructive/70 text-xs">
+            以下操作具有<strong>不可逆</strong>的破坏性，请在测试环境谨慎执行。
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between rounded-lg border border-destructive/30 bg-background px-4 py-3">
+            <div className="space-y-0.5">
+              <p className="text-sm font-medium">清空所有维修工单</p>
+              <p className="text-xs text-muted-foreground">
+                删除全部工单主表及历史流水；用户、设备、批次数据安全保留。
+              </p>
+            </div>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={isClearing}
+              onClick={() => setShowClearDialog(true)}
+              className="ml-6 shrink-0"
+            >
+              {isClearing ? (
+                <>
+                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                  清空中...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="mr-2 h-3.5 w-3.5" />
+                  清空所有维修工单
+                </>
+              )}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ── 二次确认 AlertDialog ── */}
+      <AlertDialog open={showClearDialog} onOpenChange={(open) => { if (!isClearing) setShowClearDialog(open); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-destructive">
+              <ShieldAlert className="h-5 w-5 shrink-0" />
+              警告：确定要清空所有数据吗？
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 text-sm">
+                <p>
+                  此操作将<strong className="text-destructive">永久删除所有维修工单及其历史流水！</strong>
+                </p>
+                <p className="text-muted-foreground">
+                  但仓库设备、入库批次及用户数据将安全保留。是否继续？
+                </p>
+                <p className="font-semibold text-destructive">⚠️ 该操作执行后无法恢复！</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isClearing}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={isClearing}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90 focus-visible:ring-destructive"
+              onClick={async (e) => {
+                e.preventDefault(); // 阻止弹窗在请求完成前自动关闭
+                setIsClearing(true);
+                try {
+                  const res = await fetch("/api/admin/clear-tickets", { method: "DELETE" });
+                  const data: {
+                    success: boolean;
+                    message: string;
+                    deletedCount?: { tickets: number; history: number };
+                  } = await res.json();
+
+                  setShowClearDialog(false);
+
+                  if (data.success) {
+                    toast({
+                      title: "✅ 清空完成",
+                      description: `已删除 ${data.deletedCount?.tickets ?? 0} 条工单，${data.deletedCount?.history ?? 0} 条历史流水`,
+                    });
+                    setTimeout(() => window.location.reload(), 1200);
+                  } else {
+                    toast({
+                      title: "❌ 清空失败",
+                      description: data.message || "操作失败，请联系技术支持",
+                      variant: "destructive",
+                    });
+                  }
+                } catch (err: any) {
+                  setShowClearDialog(false);
+                  toast({
+                    title: "❌ 网络错误",
+                    description: err.message || "请求失败，请检查服务状态",
+                    variant: "destructive",
+                  });
+                } finally {
+                  setIsClearing(false);
+                }
+              }}
+            >
+              {isClearing ? (
+                <><Loader2 className="mr-2 h-4 w-4 animate-spin" />清空中...</>
+              ) : (
+                "确认删除"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

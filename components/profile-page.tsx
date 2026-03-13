@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils"
 import { useAuth } from "@/context/auth-context"
 import { useRepairContext } from "@/context/RepairContext"
 import { useTheme } from "next-themes"
+import { UserRole, USER_ROLE_LABELS } from "@/lib/enums"
 
 const menuItems = [
   { icon: FileText, label: "我的报告", badge: "" },
@@ -241,7 +242,7 @@ export default function ProfilePage() {
                     ) : (
                       <>
                         <h2 className="text-xl font-bold text-foreground">{editedUser.realName || "未设置实名"}</h2>
-                        <p className="text-sm text-muted-foreground">{user?.role === "technician" ? "维修工程师" : "现场报告人员"}</p>
+                        <p className="text-sm text-muted-foreground">{user?.role === UserRole.TECHNICIAN ? "维修工程师" : "现场报告人员"}</p>
                         <p className="text-sm text-muted-foreground flex items-center justify-center gap-1">
                           <Phone className="h-4 w-4" />
                           {editedUser.phone || "未设置"}
@@ -251,10 +252,7 @@ export default function ProfilePage() {
                         )}
                         {user?.role && (
                           <p className="text-xs text-muted-foreground">
-                            角色: {user.role === "admin" ? "管理员" : 
-                                   user.role === "technician" ? "维修工程师" :
-                                   user.role === "warehouse" ? "仓库管理员" :
-                                   user.role === "reporter" ? "现场报告人员" : "普通员工"}
+                            角色: {USER_ROLE_LABELS[user.role] || "未知角色"}
                           </p>
                         )}
                       </>
@@ -410,10 +408,11 @@ export default function ProfilePage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-2">
-                          <h3 className="font-semibold">{report.deviceName || report.deviceModel}</h3>
                           {getStatusBadge(report.status)}
                         </div>
-                        <p className="text-sm text-muted-foreground mb-1">位置: {report.location}</p>
+                        <p className="text-sm text-muted-foreground mb-1">
+                          工单号：{(report as any).workOrderNumber || report.id}
+                        </p>
                         <p className="text-sm text-muted-foreground mb-2">故障: {report.problem}</p>
                         <p className="text-xs text-muted-foreground">报修时间: {report.reportedAt}</p>
                       </div>

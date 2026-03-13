@@ -11,6 +11,10 @@ import { DayButton, DayPicker, getDefaultClassNames } from 'react-day-picker'
 import { cn } from '@/lib/utils'
 import { Button, buttonVariants } from '@/components/ui/button'
 
+/** Default year range for dropdown when not provided: 15 years ago to 5 years ahead */
+const DEFAULT_FROM_YEAR = new Date().getFullYear() - 15
+const DEFAULT_TO_YEAR = new Date().getFullYear() + 5
+
 function Calendar({
   className,
   classNames,
@@ -19,11 +23,24 @@ function Calendar({
   buttonVariant = 'ghost',
   formatters,
   components,
+  startMonth: startMonthProp,
+  endMonth: endMonthProp,
+  fromYear,
+  toYear,
   ...props
 }: React.ComponentProps<typeof DayPicker> & {
   buttonVariant?: React.ComponentProps<typeof Button>['variant']
 }) {
   const defaultClassNames = getDefaultClassNames()
+
+  // When using dropdown layout, default startMonth/endMonth from fromYear/toYear if not provided
+  const isDropdown = captionLayout === 'dropdown' || captionLayout === 'dropdown-months' || captionLayout === 'dropdown-years'
+  const from = fromYear ?? DEFAULT_FROM_YEAR
+  const to = toYear ?? DEFAULT_TO_YEAR
+  const startMonth = startMonthProp ?? (isDropdown ? new Date(from, 0, 1) : undefined)
+  const endMonth = endMonthProp ?? (isDropdown ? new Date(to, 11, 31) : undefined)
+  const effectiveStartMonth = isDropdown ? startMonth : startMonthProp
+  const effectiveEndMonth = isDropdown ? endMonth : endMonthProp
 
   return (
     <DayPicker
@@ -35,6 +52,8 @@ function Calendar({
         className,
       )}
       captionLayout={captionLayout}
+      startMonth={effectiveStartMonth}
+      endMonth={effectiveEndMonth}
       formatters={{
         formatMonthDropdown: (date) =>
           date.toLocaleString('default', { month: 'short' }),
@@ -66,22 +85,26 @@ function Calendar({
           defaultClassNames.month_caption,
         ),
         dropdowns: cn(
-          'w-full flex items-center text-sm font-medium justify-center h-(--cell-size) gap-1.5',
+          'w-full flex flex-wrap items-center justify-center text-sm font-medium gap-2 min-h-(--cell-size) [&>.rdp-dropdown_root]:z-[1]',
           defaultClassNames.dropdowns,
         ),
         dropdown_root: cn(
-          'relative has-focus:border-ring border border-input shadow-xs has-focus:ring-ring/50 has-focus:ring-[3px] rounded-md',
+          'relative min-w-[5.5rem] h-9 border border-input bg-background rounded-md shadow-xs cursor-pointer',
+          'has-[:focus]:border-ring has-[:focus]:ring-2 has-[:focus]:ring-ring/20 has-[:focus]:ring-offset-2',
+          'hover:bg-accent/50 transition-colors',
           defaultClassNames.dropdown_root,
         ),
         dropdown: cn(
-          'absolute bg-popover inset-0 opacity-0',
+          'absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10',
           defaultClassNames.dropdown,
         ),
+        months_dropdown: cn('min-w-[4.5rem]', defaultClassNames.months_dropdown),
+        years_dropdown: cn('min-w-[4.5rem]', defaultClassNames.years_dropdown),
         caption_label: cn(
           'select-none font-medium',
           captionLayout === 'label'
             ? 'text-sm'
-            : 'rounded-md pl-2 pr-1 flex items-center gap-1 text-sm h-8 [&>svg]:text-muted-foreground [&>svg]:size-3.5',
+            : 'rounded-md pl-2 pr-1 flex items-center gap-1 text-sm h-8 text-foreground [&>svg]:text-muted-foreground [&>svg]:size-3.5 pointer-events-none',
           defaultClassNames.caption_label,
         ),
         table: 'w-full border-collapse',

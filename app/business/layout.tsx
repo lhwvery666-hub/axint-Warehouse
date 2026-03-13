@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
-import RepairsPanel from "@/components/repairs-panel";
+import { UserRole } from "@/lib/enums";
 
 export default function BusinessLayout({
   children,
@@ -26,7 +26,6 @@ export default function BusinessLayout({
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isAuthorized, setIsAuthorized] = useState(false);
-  const [repairsPanelOpen, setRepairsPanelOpen] = useState(false);
   
   useEffect(() => {
     // 如果状态还在加载中，不做任何处理
@@ -38,7 +37,7 @@ export default function BusinessLayout({
       return;
     }
     
-    if (user?.role !== "business") {
+    if (user?.role !== UserRole.BUSINESS) {
       router.push("/login");
       return;
     }
@@ -59,22 +58,6 @@ export default function BusinessLayout({
     );
   }
 
-  // 监听路径变化和URL参数，如果访问 /repairs 或带有status参数则打开右侧面板
-  useEffect(() => {
-    if (pathname === "/repairs" || pathname?.startsWith("/repairs")) {
-      setRepairsPanelOpen(true);
-      // 更新URL但不跳转
-      if (pathname !== "/business") {
-        router.replace("/business", { scroll: false });
-      }
-    }
-    // 检查URL参数中的status
-    const urlParams = new URLSearchParams(window.location.search);
-    const status = urlParams.get("status");
-    if (status && pathname === "/business") {
-      setRepairsPanelOpen(true);
-    }
-  }, [pathname, router]);
 
   const menuItems = [
     {
@@ -87,9 +70,9 @@ export default function BusinessLayout({
     {
       title: "工单管理",
       icon: FileText,
-      href: "#",
+      href: "/business/repairs",
       description: "查看和管理所有维修工单",
-      onClick: () => setRepairsPanelOpen(true)
+      onClick: undefined
     },
     {
       title: "个人中心",
@@ -103,9 +86,6 @@ export default function BusinessLayout({
   const isActive = (href: string) => {
     if (href === "/business") {
       return pathname === "/business";
-    }
-    if (href === "#") {
-      return repairsPanelOpen;
     }
     return pathname?.startsWith(href);
   };
@@ -217,14 +197,10 @@ export default function BusinessLayout({
       {/* 主内容区 - 添加左边距以适配固定侧边栏 */}
       <main className={cn(
         "flex-1 flex flex-col min-w-0 transition-all duration-300",
-        sidebarOpen ? "ml-64" : "ml-20",
-        repairsPanelOpen && "mr-[600px]"
+        sidebarOpen ? "ml-64" : "ml-20"
       )}>
         {children}
       </main>
-
-      {/* 工单管理右侧面板 */}
-      <RepairsPanel isOpen={repairsPanelOpen} onClose={() => setRepairsPanelOpen(false)} />
     </div>
   );
 }

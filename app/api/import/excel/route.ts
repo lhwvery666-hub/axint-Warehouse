@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDbConnection, closeDbConnection } from "@/lib/db-config";
-import * as sql from "mssql";
+import { prisma } from "@/lib/prisma";
 import * as XLSX from "xlsx";
 
 // Excel 列名映射（按列索引读取）
@@ -10,12 +9,12 @@ interface ExcelRow {
 
 // 数据库字段接口
 interface DeviceRecord {
-  MaterialCode: string;
-  SerialNumber: string;
-  DeviceName: string;
-  ModelName: string;
-  Warehouse: string;
-  Status: string;
+  materialCode: string;
+  serialNumber: string;
+  deviceName: string;
+  modelName: string;
+  location: string; // 仓库/位置（对应数据库 Location 字段）
+  status: string;
 }
 
 /**
@@ -24,7 +23,7 @@ interface DeviceRecord {
  * B列(1) -> SerialNumber
  * C列(2) -> DeviceName
  * D列(3) -> ModelName
- * I列(8) -> Warehouse
+ * I列(8) -> Location (仓库位置)
  * M列(12) -> Status
  */
 function validateAndTransformData(rows: ExcelRow[]): DeviceRecord[] {
@@ -33,7 +32,6 @@ function validateAndTransformData(rows: ExcelRow[]): DeviceRecord[] {
   // 跳过第一行（标题行）
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i] as any[];
-    const rowNumber = i + 1; // Excel 行号（从1开始，第1行是标题）
     
     // 检查必填字段：序列号（B列，索引1）
     const serialNumber = row && row[1] ? String(row[1]).trim() : '';
@@ -44,12 +42,12 @@ function validateAndTransformData(rows: ExcelRow[]): DeviceRecord[] {
     
     // 构建记录（按列索引读取）
     const record: DeviceRecord = {
-      MaterialCode: row && row[0] ? String(row[0]).trim() : '', // A列：物料代码
-      SerialNumber: serialNumber, // B列：序列号
-      DeviceName: row && row[2] ? String(row[2]).trim() : '', // C列：物料名称
-      ModelName: row && row[3] ? String(row[3]).trim() : '', // D列：规格型号
-      Warehouse: row && row[8] ? String(row[8]).trim() : '', // I列：仓库名称
-      Status: row && row[12] ? String(row[12]).trim() : '', // M列：序列号状态
+      materialCode: row && row[0] ? String(row[0]).trim() : '', // A列：物料代码
+      serialNumber: serialNumber, // B列：序列号
+      deviceName: row && row[2] ? String(row[2]).trim() : '', // C列：物料名称
+      modelName: row && row[3] ? String(row[3]).trim() : '', // D列：规格型号
+      location: row && row[8] ? String(row[8]).trim() : '', // I列：仓库位置
+      status: row && row[12] ? String(row[12]).trim() : '', // M列：序列号状态
     };
     
     validRecords.push(record);
@@ -65,8 +63,8 @@ function extractUniqueModels(records: DeviceRecord[]): string[] {
   const modelSet = new Set<string>();
   
   for (const record of records) {
-    if (record.ModelName && record.ModelName.trim() !== '') {
-      modelSet.add(record.ModelName.trim());
+    if (record.modelName && record.modelName.trim() !== '') {
+      modelSet.add(record.modelName.trim());
     }
   }
   
@@ -74,23 +72,24 @@ function extractUniqueModels(records: DeviceRecord[]): string[] {
 }
 
 /**
- * 自动维护产品目录（插入不重复的规格型号）
+ * 自动维护产品目录（使用 Prisma ORM）
  */
 async function maintainProductCatalog(
-  pool: sql.ConnectionPool,
   models: string[]
 ): Promise<{ added: number; skipped: number }> {
   if (models.length === 0) {
     return { added: 0, skipped: 0 };
   }
 
-  // 查询现有的规格型号（使用 ModelName 字段）
-  const existingResult = await pool
-    .request()
-    .query(`SELECT ModelName FROM Product_Catalog WHERE ModelName IS NOT NULL`);
+  // 查询现有的规格型号（使用 Prisma）
+  const existingProducts = await prisma.product_Catalog.findMany({
+    select: {
+      modelName: true
+    }
+  });
   
   const existingModels = new Set(
-    existingResult.recordset.map((row: any) => row.ModelName?.trim().toLowerCase() || '')
+    existingProducts.map((p) => p.modelName.trim().toLowerCase())
   );
 
   // 找出需要插入的新规格型号
@@ -102,88 +101,74 @@ async function maintainProductCatalog(
     return { added: 0, skipped: models.length };
   }
 
-  // 获取当前最大 DisplayOrder
-  const maxOrderResult = await pool
-    .request()
-    .query(`SELECT MAX(DisplayOrder) as MaxOrder FROM Product_Catalog`);
-  
-  let currentOrder = (maxOrderResult.recordset[0]?.MaxOrder as number) || 0;
-
-  // 批量插入新规格型号
-  const batchSize = 100;
-  for (let i = 0; i < newModels.length; i += batchSize) {
-    const batch = newModels.slice(i, i + batchSize);
-    
-    // 构建批量插入 SQL（使用参数化查询防止 SQL 注入）
-    for (const model of batch) {
-      currentOrder++;
-      await pool
-        .request()
-        .input('ModelName', sql.NVarChar, model)
-        .input('DisplayOrder', sql.Int, currentOrder)
-        .query(`
-          INSERT INTO Product_Catalog (ModelName, DisplayOrder)
-          VALUES (@ModelName, @DisplayOrder)
-        `);
+  // 批量插入新规格型号（使用 Prisma）
+  let addedCount = 0;
+  for (const model of newModels) {
+    try {
+      await prisma.product_Catalog.create({
+        data: {
+          category: '未分类', // 默认类别
+          subCategory: '未分类', // 默认子类别
+          modelName: model,
+          modelCode: `AUTO-${Date.now()}-${addedCount}`, // 自动生成唯一编码
+          description: `从 Excel 自动导入: ${model}`,
+          manufacturer: '爱克信',
+          defaultWarrantyMonths: 12,
+          isActive: true
+        }
+      });
+      addedCount++;
+    } catch (error: any) {
+      // 如果是重复键错误，跳过
+      if (error.code !== 'P2002') {
+        console.error(`插入型号失败: ${model}`, error.message);
+      }
     }
   }
 
-  return { added: newModels.length, skipped: models.length - newModels.length };
+  return { added: addedCount, skipped: models.length - addedCount };
 }
 
 /**
- * 批量插入或更新设备库存
+ * 批量插入或更新设备库存（使用 Prisma ORM）
  */
 async function batchUpsertDeviceInventory(
-  pool: sql.ConnectionPool,
   records: DeviceRecord[]
 ): Promise<number> {
   if (records.length === 0) {
     return 0;
   }
 
-  const batchSize = 500;
   let processedCount = 0;
 
-  for (let i = 0; i < records.length; i += batchSize) {
-    const batch = records.slice(i, i + batchSize);
-    const transaction = new sql.Transaction(pool);
-    
+  for (const record of records) {
     try {
-      await transaction.begin();
-
-      for (const record of batch) {
-        const request = new sql.Request(transaction);
-        
-        await request
-          .input('MaterialCode', sql.NVarChar, record.MaterialCode || '')
-          .input('SerialNumber', sql.NVarChar, record.SerialNumber)
-          .input('DeviceName', sql.NVarChar, record.DeviceName || '')
-          .input('ModelName', sql.NVarChar, record.ModelName || '')
-          .input('Warehouse', sql.NVarChar, record.Warehouse || '')
-          .input('Status', sql.NVarChar, record.Status || '')
-          .query(`
-            MERGE Device_Inventory AS target
-            USING (SELECT @SerialNumber AS SerialNumber) AS source
-            ON target.SerialNumber = source.SerialNumber
-            WHEN MATCHED THEN
-              UPDATE SET
-                MaterialCode = @MaterialCode,
-                DeviceName = @DeviceName,
-                ModelName = @ModelName,
-                Warehouse = @Warehouse,
-                Status = @Status
-            WHEN NOT MATCHED THEN
-              INSERT (MaterialCode, SerialNumber, DeviceName, ModelName, Warehouse, Status)
-              VALUES (@MaterialCode, @SerialNumber, @DeviceName, @ModelName, @Warehouse, @Status);
-          `);
-      }
-
-      await transaction.commit();
-      processedCount += batch.length;
+      // 使用 Prisma 的 upsert 方法
+      await prisma.device_Inventory.upsert({
+        where: {
+          serialNumber: record.serialNumber
+        },
+        update: {
+          materialCode: record.materialCode || null,
+          deviceName: record.deviceName || null,
+          modelName: record.modelName || null,
+          location: record.location || null, // 修正：使用 location 字段
+          status: record.status || null,
+          updatedAt: new Date()
+        },
+        create: {
+          serialNumber: record.serialNumber,
+          materialCode: record.materialCode || null,
+          deviceName: record.deviceName || null,
+          modelName: record.modelName || null,
+          location: record.location || null, // 修正：使用 location 字段
+          status: record.status || null
+        }
+      });
+      processedCount++;
     } catch (error: any) {
-      await transaction.rollback();
-      throw new Error(`批量处理失败（第 ${i + 1}-${i + batch.length} 条）: ${error.message}`);
+      console.error(`处理记录失败（序列号: ${record.serialNumber}）:`, error.message);
+      // 继续处理其他记录，不中断整个流程
     }
   }
 
@@ -264,17 +249,14 @@ export async function POST(request: Request) {
       );
     }
 
-    // 连接数据库
-    const pool = await getDbConnection();
-
     // 提取不重复的规格型号
     const uniqueModels = extractUniqueModels(validRecords);
 
-    // 自动维护产品目录
-    const catalogResult = await maintainProductCatalog(pool, uniqueModels);
+    // 自动维护产品目录（使用 Prisma）
+    const catalogResult = await maintainProductCatalog(uniqueModels);
 
-    // 批量插入/更新设备库存
-    const processedCount = await batchUpsertDeviceInventory(pool, validRecords);
+    // 批量插入/更新设备库存（使用 Prisma）
+    const processedCount = await batchUpsertDeviceInventory(validRecords);
 
     return NextResponse.json({
       success: true,
@@ -282,7 +264,7 @@ export async function POST(request: Request) {
       stats: {
         totalRows: jsonData.length,
         validRecords: validRecords.length,
-        skippedRows: jsonData.length - validRecords.length,
+        skippedRows: jsonData.length - validRecords.length - 1, // 减去标题行
         modelsAdded: catalogResult.added,
         modelsSkipped: catalogResult.skipped,
         devicesProcessed: processedCount,
@@ -299,5 +281,8 @@ export async function POST(request: Request) {
       },
       { status: 500 }
     );
+  } finally {
+    // Prisma 会自动管理连接池，不需要手动关闭
+    await prisma.$disconnect();
   }
 }

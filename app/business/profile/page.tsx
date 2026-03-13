@@ -7,11 +7,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { User, Phone, Save, Edit2, LogOut, FileText } from "lucide-react";
+import { User, Phone, Save, Edit2, FileText } from "lucide-react";
 import { useRepairContext } from "@/context/RepairContext";
 
 export default function BusinessProfilePage() {
-  const { user, logout } = useAuth();
+  const { user, logout, refreshUser } = useAuth();
   const { repairs } = useRepairContext();
   const [isEditing, setIsEditing] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -60,21 +60,19 @@ export default function BusinessProfilePage() {
         setIsLoading(true)
         const response = await fetch(`/api/users/${user?.id}`, {
           method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             realName: editedUser.realName,
-            phone: editedUser.phone,
+            phoneNumber: editedUser.phone,  // API 字段名为 phoneNumber
           }),
         })
 
         const result = await response.json()
         if (result.success) {
+          // 刷新 AuthContext，使沟通记录和操作记录中的姓名同步更新
+          await refreshUser()
           alert("个人信息更新成功")
           setIsEditing(false)
-          // 刷新用户信息
-          window.location.reload()
         } else {
           alert(result.message || "更新失败，请重试")
         }
@@ -204,17 +202,7 @@ export default function BusinessProfilePage() {
               </div>
             </div>
 
-            <Separator />
-
-            <Button
-              onClick={handleLogout}
-              disabled={isLoading}
-              variant="destructive"
-              className="w-full"
-            >
-              <LogOut className="mr-2 h-4 w-4" />
-              退出登录
-            </Button>
+            {/* 退出登录按钮在商务侧边栏已经有，这里不再重复显示 */}
           </CardContent>
         </Card>
       </div>

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import { cookies } from "next/headers"
+import { getUserQueryConfig } from "@/lib/field-checks"
 
 // GET /api/auth/me
 // 获取当前登录用户信息（通过 session token 验证）
@@ -20,26 +21,39 @@ export async function GET() {
 
     const pool = await getDbConnection()
 
-    // 检查表是否有 PhoneNumber 字段
-    const phoneColumnCheck = await pool
-      .request()
-      .query(`
-        SELECT COLUMN_NAME 
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_NAME = 'Users' AND COLUMN_NAME = 'PhoneNumber'
-      `)
-    const hasPhoneNumber = phoneColumnCheck.recordset.length > 0
+    // 使用统一的字段检查工具
+    const queryConfig = await getUserQueryConfig(['UserID', 'Username', 'Role', 'RealName'])
 
     const result = await pool
       .request()
       .input("userId", userId)
       .query(`
-        SELECT TOP 1 UserID, Username, Role, RealName${hasPhoneNumber ? ', PhoneNumber' : ''}
+        SELECT TOP 1 ${queryConfig.fields}
         FROM Users
         WHERE UserID = @userId
+        ${queryConfig.conditions}
       `)
 
     if (result.recordset.length === 0) {
+      // 如果存在 IsDeleted 字段，再精确检查是否是已注销账号
+      if (queryConfig.hasIsDeleted) {
+        const deletedCheck = await pool
+          .request()
+          .input("userId", userId)
+          .query(`
+            SELECT TOP 1 IsDeleted 
+            FROM Users 
+            WHERE UserID = @userId
+          `)
+
+        if (deletedCheck.recordset.length > 0 && deletedCheck.recordset[0].IsDeleted) {
+          return NextResponse.json(
+            { success: false, message: "账号已注销，如需恢复请联系管理员" },
+            { status: 403 }
+          )
+        }
+      }
+
       return NextResponse.json(
         { success: false, message: "用户不存在" },
         { status: 404 }
@@ -55,7 +69,7 @@ export async function GET() {
         username: user.Username || "",
         role: user.Role || "",
         realName: user.RealName || "",
-        phone: hasPhoneNumber ? (user.PhoneNumber || "") : "",
+        phone: queryConfig.hasPhoneNumber ? (user.PhoneNumber || "") : "",
       },
     })
   } catch (error: any) {

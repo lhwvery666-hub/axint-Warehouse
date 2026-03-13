@@ -5,6 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { Button } from "@/components/ui/button";
 import { Users, User, LogOut } from "lucide-react";
+import { UserRole } from "@/lib/enums";
 
 export default function AdminUsersLayout({
   children,
@@ -26,7 +27,7 @@ export default function AdminUsersLayout({
       return;
     }
     
-    if (user?.role !== "admin") {
+    if (user?.role !== UserRole.ADMIN) {
       router.push("/login");
       return;
     }

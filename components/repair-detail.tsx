@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { ArrowLeft, CalendarIcon, Clock, AlertCircle, FileText, Truck, MapPin, Camera, Calendar, ClockIcon, ShieldCheck, ShieldAlert, User, Wrench, Save, RefreshCw } from "lucide-react"
+import { ArrowLeft, CalendarIcon, Clock, AlertCircle, FileText, Truck, MapPin, Camera, Calendar, ClockIcon, ShieldCheck, ShieldAlert, User, Wrench, Save, RefreshCw, FileCheck, CheckCircle, CheckCircle2, Pencil, ZoomIn, Download, Copy } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -31,23 +31,20 @@ import { useNotificationContext } from "@/context/NotificationContext"
 import { useAuth } from "@/context/auth-context"
 import WorkflowProgress from "@/components/workflow-progress"
 import { calculateProgress, getCurrentStep, getNextStep, STATUS_TRANSITIONS } from "@/lib/workflow-utils"
+import { UserRole, TicketStatus, normalizeTicketStatus, TERMINAL_STATUSES, WarrantyStatus, FaultCategory, RepairAction, REPAIR_ACTION_LABELS, FinalOutcome, FINAL_OUTCOME_LABELS } from "@/lib/enums"
+import TicketActionBar from "@/components/ticket-action-bar"
+import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+
+
 
 interface RepairDetailProps {
   taskId: string
   onBack: () => void
+  inBatchMode?: boolean  // 标识是否在批次工单详情页中显示
 }
 
-// 后端返回的历史记录条目类型
-interface TicketHistoryEntry {
-  actionType: string
-  oldStatus?: string | null
-  newStatus?: string | null
-  delayTo?: string | null
-  delayReason?: string | null
-  createdAt: string
-}
-
-export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
+export default function RepairDetail({ taskId, onBack, inBatchMode = false }: RepairDetailProps) {
   const { addNotification } = useNotificationContext();
   const { user } = useAuth();
   
@@ -55,7 +52,6 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
   const [reporterAvatar, setReporterAvatar] = useState<string>("/placeholder-user.jpg");
   const [reporterPhone, setReporterPhone] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
-  const [history, setHistory] = useState<TicketHistoryEntry[]>([]);
   
   // 从 SQL Server 获取工单数据（扩展所有字段）
   const [repairData, setRepairData] = useState({
@@ -113,7 +109,14 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
     cancelRequestReason: null as string | null,
     cancelRequestDate: null as Date | null,
     cancelApprovedBy: null as string | null,
-    cancelApprovedDate: null as Date | null
+    cancelApprovedDate: null as Date | null,
+    // 签字报告照片
+    signedReportPhoto: null as string | null,
+    // 保修状态
+    manufactureDate: null as string | null,
+    warrantyStatus: null as string | null,
+    // 批次ID（用于 TicketActionBar）
+    batchId: null as string | null,
   });
 
   // 编辑状态（用于各工作台）
@@ -128,13 +131,27 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
     factoryTrackingNum: "",
     supplierName: "",
   })
-  // 返厂维修相关状态
+  // 3W1H 相关状态（单体工单）
+  const [warrantyStatusOverride, setWarrantyStatusOverride] = useState<WarrantyStatus | null>(null)
+  const [faultCategory, setFaultCategory] = useState<FaultCategory | null>(null)
+  const [repairAction, setRepairAction] = useState<RepairAction | null>(null)
+  const [repairNotes, setRepairNotes] = useState("")
+  /** 故障点与处理说明合并为一个输入框，提交时同时写入 faultPoint 与 repairNotes */
+  const [faultAndNotesCombined, setFaultAndNotesCombined] = useState("")
+
+  // 当维修动作选择 RMA 时，同步返厂模式开关
+  useEffect(() => {
+    setIsOutsourced(repairAction === RepairAction.RMA)
+  }, [repairAction])
+  // 返厂维修相关状态（由 repairAction 是否为 RMA 派生）
   const [isOutsourced, setIsOutsourced] = useState(false)
   const [adminFormData, setAdminFormData] = useState({
-    // 管理员只填写这三个字段（根据Excel表格）
+    // 管理员填写字段（含商务字段）
     repairCost: null as number | null,
     clientName: "",
     isInvoiced: false,
+    isChargeable: false,
+    isPaymentReceived: false,
     // 返厂物流管理字段
     factoryRepairDate: null as Date | null,
     factoryTrackingNum: "",
@@ -149,6 +166,8 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
   const [isSavingRepair, setIsSavingRepair] = useState(false)
   const [isSavingAdmin, setIsSavingAdmin] = useState(false)
   const [isSavingWarehouse, setIsSavingWarehouse] = useState(false)
+  // 维修报告已提交后，是否允许重新编辑（点击"修改报告"后置为 true）
+  const [isEditingRepairAfterSubmit, setIsEditingRepairAfterSubmit] = useState(false)
   const [isLoadingFullSpec, setIsLoadingFullSpec] = useState(false)
 
   // 补录 SN 相关状态
@@ -159,16 +178,31 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
   const [isSubmittingSN, setIsSubmittingSN] = useState(false)
   const validationTimerRef = useRef<NodeJS.Timeout | null>(null)
 
-  // 从 SQL Server 加载工单数据
+  // reloadCounter：自增触发 useEffect 重新执行 loadRepairData，替代直接调用内部函数
+  const [reloadCounter, setReloadCounter] = useState(0)
+  // 暴露给 TicketActionBar onActionSuccess 等外部使用的刷新函数
+  const loadTicketData = () => setReloadCounter(c => c + 1)
+
+  /** 对现场人员隐藏 RMA（返厂维修）标签，显示为"维修"；其他角色原样展示 */
+  const getDisplayRepairAction = (action: RepairAction | string | null | undefined): string => {
+    if (!action) return "—"
+    if (user?.role === UserRole.REPORTER && action === RepairAction.RMA) return "维修"
+    return REPAIR_ACTION_LABELS[action as RepairAction] ?? action
+  }
+
+  // 从后端加载工单数据（禁用缓存，确保获取到最新状态）
   useEffect(() => {
     const loadRepairData = async () => {
       if (!taskId) return;
       
       setIsLoading(true);
       try {
-        const response = await fetch(`/api/tickets/${taskId}`);
+        const response = await fetch(`/api/tickets/${taskId}`, {
+          cache: "no-store",
+        });
         if (response.ok) {
           const result = await response.json();
+          console.log('📦 API返回的完整数据:', result);
           if (result.success && result.data) {
             const ticket = result.data as {
               id: string
@@ -188,7 +222,6 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
               damageImages?: string
               expectedCompletionDate?: string
               delayReason?: string
-              history?: TicketHistoryEntry[]
               // 新字段
               submitDate?: string
               trackingNumberIn?: string
@@ -220,6 +253,16 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
               cancelRequestDate?: string | null
               cancelApprovedBy?: string | null
               cancelApprovedDate?: string | null
+              // 签字报告照片
+              signedReportPhoto?: string | null
+              // 保修状态
+              manufactureDate?: string | null
+              warrantyStatus?: string | null
+              // 3W1H 相关字段
+              warrantyStatusOverride?: string | null
+              faultCategory?: string | null
+              repairAction?: string | null
+              repairNotes?: string | null
             };
 
             // 图片字段：后端以 JSON 字符串(NVARCHAR(MAX)) 存储，这里解析为字符串数组
@@ -255,39 +298,19 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
             // 状态映射：数据库中的状态转换为前端状态
             const dbStatus = ticket.status || "Created"
             
-            // 统一转换为小写进行匹配，更可靠
-            const dbStatusLower = (dbStatus || "").toLowerCase().trim()
+            // 使用枚举进行状态规范化
+            const normalizedStatus = normalizeTicketStatus(dbStatus || "")
             
-            let mappedStatus: string
-            if (dbStatusLower === "created" || dbStatusLower === "pending") {
-              mappedStatus = "created"  // 待处理
-            } else if (dbStatusLower === "in_repair" || dbStatusLower === "processing") {
-              mappedStatus = "in_repair"  // 维修中
-            } else if (dbStatusLower === "admin_review") {
-              mappedStatus = "admin_review"  // 待商务处理
-            } else if (dbStatusLower === "pending_shipment") {
-              mappedStatus = "pending_shipment"  // 待发货
-            } else if (dbStatusLower === "completed") {
-              mappedStatus = "completed"  // 已完成
-            } else if (dbStatusLower === "unrepairable") {
-              mappedStatus = "unrepairable"  // 无法维修
-            } else if (dbStatusLower === "delayed") {
-              mappedStatus = "delayed"  // 已延期
-            } else if (dbStatusLower === "scrapped") {
-              mappedStatus = "scrapped"  // 已报废
-            } else if (dbStatusLower === "return_unrepaired") {
-              mappedStatus = "return_unrepaired"  // 拒修退回
-            } else if (dbStatusLower === "cancelled") {
-              mappedStatus = "cancelled"  // 已取消
-            } else {
-              // 默认状态为待处理
-              mappedStatus = "created"
-              console.warn("未知状态值，使用默认状态 'created':", dbStatus)
+            // ⚠️ 状态映射规则：直接透传所有已知状态，不做合并！
+            // 特殊处理：现场人员看到 PENDING_FACTORY 时显示为 IN_REPAIR（隐藏返厂状态）
+            let mappedStatus: string = normalizedStatus ?? TicketStatus.CREATED
+            if (normalizedStatus === TicketStatus.PENDING_FACTORY && user?.role === UserRole.REPORTER) {
+              mappedStatus = TicketStatus.IN_REPAIR  // 现场人员看到"维修检查中"，而不是"待返厂"
             }
             
             console.log("状态映射:", { 
               原始状态: dbStatus, 
-              处理后: dbStatusLower, 
+              规范化后: normalizedStatus, 
               映射结果: mappedStatus 
             })
             
@@ -304,6 +327,17 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
             const contactInfoFromOld = ticket.reportedBy && ticket.reporterPhone 
               ? `${ticket.reportedBy} ${ticket.reporterPhone}`.trim()
               : ticket.reportedBy || ticket.reporterPhone || ""
+            
+            console.log("📦 API返回的ticket数据:", ticket);
+            console.log("🔍 关键字段检查:", {
+              senderAddress: ticket.senderAddress,
+              contactInfo: ticket.contactInfo,
+              projectName: ticket.projectName,
+              category: ticket.category,
+              modelName: ticket.modelName,
+              faultDescription: ticket.faultDescription,
+              problem: ticket.problem
+            });
             
             const newRepairData = {
               id: ticket.id || taskId,
@@ -355,16 +389,45 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
               contactPhone: ticket.reporterPhone || "",
               inWarranty: undefined,
               warrantyEnd: undefined,
-              // 取消申请相关字段
+              // 取消申请相关字段image.pngimage.pngimage.png
               cancelRequestStatus: ticket.cancelRequestStatus || null,
               cancelRequestReason: ticket.cancelRequestReason || null,
-              cancelRequestDate: parseDate(ticket.cancelRequestDate),
+              cancelRequestDate: parseDate(ticket.cancelRequestDate ?? undefined),
               cancelApprovedBy: ticket.cancelApprovedBy || null,
-              cancelApprovedDate: parseDate(ticket.cancelApprovedDate),
+              cancelApprovedDate: parseDate(ticket.cancelApprovedDate ?? undefined),
+              // 签字报告照片
+              signedReportPhoto: ticket.signedReportPhoto || null,
+              // 保修状态
+              manufactureDate: ticket.manufactureDate || null,
+              warrantyStatus: ticket.warrantyStatus || null,
+              // 批次ID（用于 TicketActionBar）
+              batchId: (ticket as any).batchId || null,
             }
             
             setRepairData(newRepairData)
             
+            // 初始化 3W1H 编辑状态（如果后端已有历史值）
+            setWarrantyStatusOverride(
+              (ticket.warrantyStatusOverride as WarrantyStatus | null) || null
+            )
+            setFaultCategory(
+              (ticket.faultCategory as FaultCategory | null) || null
+            )
+            setRepairAction(
+              (ticket.repairAction as RepairAction | null) || null
+            )
+            setRepairNotes(ticket.repairNotes || "")
+            {
+              const fault = newRepairData.faultPoint || ""
+              const notes = ticket.repairNotes || ""
+              // 去重：若两者完全相同（之前保存时把同一内容写入了两个字段），只取其中一个，避免套娃拼接
+              const combined =
+                fault === notes
+                  ? fault
+                  : [fault, notes].filter(Boolean).join("\n\n")
+              setFaultAndNotesCombined(combined)
+            }
+
             // 初始化编辑表单数据（根据新的业务逻辑）
             setRepairFormData({
               materialCode: newRepairData.materialCode,
@@ -379,6 +442,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
             })
             setAdminFormData({
               // 管理员填写字段（根据新的业务逻辑）
+              repairCost: newRepairData.repairCost,
               isChargeable: newRepairData.isChargeable || false,
               isPaymentReceived: false, // 默认否，需要从数据库获取
               clientName: newRepairData.clientName,
@@ -406,11 +470,54 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
               setReporterPhone("")
             }
 
-            // 设置历史记录（如果有）
-            if (Array.isArray(ticket.history)) {
-              setHistory(ticket.history)
-            } else {
-              setHistory([])
+            // 自动从数据库获取物料信息(如果有productSN但物料信息为空)
+            const hasProductSN = ticket.productSN && 
+                                 typeof ticket.productSN === 'string' && 
+                                 ticket.productSN !== "PENDING" && 
+                                 ticket.productSN.trim() !== ""
+            const needsAutoFill = !ticket.materialCode || !ticket.deviceName || !ticket.fullSpec
+            
+            if (hasProductSN && needsAutoFill) {
+              console.log('🔄 自动从数据库获取物料信息, ProductSN:', ticket.productSN)
+              try {
+                const deviceResponse = await fetch(`/api/device/check?sn=${encodeURIComponent(ticket.productSN ?? "")}`)
+                const deviceResult = await deviceResponse.json()
+                
+                if (deviceResult.exists && deviceResult.data) {
+                  const updates: any = {}
+                  
+                  // 填充物料代码
+                  if (!ticket.materialCode && deviceResult.data.materialCode) {
+                    updates.materialCode = deviceResult.data.materialCode
+                  }
+                  
+                  // 填充物料名称(标准名)
+                  if (!ticket.deviceName && deviceResult.data.deviceName) {
+                    updates.deviceName = deviceResult.data.deviceName
+                  }
+                  
+                  // 填充规格型号
+                  if (!ticket.fullSpec) {
+                    if (deviceResult.data.fullSpec) {
+                      updates.fullSpec = deviceResult.data.fullSpec
+                    } else if (deviceResult.data.modelName) {
+                      updates.fullSpec = deviceResult.data.modelName
+                    }
+                  }
+                  
+                  if (Object.keys(updates).length > 0) {
+                    console.log('✅ 自动填充物料信息成功:', updates)
+                    // 更新 repairFormData
+                    setRepairFormData(prev => ({
+                      ...prev,
+                      ...updates
+                    }))
+                  }
+                }
+              } catch (autoFillError) {
+                console.error('⚠️ 自动获取物料信息失败:', autoFillError)
+                // 失败不影响主流程，继续加载
+              }
             }
           }
         }
@@ -422,7 +529,8 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
     };
 
     loadRepairData();
-  }, [taskId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId, reloadCounter]);
   
   // 从 user context 获取报告人的头像（电话现在来自工单的报告人信息）
   useEffect(() => {
@@ -433,12 +541,33 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
       setReporterAvatar("/placeholder-user.jpg");
     }
   }, [user]);
+
+  // 加载当前设备已保存的 finalOutcome（TECHNICIAN_REPAIRING 阶段）
+  useEffect(() => {
+    const ns = normalizeTicketStatus(repairData.status || "")
+    if (ns !== TicketStatus.TECHNICIAN_REPAIRING || !taskId) return
+    fetch(`/api/tickets/${taskId}/final-outcome`)
+      .then(r => r.json())
+      .then(result => {
+        if (result.success && result.data?.finalOutcome) {
+          setFinalOutcome(result.data.finalOutcome)
+        }
+      })
+      .catch(() => { /* 非致命，忽略 */ })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId, repairData.status]);
   
   // 判断是否需要补录 SN（ProductSN 为 "PENDING" 或 NULL 或空字符串）
-  const needsSupplementSN = !repairData.productSN || 
-                            repairData.productSN.trim() === "" || 
-                            repairData.productSN.toUpperCase() === "PENDING" ||
-                            repairData.deviceSerialNumber.toUpperCase() === "PENDING"
+  // 特殊情况：最终维修状态（COMPLETED, UNREPAIRABLE, SCRAPPED）下，序列号可以为空，不显示"待补录"
+  const normalizedStatus = normalizeTicketStatus(repairData.status || "")
+  const isTerminalStatus = normalizedStatus ? TERMINAL_STATUSES.includes(normalizedStatus) : false
+  
+  const needsSupplementSN = !isTerminalStatus && (
+    !repairData.productSN || 
+    (typeof repairData.productSN === 'string' && repairData.productSN.trim() === "") || 
+    (typeof repairData.productSN === 'string' && repairData.productSN.toUpperCase() === "PENDING") ||
+    (typeof repairData.deviceSerialNumber === 'string' && repairData.deviceSerialNumber.toUpperCase() === "PENDING")
+  )
 
   // 处理补录 SN
   const handleSupplementSN = async () => {
@@ -573,31 +702,43 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
   // 检查是否为复检模式（状态为 Factory_Finished）
   const isRecheckMode = repairData.status === "Factory_Finished" || repairData.status === "factory_finished"
   
+  // 根据维修动作自动推导是否为返厂模式（RMA）
+  useEffect(() => {
+    setIsOutsourced(repairAction === RepairAction.RMA)
+  }, [repairAction])
+  
   // 保存维修工作台数据
   const handleSaveRepair = async () => {
-    // 如果是返厂模式，需要验证供应商名称
-    if (isOutsourced && !repairFormData.supplierName.trim()) {
-      alert("返厂申请需要填写供应商名称")
-      return
-    }
-    
     // 如果是复检模式，需要验证故障点
-    if (isRecheckMode && !repairFormData.faultPoint.trim()) {
-      alert("复检模式需要填写故障点")
+    if (isRecheckMode && !faultAndNotesCombined.trim()) {
+      alert("复检模式需要填写故障点与处理说明")
       return
     }
     
     setIsSavingRepair(true)
     try {
-      const requestBody: any = {}
+      const requestBody: Record<string, unknown> = {}
       
-      // 如果是返厂模式
+      // ✅ 新版 RMA 流程（2026-03 更新）：
+      // 返厂维修（RMA）现在与普通维修走完全相同的流程：
+      //   1. 维修人员勾选"返厂维修"后，直接填写维修报告（供应商、预估费用、出厂快递单号等）
+      //   2. 保存不改变状态（仍在 IN_REPAIR），不再设置 PENDING_FACTORY
+      //   3. 后续：发送报告 → 现场签字 → 技术员选最终处理结果 → 仓库发货
+      //   4. 对现场人员隐藏 RMA 标签，显示为"维修"（信息隔离保持不变）
       if (isOutsourced) {
-        requestBody.supplierName = repairFormData.supplierName
-        requestBody.status = "Pending_Factory"
+        // RMA 模式：保存所有字段，但【不改变状态】，流程继续走正常维修路径
+        requestBody.supplierName       = repairFormData.supplierName || null
+        requestBody.factoryTrackingNum = repairFormData.factoryTrackingNum || null
+        requestBody.factoryRepairDate  = repairFormData.factoryRepairDate?.toISOString() || null
+        requestBody.repairCost         = repairFormData.repairCost ?? null
+        requestBody.materialCode       = repairFormData.materialCode || null
+        requestBody.deviceName         = repairFormData.deviceName   || null
+        requestBody.fullSpec           = repairFormData.fullSpec      || null
+        requestBody.faultPoint         = faultAndNotesCombined.trim() || null
+        // ✅ 不再设置 requestBody.status = PENDING_FACTORY
       } else if (isRecheckMode) {
         // 复检模式：填写故障点后流转到 Admin_Review
-        requestBody.faultPoint = repairFormData.faultPoint
+        requestBody.faultPoint = faultAndNotesCombined
         requestBody.materialCode = repairFormData.materialCode
         requestBody.deviceName = repairFormData.deviceName
         requestBody.fullSpec = repairFormData.fullSpec
@@ -607,24 +748,29 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
         requestBody.materialCode = repairFormData.materialCode
         requestBody.deviceName = repairFormData.deviceName
         requestBody.fullSpec = repairFormData.fullSpec
-        requestBody.faultPoint = repairFormData.faultPoint
+        requestBody.faultPoint = faultAndNotesCombined
         // 维修人员填写收费金额（根据业务逻辑：质保期内填0，过保填写金额）
         requestBody.repairCost = repairFormData.repairCost || 0
         requestBody.factoryRepairDate = repairFormData.factoryRepairDate?.toISOString()
         requestBody.factoryTrackingNum = repairFormData.factoryTrackingNum
         requestBody.supplierName = repairFormData.supplierName
         
-        // 检查是否所有必填字段都已填写，如果是则自动流转到下一步
-        const currentStep = getCurrentStep(repairData.status || "Created")
-        if (currentStep) {
-          const updatedTicket = { ...repairData, ...requestBody }
-          const progress = calculateProgress(updatedTicket, currentStep)
-          if (progress.canProceed && progress.nextStep) {
-            // 自动流转到下一步
-            requestBody.status = progress.nextStep.status
-          }
+        // ⚠️ 回退逻辑（和仓库确认的 SN 变更回退机制相同）：
+        // 如果维修报告已经提交（状态为 Pending_Reporter_Confirm），现场人员尚未签字，
+        // 此时维修人员修改了报告内容 → 自动回退到 In_Repair，
+        // 需要重新通过工作流操作栏发起现场确认流程。
+        if (isEditingRepairAfterSubmit &&
+            normalizeTicketStatus(repairData.status || "") === TicketStatus.PENDING_REPORTER_CONFIRM) {
+          requestBody.status = TicketStatus.IN_REPAIR
         }
+        // 其他情况不自动流转状态：维修人员填写完报告后需通过"工作流操作栏"手动发送
       }
+
+      // 无论哪种模式，追加 3W1H 相关字段（空值传 null）；故障点与处理说明使用同一合并内容
+      requestBody.warrantyStatusOverride = warrantyStatusOverride ?? null
+      requestBody.faultCategory = faultCategory ?? null
+      requestBody.repairAction = repairAction ?? null
+      requestBody.repairNotes = faultAndNotesCombined.trim() || null
       
       const response = await fetch(`/api/tickets/${taskId}`, {
         method: 'PUT',
@@ -640,9 +786,12 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
         setRepairData({
           ...repairData,
           ...requestBody,
-          status: isOutsourced ? "Pending_Factory" : (isRecheckMode ? "Admin_Review" : repairData.status),
+          // ✅ RMA 不再改变状态；仅复检模式（兼容旧 Factory_Finished 工单）才流转到 Admin_Review
+          status: isRecheckMode ? TicketStatus.ADMIN_REVIEW : repairData.status,
         })
-        alert(isOutsourced ? "返厂申请已提交" : (isRecheckMode ? "复检完成，工单已流转至商务处理" : "维修记录保存成功"))
+        // 报告修改保存后退出编辑模式，回到只读"已提交"状态
+        setIsEditingRepairAfterSubmit(false)
+        alert(isRecheckMode ? "复检完成，工单已流转至商务处理" : "维修记录保存成功")
         // 刷新数据
         window.location.reload()
       } else {
@@ -655,6 +804,8 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
       setIsSavingRepair(false)
     }
   }
+
+  // 维修报告相关函数已移除（维修报告应该在工单总览页面操作，不在单个设备详情）
 
   // 保存返厂物流信息
   const handleSaveFactoryLogistics = async () => {
@@ -794,7 +945,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
         })
         alert("发货信息保存成功")
         // 如果状态自动流转为已完成，刷新数据
-        if (result.data?.statusChanged && result.data?.newStatus === "Completed") {
+        if (result.data?.statusChanged && result.data?.newStatus === TicketStatus.COMPLETED) {
           window.location.reload()
         }
       } else {
@@ -808,52 +959,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
     }
   }
   
-  // 处理开始维修按钮点击
-  const handleStartRepair = async () => {
-    // 如果 SN 未补录，不允许开始维修
-    if (needsSupplementSN) {
-      alert("⚠️ 必须先补录设备序列号才能进行维修操作")
-      return
-    }
-    try {
-      const response = await fetch(`/api/tickets/${taskId}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ status: 'In_Repair' }),
-      });
-
-      const result = await response.json();
-      if (result.success) {
-        setRepairData({...repairData, status: "in_repair"});
-        
-        // 发送通知给现场报告人员
-        if (repairData.reporter) {
-          addNotification({
-            type: "repair_started",
-            title: "维修已开始",
-            message: `您报修的设备"${repairData.deviceName || repairData.deviceModel}"已开始维修`,
-            repairId: taskId,
-            deviceName: repairData.deviceName,
-            deviceModel: repairData.deviceModel,
-            status: "in_repair",
-            recipient: repairData.reporter
-          });
-        }
-        
-        // 刷新数据
-        window.location.reload();
-      } else {
-        alert(result.message || "更新工单状态失败");
-      }
-    } catch (error) {
-      console.error("更新工单状态失败:", error);
-      alert("更新工单状态失败，请重试");
-    }
-  };
-  
-  // 处理维修完成按钮点击
+  // 处理维修完成按钮点击（跃迁至待仓库发货，走完整商务→仓库闭环）
   const handleCompleteRepair = async () => {
     try {
       const response = await fetch(`/api/tickets/${taskId}/update`, {
@@ -861,7 +967,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ status: 'completed', id: taskId }),
+        body: JSON.stringify({ status: 'Warehouse_Shipping', id: taskId }),
       });
 
       const result = await response.json();
@@ -958,10 +1064,11 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
         setScrappedReason("")
         setRepairData({...repairData, status: "Scrapped"})
         addNotification({
-          type: "ticket_scrapped",
+          type: "system",
           title: "工单已报废",
           message: `工单 ${taskId} 已被判定为报废`,
           repairId: taskId,
+          recipient: user?.realName || "系统",
         })
         window.location.reload()
       } else {
@@ -970,6 +1077,33 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
     } catch (error) {
       console.error("更新工单状态失败:", error)
       alert("更新工单状态失败，请重试")
+    }
+  }
+
+  // ── 保存设备最终处理结果（TECHNICIAN_REPAIRING 阶段，不改变状态）──────────────────
+  const handleSaveFinalOutcome = async () => {
+    if (!finalOutcome) {
+      alert("请先选择处理结果")
+      return
+    }
+    setIsSavingFinalOutcome(true)
+    try {
+      const response = await fetch(`/api/tickets/${taskId}/final-outcome`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ finalOutcome }),
+      })
+      const result = await response.json()
+      if (result.success) {
+        alert("处理结果已保存！请返回工单总览，确认所有设备均已选择后再提交。")
+      } else {
+        alert("保存失败：" + (result.message || "未知错误"))
+      }
+    } catch (error) {
+      console.error("保存处理结果失败:", error)
+      alert("保存失败，请重试")
+    } finally {
+      setIsSavingFinalOutcome(false)
     }
   }
 
@@ -995,10 +1129,11 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
       if (result.success) {
         setRepairData({...repairData, status: "Return_Unrepaired"})
         addNotification({
-          type: "ticket_return_unrepaired",
+          type: "system",
           title: "工单已标记为拒修退回",
           message: `工单 ${taskId} 已标记为拒修退回，仓库将处理发货`,
           repairId: taskId,
+          recipient: user?.realName || "系统",
         })
         window.location.reload()
       } else {
@@ -1042,10 +1177,11 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
           cancelRequestDate: new Date()
         })
         addNotification({
-          type: "cancel_request_submitted",
+          type: "system",
           title: "取消申请已提交",
           message: `您的取消申请已提交，等待商务人员审批`,
           repairId: taskId,
+          recipient: user?.realName || "系统",
         })
         window.location.reload()
       } else {
@@ -1080,20 +1216,21 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
             ...repairData, 
             status: "Cancelled",
             cancelRequestStatus: "Approved",
-            cancelApprovedBy: user?.realName || user?.username || "",
+            cancelApprovedBy: user?.realName || "",
             cancelApprovedDate: new Date()
           })
           addNotification({
-            type: "cancel_request_approved",
-            title: "取消申请已通过",
-            message: `工单 ${taskId} 的取消申请已通过审批，工单已取消`,
-            repairId: taskId,
-          })
+          type: "system",
+          title: "取消申请已通过",
+          message: `工单 ${taskId} 的取消申请已通过审批，工单已取消`,
+          repairId: taskId,
+          recipient: user?.realName || "系统",
+        })
         } else {
           setRepairData({
             ...repairData, 
             cancelRequestStatus: "Rejected",
-            cancelApprovedBy: user?.realName || user?.username || "",
+            cancelApprovedBy: user?.realName || "",
             cancelApprovedDate: new Date()
           })
         }
@@ -1132,10 +1269,11 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
         setCancelReason("")
         setRepairData({...repairData, status: "Cancelled"})
         addNotification({
-          type: "ticket_cancelled",
+          type: "system",
           title: "工单已取消",
           message: `工单 ${taskId} 已被取消`,
           repairId: taskId,
+          recipient: user?.realName || "系统",
         })
         window.location.reload()
       } else {
@@ -1147,42 +1285,16 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
     }
   }
 
-  // 将工单移入回收站（软删除）
-  const handleMoveToRecycleBin = async () => {
-    if (!window.confirm("确定要删除这个工单吗？此操作会将工单移入回收站。")) {
-      return
-    }
-
-    try {
-      const response = await fetch(`/api/tickets/${taskId}/update`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ deleteToRecycleBin: true, id: taskId }),
-      })
-
-      const result = await response.json()
-      if (result.success) {
-        // 更新本地状态为 deleted，并返回列表
-        setRepairData({ ...repairData, status: "deleted" })
-        alert("工单已移入回收站")
-        onBack()
-      } else {
-        alert(result.message || "删除工单失败")
-      }
-    } catch (error) {
-      console.error("删除工单失败:", error)
-      alert("删除工单失败，请重试")
-    }
-  }
-
   // 延期申请状态
   const [isDelayDialogOpen, setIsDelayDialogOpen] = useState(false)
   
-  // 判定报废相关状态
+  // 判定报废相关状态（已迁移至批次级别，保留兼容性）
   const [isScrappedDialogOpen, setIsScrappedDialogOpen] = useState(false)
   const [scrappedReason, setScrappedReason] = useState("")
+
+  // 最终处理结果（TECHNICIAN_REPAIRING 阶段，技师在设备详情页选择后提交整批）
+  const [finalOutcome, setFinalOutcome] = useState<string | null>(null)
+  const [isSavingFinalOutcome, setIsSavingFinalOutcome] = useState(false)
   
   // 取消工单相关状态（管理员直接取消）
   const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false)
@@ -1284,26 +1396,25 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
     if (statusLower === "cancelled" || status === "Cancelled") {
       return <Badge variant="outline" className="bg-gray-50 text-gray-700 border-gray-300">已取消</Badge>
     }
-    switch (status) {
-      case "created":
+    const normalizedStatus = normalizeTicketStatus(status)
+    switch (normalizedStatus) {
+      case TicketStatus.CREATED:
+      case TicketStatus.WAREHOUSE_CONFIRMING:
         return <Badge className="bg-warning/15 text-warning-foreground border-warning/30">待处理</Badge>
-      case "in_repair":
+      case TicketStatus.WAREHOUSE_CONFIRMED:
+        return <Badge className="bg-emerald-100 text-emerald-800 border-emerald-300">仓库已确认</Badge>
+      case TicketStatus.IN_REPAIR:
         return <Badge className="bg-primary/15 text-primary border-primary/30">维修中</Badge>
-      case "admin_review":
+      case TicketStatus.BUSINESS_REVIEW:
         return <Badge className="bg-blue-100 text-blue-800 border-blue-300">待商务处理</Badge>
-      case "pending_shipment":
+      case TicketStatus.WAREHOUSE_SHIPPING:
         return <Badge className="bg-purple-100 text-purple-800 border-purple-300">待发货</Badge>
-      case "completed":
+      case TicketStatus.COMPLETED:
         return <Badge className="bg-success/15 text-success border-success/30">已完成</Badge>
-      case "delayed":
+      case TicketStatus.DELAYED:
         return <Badge className="bg-destructive/15 text-destructive border-destructive/30">已申请延期</Badge>
-      case "unrepairable":
+      case TicketStatus.UNREPAIRABLE:
         return <Badge className="bg-red-100 text-red-800 border-red-300">无法维修</Badge>
-      // 兼容旧状态
-      case "pending":
-        return <Badge className="bg-warning/15 text-warning-foreground border-warning/30">待处理</Badge>
-      case "processing":
-        return <Badge className="bg-primary/15 text-primary border-primary/30">维修中</Badge>
       default:
         return <Badge className="bg-muted text-muted-foreground border-border">未知状态</Badge>
     }
@@ -1313,6 +1424,18 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
   const getExpressCompanyName = (id: string) => {
     const company = LOGISTICS.find(c => c.id === id)
     return company ? company.name : id
+  }
+
+  // 加载状态
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-muted-foreground">加载工单详情中...</p>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -1327,73 +1450,56 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
             <div>
               <h1 className="text-lg md:text-xl font-semibold text-foreground">维修工单详情</h1>
               <div className="flex items-center gap-2">
-                <p className="text-xs text-muted-foreground">工单号: {repairData.id}</p>
+                <p className="text-xs text-muted-foreground">序列号: {repairData.productSN}</p>
                 {getStatusBadge(repairData.status)}
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {/* 只有维修工程师才能看到维修操作按钮 */}
-            {user?.role === "technician" && (
-              <div className="flex items-center gap-2">
-                {(repairData.status === "created" || repairData.status === "pending") && (
-                  <Button 
-                    size="sm" 
-                    onClick={handleStartRepair}
-                    disabled={needsSupplementSN}
-                  >
-                    开始维修
-                  </Button>
-                )}
-                {(repairData.status === "in_repair" || repairData.status === "processing" || repairData.status === "In_Repair") && (
-                  <>
-                    <Button 
-                      size="sm" 
-                      onClick={handleCompleteRepair} 
-                      className="bg-green-600 hover:bg-green-700"
-                      disabled={needsSupplementSN}
-                    >
-                      维修完成
-                    </Button>
-                    <Button 
-                      size="sm" 
-                      onClick={handleUnrepairable} 
-                      className="bg-red-600 hover:bg-red-700"
-                      disabled={needsSupplementSN}
-                    >
-                      无法维修
-                    </Button>
-                    <Button 
-                      size="sm" 
-                      onClick={() => setIsScrappedDialogOpen(true)} 
-                      className="bg-red-800 hover:bg-red-900"
-                      disabled={needsSupplementSN}
-                    >
-                      判定报废
-                    </Button>
-                  </>
-                )}
-                {/* 移入回收站按钮（任意状态都允许删除） */}
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="border-destructive text-destructive hover:bg-destructive/10"
-                  onClick={handleMoveToRecycleBin}
-                >
-                  删除工单
-                </Button>
-              </div>
-            )}
+            {/* ⚠️ 单设备页面不再提供"维修完成/无法维修/判定报废"按钮。
+                最终处理结果已移至工作台内部的"最终处理结果"卡片（TECHNICIAN_REPAIRING 阶段），
+                批次级别的"提交全部处理结果"按钮在工单总览页面完成整批流转。 */}
           </div>
         </div>
       </div>
 
-      <div className="p-4 md:p-6 space-y-6">
+      <div className="p-4 md:p-6 lg:p-8 space-y-6 max-w-[1920px] mx-auto">
         {/* 工作流进度显示 */}
         <WorkflowProgress ticket={repairData} showDetails={true} />
         
+        {/* 工作流操作栏（动作驱动）
+            ⚠️ 维修人员在 IN_REPAIR 状态下的"发送报告"动作已移至批次维修报告编辑页面
+            （repairs/edit/[batchId]），此处不再重复显示，避免操作入口混乱。
+            其他角色（现场人员上传签字、商务审核）仍正常显示。
+        */}
+        {!inBatchMode && user && !(
+          user.role === UserRole.TECHNICIAN &&
+          (normalizeTicketStatus(repairData.status) === TicketStatus.IN_REPAIR ||
+           normalizeTicketStatus(repairData.status) === TicketStatus.TECHNICIAN_REPAIRING)
+        ) && (
+          <TicketActionBar
+            ticket={{
+              id: repairData.id,
+              batchId: repairData.batchId ?? undefined,
+              status: normalizeTicketStatus(repairData.status) || repairData.status as any,
+              faultPoint: repairData.faultPoint,
+              repairCost: repairData.repairCost,
+              signedReportPhoto: repairData.signedReportPhoto,
+            }}
+            currentUser={{
+              id: user?.id || "",
+              name: user?.realName || "未知用户",
+              role: (user?.role ?? UserRole.TECHNICIAN) as UserRole,
+            }}
+            onActionSuccess={() => {
+              // 刷新工单数据
+              loadTicketData();
+            }}
+          />
+        )}
+        
         {/* 只有维修工程师才能看到延期按钮 */}
-        {(user?.role === "technician" && (repairData.status === "in_repair" || repairData.status === "processing")) && (
+        {(user?.role === UserRole.TECHNICIAN && (repairData.status === "in_repair" || repairData.status === "processing")) && (
           <div className="flex justify-end mb-4">
             <Button 
               variant="outline" 
@@ -1407,16 +1513,14 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
           </div>
         )}
         <Tabs defaultValue="workbench" className="w-full">
-          <TabsList className="grid w-full max-w-2xl grid-cols-4">
+          <TabsList className="grid w-full max-w-3xl grid-cols-2">
             <TabsTrigger value="workbench">工作台</TabsTrigger>
             <TabsTrigger value="photos">照片凭证</TabsTrigger>
-            <TabsTrigger value="history">处理记录</TabsTrigger>
-            <TabsTrigger value="info">基础信息</TabsTrigger>
           </TabsList>
           
           <TabsContent value="workbench" className="mt-6 space-y-4">
             {/* 4个工作台板块 */}
-            <Accordion type="multiple" defaultValue={["panel1"]} className="w-full">
+            <Accordion type="multiple" defaultValue={[]} className="w-full">
               {/* 板块1：现场报告（基础信息） */}
               <AccordionItem value="panel1">
                 <AccordionTrigger className="text-base font-semibold">
@@ -1466,7 +1570,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                         </div>
                         <div>
                           <Label className="text-sm text-muted-foreground">产品序列号</Label>
-                          {needsSupplementSN && (user?.role === "technician" || user?.role === "admin") ? (
+                          {needsSupplementSN && (user?.role === UserRole.TECHNICIAN || user?.role === UserRole.ADMIN) ? (
                             <div className="mt-1 space-y-2">
                               <div className="flex items-center gap-2">
                                 <Input
@@ -1499,7 +1603,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                             </div>
                           ) : (
                             <p className="font-medium mt-1">
-                              {needsSupplementSN ? <span className="text-warning">待补录</span> : (repairData.productSN || "待录入")}
+                              {needsSupplementSN ? <span className="text-warning">待补录</span> : (repairData.productSN || (isTerminalStatus ? "" : "待录入"))}
                             </p>
                           )}
                         </div>
@@ -1509,17 +1613,31 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                         </div>
                       </div>
                       
-                      {/* 现场人员申请取消按钮 */}
-                      {user?.role === "reporter" && repairData.status !== "Cancelled" && repairData.status !== "cancelled" && 
-                       repairData.cancelRequestStatus !== "Approved" && repairData.cancelRequestStatus !== "Pending" && (
+                      {/* 现场人员操作按钮 */}
+                      {user?.role === UserRole.REPORTER && !inBatchMode && (
+                        <div className="mt-6 pt-4 border-t space-y-3">
+                          {/* 申请取消按钮 - 仅在非批次模式下显示 */}
+                          {repairData.status !== "Cancelled" && repairData.status !== "cancelled" && 
+                           repairData.cancelRequestStatus !== "Approved" && repairData.cancelRequestStatus !== "Pending" && (
+                            <Button 
+                              variant="outline" 
+                              className="border-destructive text-destructive hover:bg-destructive/10 w-full"
+                              onClick={() => setIsCancelRequestDialogOpen(true)}
+                            >
+                              申请取消维修订单
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                      {/* 批次模式提示 */}
+                      {user?.role === UserRole.REPORTER && inBatchMode && (
                         <div className="mt-6 pt-4 border-t">
-                          <Button 
-                            variant="outline" 
-                            className="border-destructive text-destructive hover:bg-destructive/10"
-                            onClick={() => setIsCancelRequestDialogOpen(true)}
-                          >
-                            申请取消维修订单
-                          </Button>
+                          <Alert className="border-blue-200 bg-blue-50">
+                            <AlertCircle className="h-4 w-4 text-blue-600" />
+                            <AlertDescription className="text-blue-800 text-sm">
+                              此设备属于批次工单，如需取消请在批次工单主页面点击"申请取消批次工单"按钮。
+                            </AlertDescription>
+                          </Alert>
                         </div>
                       )}
                       
@@ -1577,264 +1695,480 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                 </AccordionContent>
               </AccordionItem>
 
-              {/* 板块2：维修工作台（维修人员用） */}
-              {(user?.role === "technician" || user?.role === "admin") && (
+              {/* 板块2：维修工作台（维修人员可编辑，管理员只读） */}
+              {(user?.role === UserRole.TECHNICIAN || user?.role === UserRole.ADMIN) && (
                 <AccordionItem value="panel2">
                   <AccordionTrigger className="text-base font-semibold">
                     <div className="flex items-center gap-2">
                       <Wrench className="h-5 w-5" />
                       <span>维修工作台</span>
-                      {repairData.faultPoint && (
-                        <Badge variant="outline" className="ml-2 bg-green-50 text-green-700">已填写</Badge>
+                      {user?.role === UserRole.ADMIN && (
+                        <Badge variant="outline" className="ml-2">只读</Badge>
                       )}
+                      {normalizeTicketStatus(repairData.status || "") === TicketStatus.PENDING_REPORTER_CONFIRM ? (
+                        <Badge variant="outline" className="ml-2 bg-cyan-50 text-cyan-700 border-cyan-300">
+                          <CheckCircle2 className="w-3 h-3 mr-1" />
+                          已提交·待现场确认
+                        </Badge>
+                      ) : repairData.faultPoint ? (
+                        <Badge variant="outline" className="ml-2 bg-green-50 text-green-700">已填写</Badge>
+                      ) : null}
                     </div>
                   </AccordionTrigger>
                   <AccordionContent>
                     <Card>
-                      <CardContent className="pt-6 space-y-4">
+                      <CardContent className={cn(
+                        "pt-6 space-y-4", 
+                        (user?.role === UserRole.ADMIN || 
+                         repairData.cancelRequestStatus === "Pending" ||
+                         repairData.status === TicketStatus.COMPLETED ||
+                        // 仅在 Created / Warehouse_Confirming 两个状态下锁定维修工作台（仓库确认前）。
+                        // 返厂状态（PENDING_FACTORY / FACTORY_FINISHED）不属于仓库确认流程，不在此集合中。
+                        (user?.role === UserRole.TECHNICIAN && 
+                         (() => {
+                           const ns = normalizeTicketStatus(repairData.status || "")
+                           const WAREHOUSE_LOCK_STATUSES = new Set<TicketStatus | null>([
+                             TicketStatus.CREATED,
+                             TicketStatus.WAREHOUSE_CONFIRMING,
+                           ])
+                           return WAREHOUSE_LOCK_STATUSES.has(ns)
+                         })()) ||
+                        // 维修报告已提交（Pending_Reporter_Confirm）且未进入二次编辑模式时，工作台只读
+                        (user?.role === UserRole.TECHNICIAN &&
+                         normalizeTicketStatus(repairData.status || "") === TicketStatus.PENDING_REPORTER_CONFIRM &&
+                         !isEditingRepairAfterSubmit) ||
+                        // 现场已签字、进入选择最终处理结果阶段（Technician_Repairing），维修内容只读，
+                        // 仅"最终处理结果"卡片通过 pointer-events-auto 保持可交互
+                        (user?.role === UserRole.TECHNICIAN &&
+                         normalizeTicketStatus(repairData.status || "") === TicketStatus.TECHNICIAN_REPAIRING)
+                        ) && "pointer-events-none opacity-75"
+                      )}>
+                        {/* 等待仓库确认的提示（仅维修人员看到） */}
+                        {/* 仅 Created / Warehouse_Confirming 会显示此 Alert。                           */}
+                        {/* 返厂状态（PENDING_FACTORY / FACTORY_FINISHED）不在集合内，永不触发。 */}
+                        {(() => {
+                          const normalizedStatus = normalizeTicketStatus(repairData.status || "")
+                          const WAREHOUSE_LOCK_STATUSES = new Set<TicketStatus | null>([
+                            TicketStatus.CREATED,
+                            TicketStatus.WAREHOUSE_CONFIRMING,
+                          ])
+                          const shouldLock = user?.role === UserRole.TECHNICIAN &&
+                            WAREHOUSE_LOCK_STATUSES.has(normalizedStatus)
+                          
+                          if (user?.role === UserRole.TECHNICIAN) {
+                            console.log("[维修工作台] 状态检查:", {
+                              原始状态: repairData.status,
+                              规范化状态: normalizedStatus,
+                              应该锁定: shouldLock,
+                            })
+                          }
+                          
+                          return shouldLock
+                        })() && (
+                          <Alert className="mb-4 border-yellow-300 bg-yellow-50 pointer-events-auto">
+                            <AlertCircle className="h-4 w-4 text-yellow-600" />
+                            <AlertDescription className="text-yellow-800">
+                              <p className="font-semibold mb-1">等待仓库确认</p>
+                              {normalizeTicketStatus(repairData.status || "") === TicketStatus.WAREHOUSE_CONFIRMING ? (
+                                <p className="text-sm">
+                                  设备序列号或型号已变更，需要仓库管理员重新确认设备信息。请通知仓库管理员在「仓库管理工作台 → 待确认批次」中刷新并重新确认此批次。
+                                </p>
+                              ) : (
+                                <p className="text-sm">
+                                  此工单尚未经过仓库管理员确认，维修工作台暂时锁定。请等待仓库管理员在「待确认批次」中确认设备信息并填写出厂日期后，再进行后续操作。
+                                </p>
+                              )}
+                            </AlertDescription>
+                          </Alert>
+                        )}
+                        
+                        {/* 维修报告已提交（Pending_Reporter_Confirm）状态提示 */}
+                        {user?.role === UserRole.TECHNICIAN &&
+                         normalizeTicketStatus(repairData.status || "") === TicketStatus.PENDING_REPORTER_CONFIRM && (
+                          <Alert className={cn(
+                            "mb-4 pointer-events-auto",
+                            isEditingRepairAfterSubmit
+                              ? "border-orange-300 bg-orange-50"
+                              : "border-cyan-300 bg-cyan-50"
+                          )}>
+                            {isEditingRepairAfterSubmit
+                              ? <Pencil className="h-4 w-4 text-orange-600" />
+                              : <CheckCircle2 className="h-4 w-4 text-cyan-600" />
+                            }
+                            <AlertDescription className={isEditingRepairAfterSubmit ? "text-orange-800" : "text-cyan-800"}>
+                              {isEditingRepairAfterSubmit ? (
+                                <>
+                                  <p className="font-semibold mb-1">正在修改已提交的报告</p>
+                                  <p className="text-sm">
+                                    修改完成后点击下方"保存维修记录"按钮，保存后将重新等待现场人员确认。
+                                  </p>
+                                </>
+                              ) : (
+                                <>
+                                  <p className="font-semibold mb-1">维修报告已提交，待现场人员签字确认</p>
+                                  <p className="text-sm mb-2">
+                                    报告内容已锁定。如需修改报告内容，请点击下方按钮进入编辑模式。
+                                  </p>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="border-cyan-400 text-cyan-700 hover:bg-cyan-100"
+                                    onClick={() => setIsEditingRepairAfterSubmit(true)}
+                                  >
+                                    <Pencil className="w-3 h-3 mr-1" />
+                                    修改报告
+                                  </Button>
+                                </>
+                              )}
+                            </AlertDescription>
+                          </Alert>
+                        )}
+
+                        {/* 取消申请中的提示 */}
+                        {repairData.cancelRequestStatus === "Pending" && (
+                          <Alert className="mb-4 border-orange-300 bg-orange-50 pointer-events-auto">
+                            <AlertCircle className="h-4 w-4 text-orange-600" />
+                            <AlertDescription className="text-orange-800">
+                              <p className="font-semibold mb-1">此工单正在申请取消中</p>
+                              <p className="text-sm">
+                                现场人员已提交取消申请，等待商务审批。在商务人员处理之前，维修工作台暂时锁定。
+                              </p>
+                              {repairData.cancelRequestReason && (
+                                <p className="text-sm mt-2">
+                                  <strong>申请原因：</strong>{repairData.cancelRequestReason}
+                                </p>
+                              )}
+                            </AlertDescription>
+                          </Alert>
+                        )}
+                        
+                        {/* 管理员只读提示 */}
+                        {user?.role === UserRole.ADMIN && (
+                          <div className="mb-4 p-3 bg-muted/50 rounded-md border border-border pointer-events-auto">
+                            <p className="text-sm text-muted-foreground">
+                              <AlertCircle className="inline h-4 w-4 mr-1" />
+                              此工作台仅维修人员可编辑，管理员仅可查看
+                            </p>
+                          </div>
+                        )}
+                        
                         {/* 复检模式提示 */}
                         {isRecheckMode && (
                           <Alert className="mb-4 border-orange-200 bg-orange-50">
                             <AlertCircle className="h-4 w-4 text-orange-600" />
                             <AlertDescription className="text-orange-800">
-                              📦 设备已从原厂返回，请进行最终检测并录入维修结果。
+                              设备已从原厂返回，请进行最终检测并录入维修结果。
                             </AlertDescription>
                           </Alert>
                         )}
-                        
-                        {/* 返厂开关（仅在非复检模式且状态为 In_Repair 时显示） */}
-                        {!isRecheckMode && (repairData.status === "In_Repair" || repairData.status === "in_repair" || repairData.status === "Processing" || repairData.status === "processing") && (
-                          <div className="flex items-center justify-between p-4 bg-muted/50 rounded-md border border-border mb-4">
-                            <div className="flex items-center gap-2">
-                              <Label htmlFor="isOutsourced" className="text-base font-medium cursor-pointer">
-                                无法内修，需返厂 (Outsource)
-                              </Label>
+
+                        {/* === 故障与处理记录（合并原故障鉴定+处理过程） === */}
+                        <Card className="mb-4">
+                          <CardHeader>
+                            <CardTitle className="text-base">故障与处理记录</CardTitle>
+                            <CardDescription>记录保修判定、维修动作与处理方案</CardDescription>
+                          </CardHeader>
+                          <CardContent className="space-y-4">
+                            {/* 保修判定 + 维修动作：并排 */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div className="space-y-2">
+                                <Label className="text-sm text-muted-foreground">保修判定</Label>
+                                <Select
+                                  value={warrantyStatusOverride ?? undefined}
+                                  onValueChange={(value) =>
+                                    setWarrantyStatusOverride(value as WarrantyStatus)
+                                  }
+                                >
+                                  <SelectTrigger className="bg-muted/50 border-border w-full">
+                                    <SelectValue placeholder="请选择保修状态（可覆盖系统判定）" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value={WarrantyStatus.IN_WARRANTY}>保内</SelectItem>
+                                    <SelectItem value={WarrantyStatus.OUT_OF_WARRANTY}>保外</SelectItem>
+                                    <SelectItem value={WarrantyStatus.UNKNOWN}>未知 / 暂不判断</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                                <p className="text-xs text-muted-foreground">
+                                  系统会根据出厂日期给出初判，必要时可在此人工覆盖。
+                                </p>
+                              </div>
+                              <div className="space-y-2">
+                                <Label className="text-sm text-muted-foreground">
+                                  维修动作 <span className="text-destructive">*</span>
+                                </Label>
+                                <Select
+                                  value={repairAction ?? undefined}
+                                  onValueChange={(value) =>
+                                    setRepairAction(value as RepairAction)
+                                  }
+                                >
+                                  <SelectTrigger className="bg-muted/50 border-border w-full">
+                                    <SelectValue placeholder="请选择本次维修的处理方式" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value={RepairAction.ON_SITE_REPAIR}>直接维修</SelectItem>
+                                    <SelectItem value={RepairAction.PART_REPLACEMENT}>更换配件</SelectItem>
+                                    <SelectItem value={RepairAction.REPLACE_DEVICE}>更换设备</SelectItem>
+                                    <SelectItem value={RepairAction.RMA}>返厂维修</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                              </div>
                             </div>
-                            <Switch
-                              id="isOutsourced"
-                              checked={isOutsourced}
-                              onCheckedChange={(checked) => setIsOutsourced(checked)}
-                            />
-                          </div>
-                        )}
-                        
-                        <div className="grid md:grid-cols-2 gap-4">
-                          {/* 返厂模式下隐藏这些字段 */}
-                          {!isOutsourced && !isRecheckMode && (
-                            <>
-                              <div>
-                                <Label htmlFor="materialCode">物料代码</Label>
-                                <Input
-                                  id="materialCode"
-                                  value={repairFormData.materialCode}
-                                  onChange={(e) => setRepairFormData({ ...repairFormData, materialCode: e.target.value })}
-                                  placeholder="待录入（可手动输入或从数据库获取）"
-                                  className="mt-1"
-                                />
-                                <p className="text-xs text-muted-foreground mt-1">
-                                  可手动输入，或点击下方"从数据库获取"按钮自动填充
-                                </p>
-                              </div>
-                              <div>
-                                <Label htmlFor="deviceName">物料名称（标准名）</Label>
-                                <Input
-                                  id="deviceName"
-                                  value={repairFormData.deviceName}
-                                  onChange={(e) => setRepairFormData({ ...repairFormData, deviceName: e.target.value })}
-                                  placeholder="待录入（可手动输入或从数据库获取）"
-                                  className="mt-1"
-                                />
-                                <p className="text-xs text-muted-foreground mt-1">
-                                  可手动输入，或点击下方"从数据库获取"按钮自动填充
-                                </p>
-                              </div>
-                              <div className="md:col-span-2">
-                                <div className="flex items-center justify-between mb-1">
-                                  <Label htmlFor="fullSpec">规格型号</Label>
-                                  {repairData.productSN && repairData.productSN !== "PENDING" && (
-                                    <Button
-                                      type="button"
-                                      variant="outline"
-                                      size="sm"
-                                      onClick={handleAutoFillFullSpec}
-                                      disabled={isLoadingFullSpec}
-                                      className="h-7 text-xs"
-                                    >
-                                      <RefreshCw className={cn("w-3 h-3 mr-1", isLoadingFullSpec && "animate-spin")} />
-                                      {isLoadingFullSpec ? "获取中..." : "从数据库获取"}
-                                    </Button>
-                                  )}
-                                </div>
-                                <Input
-                                  id="fullSpec"
-                                  value={repairFormData.fullSpec}
-                                  onChange={(e) => setRepairFormData({ ...repairFormData, fullSpec: e.target.value })}
-                                  placeholder="待录入（可手动输入或从数据库获取）"
-                                  className="mt-1"
-                                />
-                                {repairData.productSN && repairData.productSN !== "PENDING" && (
-                                  <p className="text-xs text-muted-foreground mt-1">
-                                    提示：可手动输入，或点击"从数据库获取"按钮自动填充（会同时填充物料代码、物料名称和规格型号）
-                                  </p>
-                                )}
-                              </div>
-                            </>
-                          )}
-                          
-                          {/* 复检模式或正常模式显示故障点 */}
-                          {(isRecheckMode || !isOutsourced) && (
-                            <div className="md:col-span-2">
-                              <Label htmlFor="faultPoint">故障点 <span className="text-destructive">*</span></Label>
+
+                            {/* 故障点与处理说明：合并为一个输入框，提交时同时写入 faultPoint 与 repairNotes */}
+                            <div className="space-y-2">
+                              <Label htmlFor="faultAndNotes">故障点与处理说明 <span className="text-destructive">*</span></Label>
                               <Textarea
-                                id="faultPoint"
-                                value={repairFormData.faultPoint}
-                                onChange={(e) => setRepairFormData({ ...repairFormData, faultPoint: e.target.value })}
-                                placeholder={isRecheckMode ? "请详细描述复检结果和故障点..." : "请详细描述故障点..."}
-                                className="mt-1 min-h-[100px]"
-                                disabled={isOutsourced}
+                                id="faultAndNotes"
+                                value={faultAndNotesCombined}
+                                onChange={(e) => setFaultAndNotesCombined(e.target.value)}
+                                placeholder={
+                                  isRecheckMode
+                                    ? "请描述复检结果、故障点及处理过程..."
+                                    : "请描述故障点与本次维修过程、使用的手段、替换的部件等（可合并填写）..."
+                                }
+                                className="min-h-[120px]"
                               />
-                              <p className="text-xs text-muted-foreground mt-1">
-                                {isRecheckMode 
-                                  ? '填写故障点后，工单状态将自动流转为"待商务处理"'
-                                  : '填写故障点后，工单状态将自动流转为"待商务处理"'}
+                              <p className="text-xs text-muted-foreground">
+                                {isRecheckMode
+                                  ? '填写完成后，请通过下方"工作流操作栏"发送维修报告至现场确认'
+                                  : '填写完成后，请通过下方"工作流操作栏"发送维修报告至现场确认'}
                               </p>
                             </div>
-                          )}
-                          
-                          {/* 复检模式显示物料信息 */}
-                          {isRecheckMode && (
-                            <>
-                              <div>
-                                <Label htmlFor="materialCode">物料代码</Label>
-                                <Input
-                                  id="materialCode"
-                                  value={repairFormData.materialCode}
-                                  onChange={(e) => setRepairFormData({ ...repairFormData, materialCode: e.target.value })}
-                                  placeholder="待录入"
-                                  className="mt-1"
-                                />
-                              </div>
-                              <div>
-                                <Label htmlFor="deviceName">物料名称（标准名）</Label>
-                                <Input
-                                  id="deviceName"
-                                  value={repairFormData.deviceName}
-                                  onChange={(e) => setRepairFormData({ ...repairFormData, deviceName: e.target.value })}
-                                  placeholder="待录入"
-                                  className="mt-1"
-                                />
-                              </div>
-                              <div className="md:col-span-2">
-                                <Label htmlFor="fullSpec">规格型号</Label>
-                                <Input
-                                  id="fullSpec"
-                                  value={repairFormData.fullSpec}
-                                  onChange={(e) => setRepairFormData({ ...repairFormData, fullSpec: e.target.value })}
-                                  placeholder="待录入"
-                                  className="mt-1"
-                                />
-                              </div>
-                            </>
-                          )}
-                          
-                          {/* 正常模式显示收费金额（维修人员填写） */}
-                          {!isOutsourced && !isRecheckMode && (
-                            <>
-                              <div>
-                                <Label htmlFor="repairCost">收费金额（元）</Label>
-                                <Input
-                                  id="repairCost"
-                                  type="number"
-                                  step="0.01"
-                                  min="0"
-                                  value={repairFormData.repairCost || ""}
-                                  onChange={(e) => {
-                                    const value = e.target.value ? Number(e.target.value) : null
-                                    setRepairFormData({ ...repairFormData, repairCost: value })
-                                  }}
-                                  placeholder="0.00（质保期内填0，过保填写金额）"
-                                  className="mt-1"
-                                />
-                                <p className="text-xs text-muted-foreground mt-1">
-                                  {repairData.factoryShipDate 
-                                    ? `出厂日期：${format(repairData.factoryShipDate, "yyyy-MM-dd", { locale: zhCN })}（请根据此日期判断是否在质保期内）`
-                                    : "⚠️ 出厂日期未填写，请仓库管理员先填写出厂日期"}
-                                </p>
-                              </div>
 
-                              {/* 收费金额下方的返厂信息（选填，不做强制校验） */}
-                              <div className="grid md:grid-cols-3 gap-4 mt-4">
-                                <div>
-                                  <Label htmlFor="factoryRepairDate">返厂维修日期（选填）</Label>
-                                  <Popover>
-                                    <PopoverTrigger asChild>
-                                      <Button
-                                        id="factoryRepairDate"
-                                        variant="outline"
-                                        className={cn("w-full justify-start text-left font-normal mt-1", !repairFormData.factoryRepairDate && "text-muted-foreground")}
-                                      >
-                                        <CalendarIcon className="mr-2 h-4 w-4" />
-                                        {repairFormData.factoryRepairDate ? (
-                                          format(repairFormData.factoryRepairDate, "yyyy-MM-dd", { locale: zhCN })
-                                        ) : (
-                                          <span>选择日期</span>
-                                        )}
-                                      </Button>
-                                    </PopoverTrigger>
-                                    <PopoverContent className="w-auto p-0" align="start">
-                                      <CalendarComponent
-                                        mode="single"
-                                        selected={repairFormData.factoryRepairDate || undefined}
-                                        onSelect={(date) => setRepairFormData({ ...repairFormData, factoryRepairDate: date || null })}
-                                        initialFocus
-                                        locale={zhCN}
-                                      />
-                                    </PopoverContent>
-                                  </Popover>
-                                </div>
-                                <div>
-                                  <Label htmlFor="factoryTrackingNum">返厂维修快递单号（选填）</Label>
-                                  <Input
-                                    id="factoryTrackingNum"
-                                    value={repairFormData.factoryTrackingNum}
-                                    onChange={(e) => setRepairFormData({ ...repairFormData, factoryTrackingNum: e.target.value })}
-                                    placeholder="请输入快递单号"
-                                    className="mt-1"
-                                  />
-                                </div>
-                                <div>
-                                  <Label htmlFor="supplierName">供应商名称（选填）</Label>
-                                  <Input
-                                    id="supplierName"
-                                    value={repairFormData.supplierName}
-                                    onChange={(e) => setRepairFormData({ ...repairFormData, supplierName: e.target.value })}
-                                    placeholder="请输入供应商名称"
-                                    className="mt-1"
-                                  />
+                            {/* RMA 返厂信息：仅在选择返厂维修时显示 */}
+                            {repairAction === RepairAction.RMA && (
+                              <div className="mt-2 rounded-md border border-dashed border-border bg-muted/40 p-4 space-y-4">
+                                <p className="text-sm font-medium text-muted-foreground">
+                                  返厂信息（仅在选择“返厂维修”时需要填写）
+                                </p>
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                  <div className="space-y-2">
+                                    <Label className="text-sm text-muted-foreground">返厂维修日期</Label>
+                                    <Popover>
+                                      <PopoverTrigger asChild>
+                                        <Button
+                                          variant="outline"
+                                          className={cn(
+                                            "w-full justify-start text-left font-normal",
+                                            !repairFormData.factoryRepairDate && "text-muted-foreground"
+                                          )}
+                                        >
+                                          <CalendarIcon className="mr-2 h-4 w-4" />
+                                          {repairFormData.factoryRepairDate
+                                            ? format(repairFormData.factoryRepairDate, "yyyy-MM-dd", { locale: zhCN })
+                                            : "选择日期"}
+                                        </Button>
+                                      </PopoverTrigger>
+                                      <PopoverContent className="w-auto p-0" align="start">
+                                        <CalendarComponent
+                                          mode="single"
+                                          selected={repairFormData.factoryRepairDate || undefined}
+                                          onSelect={(date) =>
+                                            setRepairFormData({ ...repairFormData, factoryRepairDate: date || null })
+                                          }
+                                          initialFocus
+                                          locale={zhCN}
+                                          captionLayout="dropdown"
+                                          fromYear={2010}
+                                          toYear={new Date().getFullYear() + 5}
+                                        />
+                                      </PopoverContent>
+                                    </Popover>
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label className="text-sm text-muted-foreground">返厂快递单号</Label>
+                                    <Input
+                                      value={repairFormData.factoryTrackingNum}
+                                      onChange={(e) =>
+                                        setRepairFormData({ ...repairFormData, factoryTrackingNum: e.target.value })
+                                      }
+                                      placeholder="请输入返厂快递单号"
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label className="text-sm text-muted-foreground">供应商名称</Label>
+                                    <Input
+                                      value={repairFormData.supplierName}
+                                      onChange={(e) =>
+                                        setRepairFormData({ ...repairFormData, supplierName: e.target.value })
+                                      }
+                                      placeholder="请输入供应商名称"
+                                    />
+                                  </div>
                                 </div>
                               </div>
-                            </>
-                          )}
-                        </div>
-                        <div className="flex justify-end pt-4 border-t">
-                          <Button 
-                            onClick={handleSaveRepair} 
-                            disabled={
-                              isSavingRepair || 
-                              (isOutsourced && !repairFormData.supplierName.trim()) ||
-                              ((isRecheckMode || !isOutsourced) && !repairFormData.faultPoint.trim())
-                            }
-                          >
-                            <Save className="w-4 h-4 mr-2" />
-                            {isSavingRepair 
-                              ? "保存中..." 
-                              : isOutsourced 
-                                ? "提交返厂申请"
+                            )}
+                          </CardContent>
+                        </Card>
+
+                        {/* === 区块三：物料与费用 === */}
+                        <Card>
+                          <CardHeader>
+                            <CardTitle className="text-base">物料与费用</CardTitle>
+                            <CardDescription>记录更换配件与收费信息</CardDescription>
+                          </CardHeader>
+                          <CardContent className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            <div className="space-y-2">
+                              <Label htmlFor="materialCode">物料代码</Label>
+                              <Input
+                                id="materialCode"
+                                value={repairFormData.materialCode}
+                                onChange={(e) =>
+                                  setRepairFormData({ ...repairFormData, materialCode: e.target.value })
+                                }
+                                placeholder="待录入（可手动输入或从数据库获取）"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="deviceName">物料名称（标准名）</Label>
+                              <Input
+                                id="deviceName"
+                                value={repairFormData.deviceName}
+                                onChange={(e) =>
+                                  setRepairFormData({ ...repairFormData, deviceName: e.target.value })
+                                }
+                                placeholder="待录入"
+                              />
+                            </div>
+                            <div className="space-y-2 md:col-span-2 lg:col-span-3">
+                              <div className="flex items-center justify-between mb-1">
+                                <Label htmlFor="fullSpec">规格型号</Label>
+                                {repairData.productSN && repairData.productSN !== "PENDING" && (
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={handleAutoFillFullSpec}
+                                    disabled={isLoadingFullSpec}
+                                    className="h-7 text-xs"
+                                  >
+                                    <RefreshCw
+                                      className={cn(
+                                        "w-3 h-3 mr-1",
+                                        isLoadingFullSpec && "animate-spin"
+                                      )}
+                                    />
+                                    {isLoadingFullSpec ? "获取中..." : "从数据库获取"}
+                                  </Button>
+                                )}
+                              </div>
+                              <Input
+                                id="fullSpec"
+                                value={repairFormData.fullSpec}
+                                onChange={(e) =>
+                                  setRepairFormData({ ...repairFormData, fullSpec: e.target.value })
+                                }
+                                placeholder="待录入（可手动输入或从数据库获取）"
+                              />
+                              {repairData.productSN && repairData.productSN !== "PENDING" && (
+                                <p className="text-xs text-muted-foreground mt-1">
+                                  提示：可手动输入，或点击"从数据库获取"按钮自动填充（会同时填充物料代码、物料名称和规格型号）
+                                </p>
+                              )}
+                            </div>
+                            <div className="space-y-2 md:col-span-2 lg:col-span-3">
+                              <Label htmlFor="repairCost">收费金额（元）</Label>
+                              <Input
+                                id="repairCost"
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={repairFormData.repairCost !== null ? repairFormData.repairCost : ""}
+                                onChange={(e) => {
+                                  const value = e.target.value === "" ? null : Number(e.target.value)
+                                  setRepairFormData({ ...repairFormData, repairCost: value })
+                                }}
+                                placeholder="0.00（质保期内填0，过保填写金额）"
+                              />
+                            </div>
+                          </CardContent>
+                        </Card>
+                        {/* 保存按钮：TECHNICIAN_REPAIRING 阶段维修内容已锁定，隐藏此按钮，
+                            仅通过下方"最终处理结果"卡片操作 */}
+                        {!(user?.role === UserRole.TECHNICIAN &&
+                            normalizeTicketStatus(repairData.status || "") === TicketStatus.TECHNICIAN_REPAIRING) && (
+                          <div className="flex justify-end pt-4 border-t">
+                            <Button 
+                              onClick={handleSaveRepair} 
+                              disabled={
+                                isSavingRepair || 
+                                (isRecheckMode && !faultAndNotesCombined.trim())
+                              }
+                            >
+                              <Save className="w-4 h-4 mr-2" />
+                              {isSavingRepair 
+                                ? "保存中..." 
                                 : isRecheckMode
                                   ? "维修完成 (复检通过)"
                                   : "保存维修记录"}
-                          </Button>
-                        </div>
+                            </Button>
+                          </div>
+                        )}
+
+                        {/* ── TECHNICIAN_REPAIRING 阶段：维修内容只读提示 ─────────────── */}
+                        {user?.role === UserRole.TECHNICIAN &&
+                          normalizeTicketStatus(repairData.status) === TicketStatus.TECHNICIAN_REPAIRING && (
+                          <Alert className="mb-2 border-indigo-300 bg-indigo-50 pointer-events-auto">
+                            <CheckCircle2 className="h-4 w-4 text-indigo-600" />
+                            <AlertDescription className="text-indigo-800">
+                              <p className="font-semibold mb-1">现场已签字，维修内容已锁定</p>
+                              <p className="text-sm">报告内容已由现场人员确认，无需再次修改。请在下方选择本台设备的最终处理结果。</p>
+                            </AlertDescription>
+                          </Alert>
+                        )}
+
+                        {/* ── 最终处理结果（仅 TECHNICIAN_REPAIRING 阶段可见）──────────── */}
+                        {user?.role === UserRole.TECHNICIAN &&
+                          normalizeTicketStatus(repairData.status) === TicketStatus.TECHNICIAN_REPAIRING && (
+                          <Card className="border-2 border-indigo-300 bg-indigo-50/50 mt-4 pointer-events-auto">
+                            <CardHeader className="pb-2">
+                              <CardTitle className="text-base font-semibold text-indigo-800 flex items-center gap-2">
+                                最终处理结果
+                              </CardTitle>
+                              <p className="text-xs text-indigo-600">
+                                请为本台设备选择最终处理结果，保存后前往工单总览确认所有设备均已选择，再点击"提交全部处理结果"完成整批工单。
+                              </p>
+                            </CardHeader>
+                            <CardContent className="space-y-3">
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                {([
+                                  { value: FinalOutcome.COMPLETED,         label: FINAL_OUTCOME_LABELS[FinalOutcome.COMPLETED],         desc: "设备已修复，准备发回",        color: "border-green-400 bg-green-50 text-green-800"   },
+                                  { value: FinalOutcome.SCRAPPED,          label: FINAL_OUTCOME_LABELS[FinalOutcome.SCRAPPED],          desc: "无需维修，设备直接入库存放",  color: "border-red-400 bg-red-50 text-red-800"         },
+                                  { value: FinalOutcome.RETURN_UNREPAIRED, label: FINAL_OUTCOME_LABELS[FinalOutcome.RETURN_UNREPAIRED], desc: "设备无法修复，原样退回客户", color: "border-orange-400 bg-orange-50 text-orange-800" },
+                                ] as { value: FinalOutcome; label: string; desc: string; color: string }[]).map(option => (
+                                  <button
+                                    key={option.value}
+                                    type="button"
+                                    onClick={() => setFinalOutcome(option.value)}
+                                    className={`rounded-lg border-2 p-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-indigo-400 ${
+                                      finalOutcome === option.value
+                                        ? `${option.color} ring-2 ring-offset-1`
+                                        : "border-border bg-background hover:border-indigo-300"
+                                    }`}
+                                  >
+                                    <div className="font-medium text-sm">{option.label}</div>
+                                    <div className="text-xs text-muted-foreground mt-0.5">{option.desc}</div>
+                                  </button>
+                                ))}
+                              </div>
+                              {finalOutcome && (
+                                <p className="text-xs text-indigo-700 font-medium">
+                                  已选择：{FINAL_OUTCOME_LABELS[finalOutcome as FinalOutcome] ?? finalOutcome}
+                                </p>
+                              )}
+                              <div className="flex justify-end pt-2 border-t border-indigo-200">
+                                <Button
+                                  onClick={handleSaveFinalOutcome}
+                                  disabled={isSavingFinalOutcome || !finalOutcome}
+                                  className="bg-indigo-600 hover:bg-indigo-700"
+                                >
+                                  {isSavingFinalOutcome ? "保存中..." : "保存处理结果"}
+                                </Button>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        )}
                       </CardContent>
                     </Card>
                   </AccordionContent>
@@ -1842,13 +2176,13 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
               )}
 
               {/* 板块3：商务/管理员工作台 */}
-              {(user?.role === "admin" || user?.role === "technician" || user?.role === "business") && (
+              {(user?.role === UserRole.ADMIN || user?.role === UserRole.TECHNICIAN || user?.role === UserRole.BUSINESS) && (
                 <AccordionItem value="panel3">
                   <AccordionTrigger className="text-base font-semibold">
                     <div className="flex items-center gap-2">
                       <User className="h-5 w-5" />
                       <span>商务/管理员工作台</span>
-                      {user?.role === "technician" && (
+                      {user?.role === UserRole.TECHNICIAN && (
                         <Badge variant="outline" className="ml-2">只读</Badge>
                       )}
                     </div>
@@ -1856,7 +2190,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                   <AccordionContent>
                     <Card>
                       <CardContent className="pt-6 space-y-4">
-                        {user?.role === "technician" && (
+                        {user?.role === UserRole.TECHNICIAN && (
                           <div className="mb-4 p-3 bg-muted/50 rounded-md border border-border">
                             <p className="text-sm text-muted-foreground">
                               <AlertCircle className="inline h-4 w-4 mr-1" />
@@ -1866,7 +2200,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                         )}
                         
                         {/* 显示待审批的取消申请 */}
-                        {repairData.cancelRequestStatus === "Pending" && (user?.role === "admin" || user?.role === "business") && (
+                        {repairData.cancelRequestStatus === "Pending" && (user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) && (
                           <Alert className="mb-4 border-orange-200 bg-orange-50">
                             <AlertCircle className="h-4 w-4 text-orange-600" />
                             <AlertDescription className="text-orange-800">
@@ -1902,10 +2236,29 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                           repairData.status === "Factory_Finished" || repairData.status === "factory_finished") && (
                           <div className="mb-6 p-4 bg-blue-50 rounded-md border border-blue-200">
                             <h3 className="text-base font-semibold mb-4 text-blue-900">返厂物流管理</h3>
-                            <div className="grid md:grid-cols-2 gap-4">
+
+                            {/* 维修工程师提交的返厂基础信息（只读回显） */}
+                            <div className="mb-4 p-3 bg-white rounded border border-blue-100 grid grid-cols-1 md:grid-cols-3 gap-3">
+                              <div>
+                                <p className="text-xs text-muted-foreground mb-0.5">供应商名称</p>
+                                <p className="font-medium text-sm">{repairData.supplierName || "未填写"}</p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-muted-foreground mb-0.5">厂家单号（返厂快递）</p>
+                                <p className="font-medium text-sm">{repairData.factoryTrackingNum || "未填写"}</p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-muted-foreground mb-0.5">维修费用（元）</p>
+                                <p className="font-medium text-sm">
+                                  {repairData.repairCost != null ? `¥${repairData.repairCost}` : "未填写"}
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                               <div>
                                 <Label htmlFor="adminFactoryRepairDate">发往原厂日期</Label>
-                                {(user?.role === "admin" || user?.role === "business") ? (
+                                {(user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) ? (
                                   <Popover>
                                     <PopoverTrigger asChild>
                                       <Button
@@ -1928,6 +2281,9 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                                         onSelect={(date) => setAdminFormData({ ...adminFormData, factoryRepairDate: date || null })}
                                         initialFocus
                                         locale={zhCN}
+                                        captionLayout="dropdown"
+                                        fromYear={2010}
+                                        toYear={new Date().getFullYear() + 5}
                                       />
                                     </PopoverContent>
                                   </Popover>
@@ -1941,7 +2297,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                               </div>
                               <div>
                                 <Label htmlFor="adminFactoryTrackingNum">发往原厂快递单号</Label>
-                                {(user?.role === "admin" || user?.role === "business") ? (
+                                {(user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) ? (
                                   <Input
                                     id="adminFactoryTrackingNum"
                                     value={adminFormData.factoryTrackingNum}
@@ -1954,7 +2310,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                                 )}
                               </div>
                             </div>
-                            {(user?.role === "admin" || user?.role === "business") && (repairData.status === "Pending_Factory" || repairData.status === "pending_factory") && (
+                            {(user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) && (repairData.status === "Pending_Factory" || repairData.status === "pending_factory") && (
                               <div className="flex gap-2 mt-4">
                                 <Button 
                                   variant="outline" 
@@ -1972,15 +2328,48 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                                   确认收到原厂寄回设备
                                 </Button>
                               </div>
-                            )}
+                          )}
+                        </div>
+                        )}
+                        
+                        {/* 设备保修状态显示 - 维修人员必看 */}
+                        {repairData.manufactureDate && (
+                          <div className="p-4 rounded-lg border mb-4" style={{
+                            backgroundColor: repairData.warrantyStatus === "InWarranty" ? "#f0fdf4" : "#fef2f2",
+                            borderColor: repairData.warrantyStatus === "InWarranty" ? "#86efac" : "#fca5a5"
+                          }}>
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-3">
+                                <ShieldCheck className={cn(
+                                  "h-5 w-5",
+                                  repairData.warrantyStatus === "InWarranty" ? "text-green-600" : "text-red-600"
+                                )} />
+                                <div>
+                                  <p className="font-semibold text-sm">
+                                    {repairData.warrantyStatus === "InWarranty" ? "✅ 在保修期内" : "⚠️ 已过保修期"}
+                                  </p>
+                                  <p className="text-xs text-muted-foreground mt-0.5">
+                                    出厂日期：{format(new Date(repairData.manufactureDate), "yyyy-MM-dd", { locale: zhCN })}
+                                  </p>
+                                </div>
+                              </div>
+                              <Badge 
+                                variant={repairData.warrantyStatus === "InWarranty" ? "default" : "destructive"}
+                                className={cn(
+                                  repairData.warrantyStatus === "InWarranty" && "bg-green-600"
+                                )}
+                              >
+                                {repairData.warrantyStatus === "InWarranty" ? "保内" : "保外"}
+                              </Badge>
+                            </div>
                           </div>
                         )}
                         
-                        <div className="grid md:grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                           {/* 管理员填写字段（根据新的业务逻辑） */}
                           <div className="flex items-center justify-between">
                             <Label htmlFor="isChargeable">是否收费（确认）</Label>
-                            {(user?.role === "admin" || user?.role === "business") ? (
+                            {(user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) ? (
                               <Switch
                                 id="isChargeable"
                                 checked={adminFormData.isChargeable}
@@ -1994,7 +2383,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                           </div>
                           <div className="flex items-center justify-between">
                             <Label htmlFor="isPaymentReceived">收费是否到账</Label>
-                            {(user?.role === "admin" || user?.role === "business") ? (
+                            {(user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) ? (
                               <Switch
                                 id="isPaymentReceived"
                                 checked={adminFormData.isPaymentReceived}
@@ -2008,7 +2397,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                           </div>
                           <div className="flex items-center justify-between">
                             <Label htmlFor="isInvoiced">是否开票</Label>
-                            {(user?.role === "admin" || user?.role === "business") ? (
+                            {(user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) ? (
                               <Switch
                                 id="isInvoiced"
                                 checked={adminFormData.isInvoiced}
@@ -2021,9 +2410,9 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                             )}
                           </div>
                           {adminFormData.isInvoiced && (
-                            <div className="md:col-span-2">
+                            <div className="md:col-span-2 lg:col-span-3">
                               <Label htmlFor="clientName">客户名称（开票时必填）</Label>
-                              {(user?.role === "admin" || user?.role === "business") ? (
+                              {(user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) ? (
                                 <Input
                                   id="clientName"
                                   value={adminFormData.clientName}
@@ -2038,7 +2427,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                           )}
                         </div>
                         {/* 商务/管理员操作按钮 */}
-                        {(user?.role === "admin" || user?.role === "business") && (
+                        {(user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) && (
                           <div className="flex gap-2 pt-4 border-t">
                             <Button 
                               variant="outline" 
@@ -2062,28 +2451,29 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                             )}
                           </div>
                         )}
-                        <div className="flex justify-end pt-4 border-t">
-                          <Button onClick={handleSaveAdmin} disabled={isSavingAdmin}>
-                            <Save className="w-4 h-4 mr-2" />
-                            {isSavingAdmin ? "保存中..." : "更新商务信息"}
-                          </Button>
-                        </div>
+                        {/* 🔒 更新商务信息按钮 - 仅管理员和商务人员可见 */}
+                        {(user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) && (
+                          <div className="flex justify-end pt-4 border-t">
+                            <Button onClick={handleSaveAdmin} disabled={isSavingAdmin}>
+                              <Save className="w-4 h-4 mr-2" />
+                              {isSavingAdmin ? "保存中..." : "更新商务信息"}
+                            </Button>
+                          </div>
+                        )}
                       </CardContent>
                     </Card>
                   </AccordionContent>
                 </AccordionItem>
               )}
 
-              {/* 板块4：物流发货工作台（仓库管理员用） */}
-              {(user?.role === "admin" || user?.role === "technician") && (
+              {/* 板块4：物流发货工作台（只有仓库管理员可以编辑） */}
+              {/* 修复：仓库人员在编辑模式下始终显示此板块，不受工单状态限制 */}
+              {(user?.role === UserRole.ADMIN || user?.role === UserRole.WAREHOUSE) && (
                 <AccordionItem value="panel4">
                   <AccordionTrigger className="text-base font-semibold">
                     <div className="flex items-center gap-2">
                       <Truck className="h-5 w-5" />
                       <span>物流发货工作台</span>
-                      {user?.role === "technician" && (
-                        <Badge variant="outline" className="ml-2">只读</Badge>
-                      )}
                       {repairData.returnTrackingNum && (
                         <Badge variant="outline" className="ml-2 bg-green-50 text-green-700">已发货</Badge>
                       )}
@@ -2092,18 +2482,11 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                   <AccordionContent>
                     <Card>
                       <CardContent className="pt-6 space-y-4">
-                        {user?.role === "technician" && (
-                          <div className="mb-4 p-3 bg-muted/50 rounded-md border border-border">
-                            <p className="text-sm text-muted-foreground">
-                              <AlertCircle className="inline h-4 w-4 mr-1" />
-                              此工作台仅管理员和商务人员可编辑，维修人员仅可查看
-                            </p>
-                          </div>
-                        )}
-                        <div className="grid md:grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                           <div>
                             <Label htmlFor="receivedDate">收到日期</Label>
-                            {(user?.role === "admin" || user?.role === "business") ? (
+                            {/* 修复：仓库人员在编辑模式下始终可编辑，不受状态限制 */}
+                            {(user?.role === UserRole.ADMIN || user?.role === UserRole.WAREHOUSE) ? (
                               <Popover>
                                 <PopoverTrigger asChild>
                                   <Button
@@ -2126,6 +2509,9 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                                     onSelect={(date) => setWarehouseFormData({ ...warehouseFormData, receivedDate: date || null })}
                                     initialFocus
                                     locale={zhCN}
+                                    captionLayout="dropdown"
+                                    fromYear={2010}
+                                    toYear={new Date().getFullYear() + 5}
                                   />
                                 </PopoverContent>
                               </Popover>
@@ -2137,7 +2523,8 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                           </div>
                           <div>
                             <Label htmlFor="factoryShipDate">出厂日期</Label>
-                            {(user?.role === "admin" || user?.role === "business") ? (
+                            {/* 修复：仓库人员在编辑模式下始终可编辑出厂日期，不受工单状态限制 */}
+                            {(user?.role === UserRole.ADMIN || user?.role === UserRole.WAREHOUSE) ? (
                               <Popover>
                                 <PopoverTrigger asChild>
                                   <Button
@@ -2160,6 +2547,9 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                                     onSelect={(date) => setWarehouseFormData({ ...warehouseFormData, factoryShipDate: date || null })}
                                     initialFocus
                                     locale={zhCN}
+                                    captionLayout="dropdown"
+                                    fromYear={2010}
+                                    toYear={new Date().getFullYear() + 5}
                                   />
                                 </PopoverContent>
                               </Popover>
@@ -2171,7 +2561,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                           </div>
                           <div>
                             <Label htmlFor="returnDate">返还客户日期</Label>
-                            {(user?.role === "admin" || user?.role === "business") ? (
+                            {(user?.role === UserRole.ADMIN || user?.role === UserRole.WAREHOUSE) ? (
                               <Popover>
                                 <PopoverTrigger asChild>
                                   <Button
@@ -2194,6 +2584,9 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                                     onSelect={(date) => setWarehouseFormData({ ...warehouseFormData, returnDate: date || null })}
                                     initialFocus
                                     locale={zhCN}
+                                    captionLayout="dropdown"
+                                    fromYear={2010}
+                                    toYear={new Date().getFullYear() + 5}
                                   />
                                 </PopoverContent>
                               </Popover>
@@ -2205,7 +2598,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                           </div>
                           <div>
                             <Label htmlFor="returnQuantity">返还客户数量</Label>
-                            {(user?.role === "admin" || user?.role === "business") ? (
+                            {(user?.role === UserRole.ADMIN || user?.role === UserRole.WAREHOUSE) ? (
                               <Input
                                 id="returnQuantity"
                                 type="number"
@@ -2219,7 +2612,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                           </div>
                           <div className="md:col-span-2">
                             <Label htmlFor="returnTrackingNum">返还客户快递单号</Label>
-                            {(user?.role === "admin" || user?.role === "business") ? (
+                            {(user?.role === UserRole.ADMIN || user?.role === UserRole.WAREHOUSE) ? (
                               <Input
                                 id="returnTrackingNum"
                                 value={warehouseFormData.returnTrackingNum}
@@ -2232,7 +2625,7 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                             )}
                           </div>
                         </div>
-                        {user?.role === "admin" && (
+                        {(user?.role === UserRole.ADMIN || user?.role === UserRole.WAREHOUSE) && (
                           <div className="pt-4 border-t space-y-2">
                             <p className="text-xs text-muted-foreground">
                               填写返还单号后，工单状态将自动流转为"已完成"
@@ -2253,178 +2646,6 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
             </Accordion>
           </TabsContent>
 
-          <TabsContent value="info" className="mt-6 space-y-6">
-            {/* 基础信息展示（兼容旧数据） */}
-            <div className="grid md:grid-cols-2 gap-6">
-              {/* 设备信息 */}
-              <Card className={cn(needsSupplementSN && "opacity-60")}>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <FileText className="h-5 w-5" />
-                    设备信息
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <Label className="text-sm text-muted-foreground">设备型号</Label>
-                        <p className="font-medium">{repairData.deviceModel}</p>
-                      </div>
-                      <div>
-                        <Label className="text-sm text-muted-foreground">设备名称</Label>
-                        <p className="font-medium">{repairData.deviceName}</p>
-                      </div>
-                  </div>
-                  
-                  <div>
-                    <Label className="text-sm text-muted-foreground">设备序列号</Label>
-                    <p className="font-medium">
-                      {needsSupplementSN ? (
-                        <span className="text-warning">待补录</span>
-                      ) : (
-                        repairData.deviceSerialNumber
-                      )}
-                    </p>
-                  </div>
-                  
-                  <div>
-                    <Label className="text-sm text-muted-foreground">项目地点</Label>
-                    <div className="flex items-center gap-2 mt-1">
-                      <MapPin className="h-4 w-4 text-muted-foreground" />
-                      <p>{repairData.projectLocation}</p>
-                    </div>
-                  </div>
-                  
-                  {/* 保修状态 - 只在有保修数据时显示 */}
-                  {repairData.inWarranty !== undefined && (
-                    <div>
-                      <Label className="text-sm text-muted-foreground">保修状态</Label>
-                      <div className="flex items-center gap-2 mt-1">
-                        {repairData.inWarranty ? (
-                          <>
-                            <ShieldCheck className="h-4 w-4 text-green-500" />
-                            <p className="text-green-700">
-                              在保修期内{repairData.warrantyEnd ? ` (截止日期: ${repairData.warrantyEnd})` : ''}
-                            </p>
-                          </>
-                        ) : (
-                          <>
-                            <ShieldAlert className="h-4 w-4 text-red-500" />
-                            <p className="text-red-700">已过保修期</p>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  
-                  <div>
-                    <Label className="text-sm text-muted-foreground">故障描述</Label>
-                    <p className="mt-1 text-sm whitespace-pre-line">{repairData.repairReason}</p>
-                  </div>
-                </CardContent>
-              </Card>
-
-              {/* 快递物流信息 */}
-              <Card className={cn(needsSupplementSN && "opacity-60")}>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <Truck className="h-5 w-5" />
-                    快递物流信息
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <Label className="text-sm text-muted-foreground">快递公司</Label>
-                      <p className="font-medium">{getExpressCompanyName(repairData.expressCompany)}</p>
-                    </div>
-                    <div>
-                      <Label className="text-sm text-muted-foreground">快递单号</Label>
-                      <p className="font-medium">{repairData.trackingNumber}</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              {/* 时间信息 */}
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <Calendar className="h-5 w-5" />
-                    时间信息
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <Label className="text-sm text-muted-foreground">报修时间</Label>
-                      <div className="flex items-center gap-2 mt-1">
-                        <ClockIcon className="h-4 w-4 text-muted-foreground" />
-                        <p>{format(repairData.reportDate, "yyyy-MM-dd HH:mm", { locale: zhCN })}</p>
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex items-center justify-between">
-                        <Label className="text-sm text-muted-foreground">期望完成时间</Label>
-                        {/* 只有维修工程师且状态为处理中时，才能在这里申请延期 */}
-                        {user?.role === "technician" && repairData.status === "processing" && (
-                          <Button 
-                            variant="ghost" 
-                            size="sm" 
-                            className="h-7 text-xs"
-                            onClick={() => setIsDelayDialogOpen(true)}
-                          >
-                            申请延期
-                          </Button>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 mt-1">
-                        <CalendarIcon className="h-4 w-4 text-muted-foreground" />
-                        <p>{format(repairData.expectedCompletionDate, "yyyy年MM月dd日", { locale: zhCN })}</p>
-                        {repairData.status === "delayed" && (
-                          <Badge variant="outline" className="ml-2 text-xs">已申请延期</Badge>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              {/* 报告人信息 */}
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <User className="h-5 w-5" />
-                    报告人信息
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="flex items-center gap-4">
-                    <Avatar className="h-16 w-16">
-                      <AvatarImage src={reporterAvatar} alt="报告人头像" />
-                      <AvatarFallback>
-                        {repairData.reporter?.substring(0, 2) || "用户"}
-                      </AvatarFallback>
-                    </Avatar>
-                    <div className="space-y-1">
-                      <p className="font-medium text-lg">{repairData.reporter}</p>
-                      <p className="text-sm text-muted-foreground">现场报告人员</p>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="outline" className="bg-primary/5 text-primary">
-                          {repairData.department}
-                        </Badge>
-                      </div>
-                    </div>
-                  </div>
-                  <div>
-                    <Label className="text-sm text-muted-foreground">联系电话</Label>
-                    <p className="font-medium">{reporterPhone || "未设置"}</p>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          </TabsContent>
-          
           <TabsContent value="photos" className="mt-6 space-y-6">
             {/* 设备铭牌照片 */}
             <Card>
@@ -2436,14 +2657,8 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {repairData.devicePhotos.length > 0 ? (
                     repairData.devicePhotos.map((photo, index) => {
-                      // 兼容处理：把数据库里可能的反斜杠 \ 都变成正斜杠 /（Windows 路径兼容）
-                      const safePath = photo.replace(/\\/g, "/")
-                      const src =
-                        safePath.startsWith("http://") ||
-                        safePath.startsWith("https://") ||
-                        safePath.startsWith("/api/")
-                          ? safePath
-                          : `/api/images/${safePath.replace(/^\/+/, "")}`
+                      // 使用 normalizeImageUrl 统一处理新旧 URL 格式（兼容 /uploads/... 和 https://...）
+                      const src = normalizeImageUrl(photo)
                       return (
                         <div key={index} className="aspect-video rounded-lg overflow-hidden border border-border">
                           <img
@@ -2466,158 +2681,6 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                       <p className="text-muted-foreground">暂无设备铭牌照片</p>
                     </div>
                   )}
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* 损坏细节照片 */}
-            <Card>
-              <CardHeader>
-                <CardTitle>硬件损坏细节照片</CardTitle>
-                <CardDescription>显示设备损坏部位的详细照片</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {repairData.damagePhotos.length > 0 ? (
-                    repairData.damagePhotos.map((photo, index) => {
-                      // 兼容处理：把数据库里可能的反斜杠 \ 都变成正斜杠 /（Windows 路径兼容）
-                      const safePath = photo.replace(/\\/g, "/")
-                      const src =
-                        safePath.startsWith("http://") ||
-                        safePath.startsWith("https://") ||
-                        safePath.startsWith("/api/")
-                          ? safePath
-                          : `/api/images/${safePath.replace(/^\/+/, "")}`
-                      return (
-                        <div key={index} className="aspect-square rounded-lg overflow-hidden border border-border">
-                          <img
-                            src={src}
-                            alt={`损坏细节照片 ${index + 1}`}
-                            className="w-full h-full object-cover"
-                            onError={(e) => {
-                              if (e.currentTarget.dataset.fallbackApplied !== "true") {
-                                e.currentTarget.dataset.fallbackApplied = "true"
-                                e.currentTarget.src = "/placeholder.jpg"
-                              }
-                            }}
-                          />
-                        </div>
-                      )
-                    })
-                  ) : (
-                    <div className="md:col-span-3 p-8 text-center border border-dashed rounded-lg">
-                      <p className="text-muted-foreground">暂无损坏细节照片</p>
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-          
-          <TabsContent value="history" className="mt-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>处理记录</CardTitle>
-                <CardDescription>工单的处理历史记录</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  {/* 工单创建记录 */}
-                  <div className="flex gap-4 items-start">
-                    <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-                      <Clock className="h-5 w-5 text-primary" />
-                    </div>
-                    <div className="space-y-1">
-                      <p className="font-medium">工单创建</p>
-                      <p className="text-sm text-muted-foreground">
-                        {format(repairData.reportDate, "yyyy-MM-dd HH:mm", { locale: zhCN })}
-                      </p>
-                      <p className="text-sm">
-                        {repairData.reporter} 报告了设备 {repairData.deviceId} 的故障
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* 历史记录（从数据库读取） */}
-                  {history.map((item, index) => {
-                    const createdAt = new Date(item.createdAt)
-                    const createdAtText = format(createdAt, "yyyy-MM-dd HH:mm", { locale: zhCN })
-
-                    if (item.actionType === "Delay") {
-                      const delayTo = item.delayTo ? new Date(item.delayTo) : repairData.expectedCompletionDate
-                      return (
-                        <div key={index} className="flex gap-4 items-start">
-                          <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center shrink-0">
-                            <Calendar className="h-5 w-5 text-destructive" />
-                          </div>
-                          <div className="space-y-1">
-                            <p className="font-medium">申请延期</p>
-                            <p className="text-sm text-muted-foreground">
-                              {createdAtText}
-                            </p>
-                            {delayTo && (
-                              <p className="text-sm">
-                                维修工程师申请延期至 {format(delayTo, "yyyy年MM月dd日", { locale: zhCN })}
-                              </p>
-                            )}
-                            <p className="text-sm text-muted-foreground">
-                              原因: {item.delayReason || delayReason || "等待备件到货"}
-                            </p>
-                          </div>
-                        </div>
-                      )
-                    }
-
-                    if (item.actionType === "StatusChange") {
-                      const newStatus = (item.newStatus || "").toLowerCase()
-                      let title = "状态更新"
-                      let description = ""
-
-                      if (newStatus === "processing") {
-                        title = "开始维修"
-                        description = "维修工程师开始处理该工单"
-                      } else if (newStatus === "completed") {
-                        title = "维修完成"
-                        description = "维修工程师已完成该工单的维修"
-                      } else if (newStatus === "unrepairable") {
-                        title = "无法维修"
-                        description = "该设备被判定为无法维修"
-                      } else if (newStatus === "deleted") {
-                        title = "移入回收站"
-                        description = "该工单已被移入回收站"
-                      } else if (newStatus === "scrapped") {
-                        title = "已报废"
-                        description = "该工单已被判定为报废"
-                      } else if (newStatus === "return_unrepaired") {
-                        title = "拒修退回"
-                        description = "客户拒修/原样退回"
-                      } else if (newStatus === "cancelled") {
-                        title = "已取消"
-                        description = "该工单已被取消"
-                      }
-
-                      return (
-                        <div key={index} className="flex gap-4 items-start">
-                          <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-                            <Clock className="h-5 w-5 text-primary" />
-                          </div>
-                          <div className="space-y-1">
-                            <p className="font-medium">{title}</p>
-                            <p className="text-sm text-muted-foreground">
-                              {createdAtText}
-                            </p>
-                            {description && (
-                              <p className="text-sm text-muted-foreground">
-                                {description}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                      )
-                    }
-
-                    return null
-                  })}
                 </div>
               </CardContent>
             </Card>
@@ -2726,6 +2789,9 @@ export default function RepairDetail({ taskId, onBack }: RepairDetailProps) {
                         date <= repairData.expectedCompletionDate
                       }
                       locale={zhCN}
+                      captionLayout="dropdown"
+                      fromYear={2010}
+                      toYear={new Date().getFullYear() + 5}
                     />
                   </PopoverContent>
                 </Popover>

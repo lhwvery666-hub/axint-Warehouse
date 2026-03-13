@@ -17,6 +17,7 @@ import { useAuth } from "@/context/auth-context"
 import { useRepairContext } from "@/context/RepairContext"
 import { useNotificationContext } from "@/context/NotificationContext"
 import { useTheme } from "next-themes"
+import { TicketStatus, normalizeTicketStatus } from "@/lib/enums"
 
 const menuItems = [
   { icon: FileText, label: "我的报告", badge: "" },
@@ -26,7 +27,7 @@ const menuItems = [
 ]
 
 export default function ReporterProfile() {
-  const { user, logout } = useAuth()
+  const { user, logout, refreshUser } = useAuth()
   const { repairs } = useRepairContext()
   const { notifications, unreadCount, getNotificationsByRecipient, markAsRead, markAllAsRead } = useNotificationContext()
   const { theme, setTheme } = useTheme()
@@ -92,10 +93,10 @@ export default function ReporterProfile() {
   
   // 计算统计数据
   const totalRepairs = userRepairs.length
-  const pendingRepairs = userRepairs.filter(r => r.status === "pending").length
-  const processingRepairs = userRepairs.filter(r => r.status === "processing").length
-  const completedRepairs = userRepairs.filter(r => r.status === "completed").length
-  const unrepairableRepairs = userRepairs.filter(r => r.status === "unrepairable").length
+  const pendingRepairs = userRepairs.filter(r => normalizeTicketStatus(r.status) === TicketStatus.PENDING || normalizeTicketStatus(r.status) === TicketStatus.CREATED).length
+  const processingRepairs = userRepairs.filter(r => normalizeTicketStatus(r.status) === TicketStatus.IN_REPAIR || normalizeTicketStatus(r.status) === TicketStatus.PROCESSING).length
+  const completedRepairs = userRepairs.filter(r => normalizeTicketStatus(r.status) === TicketStatus.COMPLETED).length
+  const unrepairableRepairs = userRepairs.filter(r => normalizeTicketStatus(r.status) === TicketStatus.UNREPAIRABLE).length
 
   const handleLogout = () => {
     setIsLoading(true);
@@ -107,18 +108,45 @@ export default function ReporterProfile() {
 
   const handleEditToggle = async () => {
     if (isEditing) {
-      // 保存更改到数据库（通过 API）
+      // 验证手机号格式（允许为空）
+      if (editedUser.phone) {
+        const phoneRegex = /^1[3-9]\d{9}$/
+        if (!phoneRegex.test(editedUser.phone)) {
+          alert("手机号格式不正确，请输入11位有效手机号")
+          return
+        }
+      }
+      // 验证姓名不能为空
+      if (!editedUser.realName.trim()) {
+        alert("姓名不能为空")
+        return
+      }
+
       try {
-        // TODO: 调用 API 更新用户信息
-        // await fetch(`/api/users/${user?.id}`, { method: 'PUT', ... })
-        console.log('保存用户信息:', editedUser)
+        setIsLoading(true)
+        const response = await fetch(`/api/users/${user?.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            realName: editedUser.realName.trim(),
+            phoneNumber: editedUser.phone,  // API 字段名为 phoneNumber
+          }),
+        })
+        const result = await response.json()
+        if (result.success) {
+          // 刷新 AuthContext，使沟通记录和操作记录中的姓名同步更新
+          await refreshUser()
+          setIsEditing(false)
+          alert("个人信息已更新")
+        } else {
+          alert(result.message || "更新失败，请重试")
+        }
       } catch (error) {
         console.error('保存用户信息失败:', error)
+        alert("更新失败，请检查网络连接")
+      } finally {
+        setIsLoading(false)
       }
-      setTimeout(() => {
-        setIsEditing(false);
-        alert("个人信息已更新");
-      }, 500);
     } else {
       setIsEditing(true);
     }
@@ -456,10 +484,11 @@ export default function ReporterProfile() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-2">
-                          <h3 className="font-semibold">{report.deviceName || report.deviceModel}</h3>
                           {getStatusBadge(report.status)}
                         </div>
-                        <p className="text-sm text-muted-foreground mb-1">位置: {report.location}</p>
+                        <p className="text-sm text-muted-foreground mb-1">
+                          工单号：{(report as any).workOrderNumber || report.id}
+                        </p>
                         <p className="text-sm text-muted-foreground mb-2">故障: {report.problem}</p>
                         <p className="text-xs text-muted-foreground">报修时间: {report.reportedAt}</p>
                       </div>

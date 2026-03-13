@@ -23,6 +23,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { AlertCircle, Plus, Trash2, Edit, Users, RefreshCw, Loader2, Search, Filter } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { UserRole, normalizeUserRole, USER_ROLE_LABELS } from "@/lib/enums";
 
 // 用户账户类型定义
 type UserAccount = {
@@ -221,17 +222,9 @@ export default function UserManager() {
 
   // 获取角色显示名称
   const getRoleName = (role?: string) => {
-    const roleMap: Record<string, string> = {
-      'Admin': '管理员',
-      'Technician': '维修工程师',
-      'Warehouse': '仓库管理员',
-      'Reporter': '现场报告人员',
-      'Business': '商务人员',
-      '商务': '商务人员',
-      '商务人员': '商务人员',
-      '商务管理员': '商务人员',
-    };
-    return role ? roleMap[role] || role : '未授权';
+    if (!role) return '未授权';
+    const normalizedRole = normalizeUserRole(role);
+    return normalizedRole ? USER_ROLE_LABELS[normalizedRole] : role;
   };
 
   // 获取角色显示样式
@@ -260,13 +253,10 @@ export default function UserManager() {
   const filteredUsers = users.filter((user) => {
     // 角色筛选
     if (roleFilter !== "all") {
-      if (roleFilter === "Business") {
-        // 商务角色筛选：支持多种商务角色名称
-        const businessRoles = ['Business', '商务', '商务人员', '商务管理员'];
-        if (!businessRoles.includes(user.role || '')) {
-          return false;
-        }
-      } else if (user.role !== roleFilter) {
+      const normalizedUserRole = normalizeUserRole(user.role);
+      const normalizedFilterRole = normalizeUserRole(roleFilter);
+      
+      if (normalizedFilterRole && normalizedUserRole !== normalizedFilterRole) {
         return false;
       }
     }
@@ -287,11 +277,11 @@ export default function UserManager() {
   // 统计各角色用户数量
   const roleStats = {
     total: users.length,
-    admin: users.filter(u => u.role === 'Admin').length,
-    technician: users.filter(u => u.role === 'Technician').length,
-    warehouse: users.filter(u => u.role === 'Warehouse').length,
-    reporter: users.filter(u => u.role === 'Reporter').length,
-    business: users.filter(u => u.role === 'Business' || u.role === '商务' || u.role === '商务人员' || u.role === '商务管理员').length,
+    admin: users.filter(u => normalizeUserRole(u.role) === UserRole.ADMIN).length,
+    technician: users.filter(u => normalizeUserRole(u.role) === UserRole.TECHNICIAN).length,
+    warehouse: users.filter(u => normalizeUserRole(u.role) === UserRole.WAREHOUSE).length,
+    reporter: users.filter(u => normalizeUserRole(u.role) === UserRole.REPORTER).length,
+    business: users.filter(u => normalizeUserRole(u.role) === UserRole.BUSINESS).length,
     unassigned: users.filter(u => !u.role).length,
   };
 
@@ -472,22 +462,23 @@ export default function UserManager() {
 
       {/* 编辑用户对话框 */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="sm:max-w-[500px] max-h-[80vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-4xl md:max-w-5xl w-[95vw] max-h-[90vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>
               {isAddingNew ? "添加用户" : "编辑用户"}
             </DialogTitle>
           </DialogHeader>
           
-          {error && (
-            <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-          
-          {editingUser && (
-            <div className="space-y-4">
+          <div className="overflow-y-auto flex-1 pr-2">
+            {error && (
+              <Alert variant="destructive" className="mb-4">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+            
+            {editingUser && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="userUsername">用户名 *</Label>
                 <Input
@@ -580,10 +571,11 @@ export default function UserManager() {
                   <p className="text-xs text-warning">此用户尚未被授予角色，无法登录系统</p>
                 )}
               </div>
-            </div>
-          )}
+              </div>
+            )}
+          </div>
           
-          <DialogFooter>
+          <DialogFooter className="flex-shrink-0">
             <Button variant="outline" onClick={() => setIsDialogOpen(false)} disabled={isSaving}>取消</Button>
             <Button onClick={handleSaveUser} disabled={isSaving}>
               {isSaving ? (

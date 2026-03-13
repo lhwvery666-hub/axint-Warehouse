@@ -18,27 +18,27 @@ const testUsers = [
     role: 'Admin'
   },
   {
-    username: 'tech',
+    username: 'wx',
     password: '111111',
-    realName: '维修工程师',
+    realName: '维修人员',
     role: 'Technician'
   },
   {
-    username: 'warehouse',
+    username: 'ck',
     password: '111111',
-    realName: '仓库管理员',
+    realName: '仓库',
     role: 'Warehouse'
   },
   {
-    username: 'reporter',
+    username: 'xc',
     password: '111111',
-    realName: '现场报告人员',
+    realName: '现场',
     role: 'Reporter'
   },
   {
-    username: 'business',
+    username: 'sw',
     password: '111111',
-    realName: '商务人员',
+    realName: '商务',
     role: 'Business'
   }
 ]

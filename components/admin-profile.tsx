@@ -114,16 +114,16 @@ export default function AdminProfile() {
 
   // 根据角色返回首页路径
   const getHomePath = () => {
-    if (user?.role === "admin") {
+    if (user?.role === UserRole.ADMIN) {
       return "/admin/users"
-    } else if (user?.role === "warehouse") {
+    } else if (user?.role === UserRole.WAREHOUSE) {
       return "/admin/database"
     }
     return "/"
   }
 
   const userName = user?.realName || user?.id || ""
-  const isAdmin = user?.role === "admin"
+  const isAdmin = user?.role === UserRole.ADMIN
   
   const handleMenuClick = (label: string) => {
     setOpenDialog(label)
@@ -477,10 +477,11 @@ export default function AdminProfile() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-2">
-                          <h3 className="font-semibold">{report.deviceName || report.deviceModel}</h3>
                           {getStatusBadge(report.status)}
                         </div>
-                        <p className="text-sm text-muted-foreground mb-1">位置: {report.location}</p>
+                        <p className="text-sm text-muted-foreground mb-1">
+                          工单号：{(report as any).workOrderNumber || report.id}
+                        </p>
                         <p className="text-sm text-muted-foreground mb-2">故障: {report.problem}</p>
                         <p className="text-xs text-muted-foreground">报修时间: {report.reportedAt}</p>
                       </div>

@@ -5,5 +5,5 @@
 
 export const UPLOAD_DIR: string =
   process.env.UPLOAD_DIR ||
-  "F:\\\\维修系统照片" // 本地开发默认存储到 F:\维修系统照片
+  "D:\\\\MY app\\\\axiom-repair\\\\public\\\\uploads" // 本地开发默认存储到项目 public/uploads 目录
 

@@ -5,6 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { Button } from "@/components/ui/button";
 import { User, LogOut } from "lucide-react";
+import { UserRole } from "@/lib/enums";
 
 export default function AdminDatabaseLayout({
   children,
@@ -65,7 +66,7 @@ export default function AdminDatabaseLayout({
   }
   
   // 如果用户已认证但角色不匹配，不渲染内容
-  if (status === "authenticated" && user && user.role !== "warehouse" && user.role !== "admin") {
+  if (status === "authenticated" && user && user.role !== UserRole.WAREHOUSE && user.role !== UserRole.ADMIN) {
     return null;
   }
   
@@ -106,7 +107,7 @@ export default function AdminDatabaseLayout({
               </Button>
             )}
             <span className="text-sm text-muted-foreground">
-              {user?.realName} ({user?.role === "admin" ? "管理员" : "仓库管理员"})
+              {user?.realName} ({user?.role === UserRole.ADMIN ? "管理员" : "仓库管理员"})
             </span>
             <Button 
               variant="ghost" 

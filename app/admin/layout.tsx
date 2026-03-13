@@ -5,18 +5,16 @@ import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { Button } from "@/components/ui/button";
 import { 
-  LayoutDashboard, 
   Users, 
   Database, 
   LogOut, 
   User,
   Menu,
-  X,
-  FileText
+  X
 } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
-import RepairsPanel from "@/components/repairs-panel";
+import { UserRole } from "@/lib/enums";
 
 export default function AdminLayout({
   children,
@@ -28,41 +26,6 @@ export default function AdminLayout({
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isAuthorized, setIsAuthorized] = useState(false);
-  const [repairsPanelOpen, setRepairsPanelOpen] = useState(false);
-
-  // 注册全局函数来打开工单管理面板
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      window.openRepairsPanel = (status?: string) => {
-        setRepairsPanelOpen(true);
-        if (status) {
-          router.push(`/admin/users?status=${status}`, { scroll: false });
-        }
-      };
-    }
-    return () => {
-      if (typeof window !== "undefined") {
-        delete window.openRepairsPanel;
-      }
-    };
-  }, [router]);
-
-  // 监听路径变化和URL参数，如果访问 /repairs 或带有status参数则打开右侧面板
-  useEffect(() => {
-    if (pathname === "/repairs" || pathname?.startsWith("/repairs")) {
-      setRepairsPanelOpen(true);
-      // 更新URL但不跳转
-      if (pathname !== "/admin/users" && pathname !== "/admin/database") {
-        router.replace("/admin/users", { scroll: false });
-      }
-    }
-    // 检查URL参数中的status
-    const urlParams = new URLSearchParams(window.location.search);
-    const status = urlParams.get("status");
-    if (status && (pathname === "/admin/users" || pathname === "/admin/database")) {
-      setRepairsPanelOpen(true);
-    }
-  }, [pathname, router]);
   
   useEffect(() => {
     // 如果状态还在加载中，不做任何处理
@@ -74,7 +37,7 @@ export default function AdminLayout({
       return;
     }
     
-    if (user?.role !== "admin") {
+    if (user?.role !== UserRole.ADMIN) {
       router.push("/login");
       return;
     }
@@ -109,20 +72,10 @@ export default function AdminLayout({
       href: "/admin/database",
       description: "设备数据库管理",
       onClick: undefined
-    },
-    {
-      title: "工单管理",
-      icon: FileText,
-      href: "#",
-      description: "查看和管理所有维修工单",
-      onClick: () => setRepairsPanelOpen(true)
     }
   ];
 
   const isActive = (href: string) => {
-    if (href === "#") {
-      return repairsPanelOpen;
-    }
     return pathname?.startsWith(href);
   };
 
@@ -228,14 +181,10 @@ export default function AdminLayout({
       {/* 主内容区 - 添加左边距以适配固定侧边栏 */}
       <main className={cn(
         "flex-1 flex flex-col min-w-0 transition-all duration-300",
-        sidebarOpen ? "ml-64" : "ml-20",
-        repairsPanelOpen && "mr-[600px]"
+        sidebarOpen ? "ml-64" : "ml-20"
       )}>
         {children}
       </main>
-
-      {/* 工单管理右侧面板 */}
-      <RepairsPanel isOpen={repairsPanelOpen} onClose={() => setRepairsPanelOpen(false)} />
     </div>
   );
 }

@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
+import { UserRole } from "@/lib/enums";
 
 export default function AdminUsersProfileLayout({
   children,
@@ -20,7 +21,7 @@ export default function AdminUsersProfileLayout({
       return;
     }
     
-    if (user?.role !== "admin") {
+    if (user?.role !== UserRole.ADMIN) {
       router.push("/login");
       return;
     }

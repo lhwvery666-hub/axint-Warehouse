@@ -11,7 +11,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Search, Plus, AlertCircle, CheckCircle, Clock, X, ArrowLeft, Download } from "lucide-react";
 import { useRouter } from "next/navigation";
 import CreateTicketForm from "@/components/create-ticket-form";
-import RepairDetail from "@/components/repair-detail";
+import RepairDetailWrapper from "@/components/repair-detail-wrapper";
+import { TICKET_STATUS_LABELS, TicketStatus, UserRole } from "@/lib/enums";
 
 export default function RepairsPage() {
   const { repairs, updateRepair, deleteRepair } = useRepairContext();
@@ -21,40 +22,52 @@ export default function RepairsPage() {
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [selectedRepairId, setSelectedRepairId] = useState<string | null>(null);
 
-  // 过滤维修工单
-  const filteredRepairs = repairs.filter(repair => 
-    repair.deviceName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    repair.deviceModel.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    repair.problem.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    repair.location.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // 过滤维修工单：按工单号 / 批次号 / 序列号 / 故障描述检索
+  const filteredRepairs = repairs.filter(repair => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    return (
+      (repair as any).workOrderNumber?.toLowerCase().includes(q) ||
+      (repair as any).batchId?.toLowerCase().includes(q) ||
+      (repair.deviceSerialNumber || "").toLowerCase().includes(q) ||
+      repair.problem.toLowerCase().includes(q)
+    );
+  });
 
   // 获取状态徽章（支持新状态）
   const getStatusBadge = (status: string) => {
     const normalizedStatus = status.toLowerCase();
+    
+    // 获取状态标签
+    const statusKey = Object.keys(TICKET_STATUS_LABELS).find(
+      key => key.toLowerCase() === normalizedStatus
+    ) as TicketStatus | undefined;
+    
+    const label = statusKey ? TICKET_STATUS_LABELS[statusKey] : status;
+    
     switch (normalizedStatus) {
       case "pending":
       case "created":
-        return <Badge className="bg-yellow-100 text-yellow-800 border-yellow-300 text-xs">待处理</Badge>;
+        return <Badge className="bg-yellow-100 text-yellow-800 border-yellow-300 text-xs">{label}</Badge>;
       case "processing":
       case "in_repair":
-        return <Badge className="bg-blue-100 text-blue-800 border-blue-300 text-xs">维修中</Badge>;
+        return <Badge className="bg-blue-100 text-blue-800 border-blue-300 text-xs">{label}</Badge>;
       case "pending_factory":
-        return <Badge className="bg-purple-100 text-purple-800 border-purple-300 text-xs">待返厂</Badge>;
+        return <Badge className="bg-purple-100 text-purple-800 border-purple-300 text-xs">{label}</Badge>;
       case "factory_finished":
-        return <Badge className="bg-orange-100 text-orange-800 border-orange-300 text-xs">待复检</Badge>;
+        return <Badge className="bg-orange-100 text-orange-800 border-orange-300 text-xs">{label}</Badge>;
       case "admin_review":
-        return <Badge className="bg-cyan-100 text-cyan-800 border-cyan-300 text-xs">待商务处理</Badge>;
+        return <Badge className="bg-cyan-100 text-cyan-800 border-cyan-300 text-xs">{label}</Badge>;
       case "pending_shipment":
-        return <Badge className="bg-indigo-100 text-indigo-800 border-indigo-300 text-xs">待发货</Badge>;
+        return <Badge className="bg-indigo-100 text-indigo-800 border-indigo-300 text-xs">{label}</Badge>;
       case "completed":
-        return <Badge className="bg-green-100 text-green-800 border-green-300 text-xs">已完成</Badge>;
+        return <Badge className="bg-green-100 text-green-800 border-green-300 text-xs">{label}</Badge>;
       case "unrepairable":
-        return <Badge className="bg-red-100 text-red-800 border-red-300 text-xs">无法维修</Badge>;
+        return <Badge className="bg-red-100 text-red-800 border-red-300 text-xs">{label}</Badge>;
       case "delayed":
-        return <Badge className="bg-amber-100 text-amber-800 border-amber-300 text-xs">已延期</Badge>;
+        return <Badge className="bg-amber-100 text-amber-800 border-amber-300 text-xs">{label}</Badge>;
       default:
-        return <Badge className="text-xs">{status}</Badge>;
+        return <Badge className="text-xs">{label}</Badge>;
     }
   };
 
@@ -92,11 +105,11 @@ export default function RepairsPage() {
             size="icon"
             onClick={() => {
               // 根据用户角色返回相应页面
-              if (user?.role === "business") {
+              if (user?.role === UserRole.BUSINESS) {
                 router.push("/business");
-              } else if (user?.role === "admin") {
+              } else if (user?.role === UserRole.ADMIN) {
                 router.push("/admin/users");
-              } else if (user?.role === "warehouse") {
+              } else if (user?.role === UserRole.WAREHOUSE) {
                 router.push("/warehouse/dashboard");
               } else {
                 router.push("/");
@@ -112,7 +125,7 @@ export default function RepairsPage() {
           </div>
           <div className="flex gap-2">
           {/* 管理员和仓库管理员可以导出Excel */}
-          {(user?.role === "admin" || user?.role === "warehouse") && (
+          {(user?.role === UserRole.ADMIN || user?.role === UserRole.WAREHOUSE) && (
             <Button 
               variant="outline"
               onClick={() => {
@@ -125,7 +138,7 @@ export default function RepairsPage() {
             </Button>
           )}
           {/* 管理员不需要新建工单，只有现场人员和维修人员可以创建 */}
-          {user?.role !== "admin" && (
+          {user?.role !== UserRole.ADMIN && (
             <Button onClick={() => setIsAddDialogOpen(true)}>
               <Plus className="w-4 h-4 mr-2" />
               新建工单
@@ -139,7 +152,7 @@ export default function RepairsPage() {
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
           <Input 
-            placeholder="搜索工单..." 
+            placeholder="搜索工单号、批次号、序列号或故障描述..." 
             className="pl-10"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -160,11 +173,31 @@ export default function RepairsPage() {
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-2">
-                      <span className="text-xs text-muted-foreground">工单 #{repair.id}</span>
                       {getStatusBadge(repair.status)}
+                      {(repair as any).batchId && (
+                        <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 text-xs">
+                          批次
+                        </Badge>
+                      )}
                     </div>
-                    <h3 className="font-semibold text-base mb-1 line-clamp-1">{repair.deviceName}</h3>
-                    <p className="text-xs text-muted-foreground mb-2">{repair.deviceModel}</p>
+                    {/* 显示工单号和批次号 */}
+                    <h3 className="font-semibold text-base mb-1 line-clamp-1">
+                      工单号：{(repair as any).workOrderNumber || repair.id}
+                    </h3>
+                    {(repair as any).batchId && (
+                      <p 
+                        className="text-xs text-blue-600 mb-1 hover:underline cursor-pointer"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          router.push(`/batch/${(repair as any).batchId}`);
+                        }}
+                      >
+                        批次号：{(repair as any).batchId}
+                      </p>
+                    )}
+                    <p className="text-xs text-muted-foreground mb-2">
+                      序列号：{repair.deviceSerialNumber || "未知"}
+                    </p>
                   </div>
                 </div>
                 
@@ -172,9 +205,6 @@ export default function RepairsPage() {
                   <div className="flex items-start gap-2 text-sm">
                     <AlertCircle className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
                     <p className="text-muted-foreground line-clamp-2 flex-1">{repair.problem}</p>
-                  </div>
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span>📍 {repair.location}</span>
                   </div>
                   <div className="text-xs text-muted-foreground">
                     {repair.reportedAt}
@@ -226,7 +256,7 @@ export default function RepairsPage() {
               <DialogTitle>工单详情</DialogTitle>
             </DialogHeader>
             <div className="py-2">
-              <RepairDetail 
+              <RepairDetailWrapper 
                 taskId={selectedRepairId} 
                 onBack={() => setSelectedRepairId(null)} 
               />

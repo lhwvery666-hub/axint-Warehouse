@@ -1,0 +1,44 @@
+# ── 永远不要打进镜像的内容 ────────────────────────────────────────────────────
+
+# 开发依赖和构建缓存（Stage 1 会重新安装）
+node_modules
+.next
+
+# 本地环境变量文件（生产值通过 docker run -e 注入，不能打包进镜像）
+.env
+.env.local
+.env.development
+.env.production
+
+# Git 相关
+.git
+.gitignore
+
+# 编辑器和 OS 文件
+.cursor
+.vscode
+.DS_Store
+Thumbs.db
+
+# 文档和脚本（运行时不需要）
+docs
+scripts
+*.md
+CHANGELOG.md
+DEPLOYMENT_CHECKLIST.md
+
+# 测试
+__tests__
+*.test.ts
+*.spec.ts
+
+# 临时文件
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# 数据库 SQL 脚本（只在初始化时需要，不打进镜像）
+database
+
+# 本地上传的文件（运行时通过 Volume 挂载）
+public/uploads

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { getDbConnection } from "@/lib/db-config"
+import { UserRole, normalizeUserRole, TicketStatus, VALID_TICKET_STATUSES, normalizeTicketStatus, TicketActionType } from "@/lib/enums"
 
 // PUT /api/tickets/[id]/update
 // 更新维修工单状态
@@ -41,6 +42,10 @@ export async function PUT(
         { status: 400 }
       )
     }
+
+    // 判断 ticketId 是数字还是字符串
+    const isNumericId = /^\d+$/.test(ticketId)
+    console.log(`[更新工单] ${isNumericId ? '使用数字ID' : '使用设备序列号'}查询: ${ticketId}`)
 
     const isDelayAction = action === "delay"
     const isSupplementSNAction = action === "supplementSN" || supplementSN === true
@@ -86,14 +91,16 @@ export async function PUT(
       }
 
       const userData = userResult.recordset[0]
-      const role = (userData.Role || "").toString().toLowerCase()
-      userRole = userData.Role || "" // 保存原始角色值用于后续检查
+      userRole = userData.Role || "" // 保存原始角色值用于后续检查（可能是中英文混合）
       userRealName = userData.RealName || "" // 用户真实姓名
       userUsername = userData.Username || "" // 用户名
-      isTechnician = role === "technician"
-      isAdmin = role === "admin"
-      isBusiness = role === "business" || role === "商务" || role === "商务人员" || role === "商务管理员"
-      isWarehouse = role === "warehouse" || role === "warehouse_manager" || role === "warehousemanager" || role === "warehouse_admin" || role === "warehouseadmin"
+
+      // 使用统一的角色归一化工具，避免在这里写一堆字符串判断
+      const normalizedRole = normalizeUserRole(userRole)
+      isTechnician = normalizedRole === UserRole.TECHNICIAN
+      isAdmin = normalizedRole === UserRole.ADMIN
+      isBusiness = normalizedRole === UserRole.BUSINESS
+      isWarehouse = normalizedRole === UserRole.WAREHOUSE
 
       // 检查是否是仓库管理员只更新仓库相关字段的情况
       const warehouseFields = ["receiveddate", "factoryshipdate", "returndate", "returnquantity", "returntrackingnum"]
@@ -144,8 +151,8 @@ export async function PUT(
 
       // 如果是取消申请操作，要求必须是现场人员（Reporter）
       if (isCancelRequestAction) {
-        const userRoleLower = (userRole || "").toLowerCase()
-        if (userRoleLower !== "reporter" && userRoleLower !== "现场人员" && userRoleLower !== "现场报告人员") {
+        const normalizedRoleForCancel = normalizeUserRole(userRole)
+        if (normalizedRoleForCancel !== UserRole.REPORTER) {
           return NextResponse.json(
             { success: false, message: "只有现场人员可以申请取消工单" },
             { status: 403 }
@@ -186,24 +193,8 @@ export async function PUT(
     }
 
     // 支持的业务状态 + 回收站状态 + 延期状态 + 返厂状态 + 终止状态
-    // 新状态流转：Created (待维修) -> In_Repair (维修中) -> Admin_Review (待商务处理) -> Pending_Shipment (待发货) -> Completed (已完成)
-    // 返厂流转：In_Repair -> Pending_Factory (待返厂) -> Factory_Finished (原厂修回) -> Admin_Review -> ...
-    // 终止状态：Scrapped (已报废)、Return_Unrepaired (拒修退回)、Cancelled (已取消)
-    const validStatuses = [
-      "Created", "Pending", // 待维修（兼容旧状态）
-      "In_Repair", "Processing", // 维修中（兼容旧状态）
-      "Pending_Factory", // 待返厂/返厂中
-      "Factory_Finished", // 原厂修回/待复检
-      "Admin_Review", // 待商务处理
-      "Pending_Shipment", // 待发货
-      "Completed", // 已完成
-      "Unrepairable", // 无法维修
-      "Deleted", // 已删除
-      "Delayed", // 已延期
-      "Scrapped", // 已报废
-      "Return_Unrepaired", // 拒修退回
-      "Cancelled", // 已取消
-    ]
+    // 统一使用 TicketStatus 枚举，避免散落的字符串
+    const validStatuses: TicketStatus[] = VALID_TICKET_STATUSES
     const statusMap: Record<string, string> = {
       // 新状态
       "created": "Created",
@@ -225,8 +216,34 @@ export async function PUT(
       "cancelled": "Cancelled",
     }
 
-    // 如果是回收站删除操作，则强制使用 Deleted 状态
+    // 如果是回收站删除操作，则强制使用 Deleted 状态；延期则使用 delayed；其余使用传入的 status
     const targetStatus = deleteToRecycleBin ? "deleted" : isDelayAction ? "delayed" : status
+
+    // 归一化后的数据库状态字符串（如 Created / In_Repair / ...），仅在需要更新状态时使用
+    let dbStatus: string | null = null
+    if (targetStatus) {
+      const lower = targetStatus.toString().trim().toLowerCase()
+      const mapped = statusMap[lower]
+
+      // 未知状态直接报错
+      if (!mapped) {
+        return NextResponse.json(
+          { success: false, message: `不支持的工单状态：${targetStatus}` },
+          { status: 400 }
+        )
+      }
+
+      // 使用枚举验证状态是否合法
+      const enumStatus = normalizeTicketStatus(mapped)
+      if (!enumStatus || !validStatuses.includes(enumStatus)) {
+        return NextResponse.json(
+          { success: false, message: `无效的工单状态：${targetStatus}` },
+          { status: 400 }
+        )
+      }
+
+      dbStatus = mapped
+    }
 
     // 如果是取消申请操作或审批取消申请操作，先处理这些操作（不需要状态验证）
     // 这些操作会在处理完成后直接返回，不会执行到后面的状态验证逻辑
@@ -264,13 +281,17 @@ export async function PUT(
       columnNames.find((c) => c.toLowerCase() === "devicesn") ||
       columnNames.find((c) => c.toLowerCase().includes("serial")) ||
       "DeviceSN"
-    const productSnColumn =
-      columnNames.find((c) => c.toLowerCase() === "productsn") || "ProductSN"
-    const hasProductSn = columnNames.some((c) => c.toLowerCase() === "productsn")
+    const productSnColumn = deviceSnColumn  // ProductSN 和 DeviceSN 是同一个列
+    const hasProductSn = false  // 数据库没有独立的 ProductSN 列
 
     // 检查工单是否存在，并获取设备序列号和取消申请状态
     const cancelRequestStatusCol = columnNames.find((c) => c.toLowerCase() === "cancelrequeststatus")
     const cancelRequestStatusSelect = cancelRequestStatusCol ? `, ${cancelRequestStatusCol} as CancelRequestStatus` : ""
+    
+    // 根据参数类型选择不同的WHERE子句
+    const whereClause = isNumericId 
+      ? `${idColumn} = @ticketId`           // 数字ID: WHERE Id = 16
+      : `${deviceSnColumn} = @ticketId`      // 字符串: WHERE DeviceSN = 'PENDING_VERIFY'
     
     const checkResult = await pool
       .request()
@@ -278,7 +299,7 @@ export async function PUT(
       .query(`
         SELECT ${idColumn} as Id, ${deviceSnColumn} as DeviceSN, ${hasProductSn ? `${productSnColumn} as ProductSN,` : ""} Status${cancelRequestStatusSelect}
         FROM Repair_Tickets
-        WHERE ${idColumn} = @ticketId
+        WHERE ${whereClause}
       `)
 
     if (checkResult.recordset.length === 0) {
@@ -289,6 +310,10 @@ export async function PUT(
     }
 
     const ticket = checkResult.recordset[0] as { Id: number; DeviceSN: string; ProductSN?: string; Status?: string; CancelRequestStatus?: string }
+    
+    // 获取实际的数字ID，用于后续所有更新操作
+    const actualTicketId = ticket.Id
+    console.log(`[更新工单] 找到工单，数字ID: ${actualTicketId}, 序列号: ${ticket.DeviceSN}`)
 
     // 如果是补录 SN 操作，验证新序列号
     if (isSupplementSNAction) {
@@ -307,7 +332,7 @@ export async function PUT(
           .request()
           .input("serialNumber", sn)
           .query(`
-            SELECT TOP 1 SerialNumber, ModelName, DeviceName, MaterialCode, Warehouse, Status
+            SELECT TOP 1 *
             FROM Device_Inventory
             WHERE SerialNumber = @serialNumber
           `)
@@ -319,14 +344,7 @@ export async function PUT(
           )
         }
 
-        const device = deviceCheckResult.recordset[0] as {
-          SerialNumber: string
-          ModelName: string
-          DeviceName: string | null
-          MaterialCode: string | null
-          Warehouse: string | null
-          Status: string | null
-        }
+        const device = deviceCheckResult.recordset[0] as any
 
         // 更新工单的 DeviceSN 和 ProductSN
         const updateColumns: string[] = []
@@ -352,13 +370,14 @@ export async function PUT(
           updateColumns.push(`${deviceNameColumn} = @deviceName`)
           updateValues.push("@deviceName")
         }
+        // Warehouse字段可能不存在，需要检查
         if (warehouseColumn && device.Warehouse) {
           updateColumns.push(`${warehouseColumn} = @warehouse`)
           updateValues.push("@warehouse")
         }
 
         const updateRequest = pool.request()
-          .input("ticketId", ticketId)
+          .input("ticketId", actualTicketId)
           .input("newDeviceSN", sn)
           .input("newProductSN", sn)
 
@@ -484,7 +503,7 @@ export async function PUT(
       const cancelRequestDateCol = columnNames.find((c) => c.toLowerCase() === "cancelrequestdate")
       
       const cancelUpdateFields: string[] = []
-      const cancelUpdateRequest = pool.request().input("ticketId", ticketId)
+      const cancelUpdateRequest = pool.request().input("ticketId", actualTicketId)
       
       if (cancelRequestStatusCol) {
         cancelUpdateFields.push(`${cancelRequestStatusCol} = 'Pending'`)
@@ -494,7 +513,7 @@ export async function PUT(
         cancelUpdateRequest.input("cancelRequestReason", cancelRequestReason)
       }
       if (cancelRequestDateCol) {
-        cancelUpdateFields.push(`${cancelRequestDateCol} = GETDATE()`)
+        cancelUpdateFields.push(`${cancelRequestDateCol} = GETUTCDATE()`)
       }
       
       if (cancelUpdateFields.length > 0) {
@@ -514,7 +533,7 @@ export async function PUT(
           .input("newStatus", ticket.Status || null)
           .query(`
             INSERT INTO Repair_Ticket_History (TicketID, ActionType, OldStatus, NewStatus, CreatedAt)
-            VALUES (@ticketId, @actionType, @oldStatus, @newStatus, GETDATE())
+            VALUES (@ticketId, @actionType, @oldStatus, @newStatus, GETUTCDATE())
           `)
       } catch (historyError: any) {
         console.error("记录取消申请历史失败:", historyError?.message)
@@ -553,7 +572,7 @@ export async function PUT(
       }
       
       const approveUpdateFields: string[] = []
-      const approveUpdateRequest = pool.request().input("ticketId", ticketId)
+      const approveUpdateRequest = pool.request().input("ticketId", actualTicketId)
       
       if (cancelRequestStatusCol) {
         approveUpdateFields.push(`${cancelRequestStatusCol} = @cancelRequestStatus`)
@@ -564,7 +583,7 @@ export async function PUT(
         approveUpdateRequest.input("cancelApprovedBy", userRealName || userUsername || "")
       }
       if (cancelApprovedDateCol) {
-        approveUpdateFields.push(`${cancelApprovedDateCol} = GETDATE()`)
+        approveUpdateFields.push(`${cancelApprovedDateCol} = GETUTCDATE()`)
       }
       
       // 如果审批通过，更新工单状态为 Cancelled
@@ -589,7 +608,7 @@ export async function PUT(
           .input("newStatus", isApproveCancelAction ? "Cancelled" : ticket.Status || null)
           .query(`
             INSERT INTO Repair_Ticket_History (TicketID, ActionType, OldStatus, NewStatus, CreatedAt)
-            VALUES (@ticketId, @actionType, @oldStatus, @newStatus, GETDATE())
+            VALUES (@ticketId, @actionType, @oldStatus, @newStatus, GETUTCDATE())
           `)
       } catch (historyError: any) {
         console.error("记录审批历史失败:", historyError?.message)
@@ -603,7 +622,7 @@ export async function PUT(
 
     // 构建更新字段列表
     const updateFields: string[] = []
-    const updateRequest = pool.request().input("ticketId", ticketId)
+    const updateRequest = pool.request().input("ticketId", actualTicketId)
 
     // 如果仓库管理员只更新仓库字段，不更新状态（除非填写了快递单号）
     if (isWarehouseOnlyUpdate && isWarehouse) {
@@ -631,11 +650,15 @@ export async function PUT(
         updateRequest.input("returnQuantity", body.returnQuantity)
       }
       if (body.returnTrackingNum !== undefined && returnTrackingNumColumn) {
+        // 清理快递单号中的空格（防呆处理）
+        const cleanedTrackingNum = body.returnTrackingNum 
+          ? body.returnTrackingNum.replace(/\s+/g, '') 
+          : null
         updateFields.push(`${returnTrackingNumColumn} = @returnTrackingNum`)
-        updateRequest.input("returnTrackingNum", body.returnTrackingNum || null)
+        updateRequest.input("returnTrackingNum", cleanedTrackingNum)
         
         // 规则：仓库管理员填完 ReturnTrackingNum 时，自动转为已完成
-        if (body.returnTrackingNum && body.returnTrackingNum.trim()) {
+        if (cleanedTrackingNum && cleanedTrackingNum.trim()) {
           updateFields.push(`Status = @status`)
           updateRequest.input("status", "Completed")
         }
@@ -654,7 +677,7 @@ export async function PUT(
       if (dbStatus) {
         await pool
           .request()
-          .input("ticketId", ticketId)
+          .input("ticketId", actualTicketId)
           .input("status", dbStatus)
           .query(`
             UPDATE Repair_Tickets
@@ -702,7 +725,7 @@ export async function PUT(
             [NewStatus] NVARCHAR(50) NULL,
             [DelayTo] DATETIME NULL,
             [DelayReason] NVARCHAR(500) NULL,
-            [CreatedAt] DATETIME NOT NULL DEFAULT(GETDATE())
+            [CreatedAt] DATETIME NOT NULL DEFAULT(GETUTCDATE())
           )
         END
       `)
@@ -717,7 +740,7 @@ export async function PUT(
         const historyRequest = pool
           .request()
           .input("ticketId", ticketId.toString())
-          .input("actionType", "Delay")
+          .input("actionType", TicketActionType.DELAY)
           .input("oldStatus", ticket.Status || null)
           .input("newStatus", dbStatus)
           .input("delayTo", delayTo ? new Date(delayTo) : null)
@@ -731,9 +754,10 @@ export async function PUT(
             @ticketId, @actionType, @oldStatus, @newStatus, @delayTo, @delayReason
           )
         `)
-      } catch (historyError: any) {
+      } catch (historyError: unknown) {
         // 延期历史记录失败不影响主工单状态
-        console.error("记录延期历史失败:", historyError?.message)
+        const errorMsg = historyError instanceof Error ? historyError.message : "未知错误"
+        console.error("记录延期历史失败:", errorMsg)
       }
     } else {
       // 普通状态变更历史
@@ -741,7 +765,7 @@ export async function PUT(
         const historyRequest = pool
           .request()
           .input("ticketId", ticketId.toString())
-          .input("actionType", "StatusChange")
+          .input("actionType", TicketActionType.STATUS_CHANGE)
           .input("oldStatus", ticket.Status || null)
           .input("newStatus", dbStatus)
           .input("delayTo", null)
@@ -755,8 +779,9 @@ export async function PUT(
             @ticketId, @actionType, @oldStatus, @newStatus, @delayTo, @delayReason
           )
         `)
-      } catch (statusHistoryError: any) {
-        console.error("记录状态变更历史失败:", statusHistoryError?.message)
+      } catch (statusHistoryError: unknown) {
+        const errorMsg = statusHistoryError instanceof Error ? statusHistoryError.message : "未知错误"
+        console.error("记录状态变更历史失败:", errorMsg)
       }
     }
 

@@ -19,24 +19,37 @@ import { cn } from "@/lib/utils"
 interface CreateTicketFormProps {
   onSuccess?: () => void
   onCancel?: () => void
+  initialData?: {
+    senderAddress?: string
+    contactName?: string
+    contactPhone?: string
+    projectName?: string
+    category?: string
+    subCategory?: string
+    devices?: Array<{
+      serialNumber: string
+      faultDescription: string
+    }>
+  }
 }
 
-export default function CreateTicketForm({ onSuccess, onCancel }: CreateTicketFormProps) {
+export default function CreateTicketForm({ onSuccess, onCancel, initialData }: CreateTicketFormProps) {
   const { user } = useAuth()
   const { addRepair } = useRepairContext()
   const router = useRouter()
 
-  // 客户信息
-  const [senderAddress, setSenderAddress] = useState("")
-  const [contactName, setContactName] = useState("")
-  const [contactPhone, setContactPhone] = useState("")
-  const [projectName, setProjectName] = useState("")
+  // 客户信息（使用初始数据预填充）
+  const [senderAddress, setSenderAddress] = useState(initialData?.senderAddress || "")
+  const [contactName, setContactName] = useState(initialData?.contactName || "")
+  const [contactPhone, setContactPhone] = useState(initialData?.contactPhone || "")
+  const [projectName, setProjectName] = useState(initialData?.projectName || "")
   const [trackingNumberIn, setTrackingNumberIn] = useState("")
 
   // 产品信息
   const { models: catalogModels, loading: modelsLoading, error: modelsError } = useDeviceModels()
-  const [category, setCategory] = useState<string>("")
-  const [subCategory, setSubCategory] = useState<string>("")
+  // 设备信息（使用初始数据预填充类别，但设备列表留空）
+  const [category, setCategory] = useState<string>(initialData?.category || "")
+  const [subCategory, setSubCategory] = useState<string>(initialData?.subCategory || "")
   const [modelName, setModelName] = useState<string>("")
   const [productSn, setProductSn] = useState<string>("")
   const [fullSpec, setFullSpec] = useState<string>("")
@@ -137,8 +150,8 @@ export default function CreateTicketForm({ onSuccess, onCancel }: CreateTicketFo
 
       const formData = new FormData()
 
-      // 与后端现有字段对齐：支持“标签磨损/无法辨识”模式
-      const snForSubmit = isSnPendingVerify ? "PENDING_VERIFY" : productSn.trim()
+      // 与后端现有字段对齐：支持"标签磨损/无法辨识"模式
+      const snForSubmit = isSnPendingVerify ? "待验证" : productSn.trim()
       formData.append("deviceSn", snForSubmit)
       formData.append("faultDesc", faultDescription.trim())
       formData.append("projectLocation", projectName.trim())
@@ -154,7 +167,7 @@ export default function CreateTicketForm({ onSuccess, onCancel }: CreateTicketFo
       formData.append("category", category)
       formData.append("subCategory", subCategory)
       formData.append("modelName", modelName)
-      formData.append("productSn", isSnPendingVerify ? "PENDING_VERIFY" : productSn.trim())
+      formData.append("productSn", isSnPendingVerify ? "待验证" : productSn.trim())
       if (fullSpec.trim()) {
         formData.append("fullSpec", fullSpec.trim())
       }
@@ -180,9 +193,16 @@ export default function CreateTicketForm({ onSuccess, onCancel }: CreateTicketFo
       })
 
       const text = await resp.text()
-      let json: any = {}
+      interface ApiResponse {
+        success: boolean
+        message?: string
+        data?: {
+          batchId: string
+        }
+      }
+      let json: ApiResponse = { success: false }
       try {
-        json = text ? JSON.parse(text) : {}
+        json = text ? JSON.parse(text) : { success: false }
       } catch {
         throw new Error(text || "服务器返回了无效响应")
       }
@@ -216,9 +236,10 @@ export default function CreateTicketForm({ onSuccess, onCancel }: CreateTicketFo
 
       if (onSuccess) onSuccess()
       // 管理端通常停留当前列表，这里不强制跳转；如需跳转可以在外部处理
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "创建工单失败，请稍后重试"
       console.error("创建工单失败:", err)
-      alert(err?.message || "创建工单失败，请稍后重试")
+      alert(errorMessage)
     } finally {
       setSubmitting(false)
     }

@@ -1,10 +1,15 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import { useAuth } from "@/context/auth-context";
 
 // 维修工单类型定义
 export interface RepairTicket {
   id: string;
+  workOrderNumber?: string;
+  batchId?: string | null; // 批次ID - 用于批次工单分组
+  projectName?: string; // 项目名称
+  contactInfo?: string; // 联系信息
   deviceId: number;
   deviceName: string;
   deviceModel: string;
@@ -26,6 +31,8 @@ export interface RepairTicket {
   damagePhotos?: string[];
   inWarranty?: boolean;
   warrantyEnd?: string;
+  signedReportPhoto?: string | null;
+  messageCount?: number;
 }
 
 // 创建Context
@@ -46,6 +53,7 @@ const RepairContext = createContext<RepairContextType | undefined>(undefined);
 
 // Provider组件
 export function RepairProvider({ children }: { children: ReactNode }) {
+  const { status } = useAuth();
   const [repairs, setRepairs] = useState<RepairTicket[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,6 +91,11 @@ export function RepairProvider({ children }: { children: ReactNode }) {
       }
       
       if (!response.ok) {
+        // 401 表示用户未登录，属于预期行为，静默处理即可
+        if (response.status === 401) {
+          setRepairs([]);
+          return;
+        }
         const errorMessage = result?.message || result?.error || `获取工单列表失败 (HTTP ${response.status})`;
         console.error('API 错误响应:', { 
           status: response.status, 
@@ -131,6 +144,10 @@ export function RepairProvider({ children }: { children: ReactNode }) {
 
             return {
               id: ticket.id || "",
+              workOrderNumber: ticket.workOrderNumber || "",
+              batchId: ticket.batchId || null, // 🔥 批次ID - 关键字段！
+              projectName: ticket.projectName || "", // 项目名称
+              contactInfo: ticket.contactInfo || "", // 联系信息
               deviceId: ticket.deviceSerialNumber
                 ? parseInt(ticket.deviceSerialNumber.slice(-6), 36) || 0
                 : 0,
@@ -149,6 +166,8 @@ export function RepairProvider({ children }: { children: ReactNode }) {
               expectedCompletionDate: ticket.expectedCompletionDate || undefined,
               devicePhotos: [],
               damagePhotos: [],
+              signedReportPhoto: ticket.signedReportPhoto || null,
+              messageCount: ticket.messageCount || 0,
             };
           })
           .filter((item): item is RepairTicket => item !== null);
@@ -170,12 +189,18 @@ export function RepairProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // 组件加载时自动刷新（只在客户端执行）
+  // 仅在用户认证后才加载工单数据，避免未登录时触发 401 错误
   useEffect(() => {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && status === 'authenticated') {
       refreshRepairs();
     }
-  }, []);
+    // 退出登录时清空工单列表
+    if (status === 'unauthenticated') {
+      setRepairs([]);
+      setError(null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
 
   // 添加新工单（仅用于前端临时显示，实际数据已保存到数据库）
   const addRepair = (newRepair: Omit<RepairTicket, "id" | "reportedAt">) => {

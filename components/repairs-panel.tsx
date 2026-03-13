@@ -11,8 +11,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Search, Plus, AlertCircle, X, Download } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import CreateTicketForm from "@/components/create-ticket-form";
-import RepairDetail from "@/components/repair-detail";
 import { cn } from "@/lib/utils";
+import { TicketStatus, normalizeTicketStatus } from "@/lib/enums";
 
 interface RepairsPanelProps {
   isOpen: boolean;
@@ -26,7 +26,6 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
   const searchParams = useSearchParams();
   const [searchQuery, setSearchQuery] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
-  const [selectedRepairId, setSelectedRepairId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
   // 从URL参数获取状态筛选
@@ -44,7 +43,7 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
     }
   }, [searchParams, isOpen]);
 
-  // 过滤维修工单
+  // 过滤维修工单：按工单号 / 序列号 / 故障描述检索，不再按设备名称和位置
   const filteredRepairs = repairs.filter(repair => {
     // 状态筛选
     const statusMatch = statusFilter === "all" || 
@@ -53,44 +52,40 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
     
     // 搜索筛选
     const searchMatch = searchQuery === "" ||
-      repair.deviceName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      repair.deviceModel?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      repair.problem?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      repair.location?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      repair.deviceSerialNumber?.toLowerCase().includes(searchQuery.toLowerCase());
+      ((repair as any).workOrderNumber || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+      repair.deviceSerialNumber?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      repair.problem?.toLowerCase().includes(searchQuery.toLowerCase());
 
     return statusMatch && searchMatch;
   });
 
   // 获取状态徽章
   const getStatusBadge = (status: string) => {
-    const normalizedStatus = status.toLowerCase();
+    const normalizedStatus = normalizeTicketStatus(status)
     switch (normalizedStatus) {
-      case "pending":
-      case "created":
-        return <Badge className="bg-yellow-100 text-yellow-800 border-yellow-300 text-xs">待处理</Badge>;
-      case "processing":
-      case "in_repair":
-        return <Badge className="bg-blue-100 text-blue-800 border-blue-300 text-xs">维修中</Badge>;
-      case "pending_factory":
-        return <Badge className="bg-purple-100 text-purple-800 border-purple-300 text-xs">待返厂</Badge>;
-      case "factory_finished":
-        return <Badge className="bg-orange-100 text-orange-800 border-orange-300 text-xs">待复检</Badge>;
-      case "admin_review":
-        return <Badge className="bg-cyan-100 text-cyan-800 border-cyan-300 text-xs">待商务处理</Badge>;
-      case "pending_shipment":
-        return <Badge className="bg-indigo-100 text-indigo-800 border-indigo-300 text-xs">待发货</Badge>;
-      case "completed":
-        return <Badge className="bg-green-100 text-green-800 border-green-300 text-xs">已完成</Badge>;
-      case "unrepairable":
-        return <Badge className="bg-red-100 text-red-800 border-red-300 text-xs">无法维修</Badge>;
-      case "delayed":
-        return <Badge className="bg-amber-100 text-amber-800 border-amber-300 text-xs">已延期</Badge>;
-      case "cancelled":
-        return <Badge className="bg-gray-100 text-gray-800 border-gray-300 text-xs">已取消</Badge>;
-      case "scrapped":
-        return <Badge className="bg-red-100 text-red-800 border-red-300 text-xs">已报废</Badge>;
-      case "return_unrepaired":
+      case TicketStatus.CREATED:
+      case TicketStatus.WAREHOUSE_CONFIRMING:
+        return <Badge className="bg-yellow-100 text-yellow-800 border-yellow-300 text-xs">待处理</Badge>
+      case TicketStatus.IN_REPAIR:
+        return <Badge className="bg-blue-100 text-blue-800 border-blue-300 text-xs">维修中</Badge>
+      case TicketStatus.WAREHOUSE_CONFIRMED:
+        return <Badge className="bg-purple-100 text-purple-800 border-purple-300 text-xs">仓库已确认</Badge>
+      case TicketStatus.PENDING_REPORTER_CONFIRM:
+        return <Badge className="bg-orange-100 text-orange-800 border-orange-300 text-xs">待现场确认</Badge>
+      case TicketStatus.BUSINESS_REVIEW:
+        return <Badge className="bg-cyan-100 text-cyan-800 border-cyan-300 text-xs">待商务处理</Badge>
+      case TicketStatus.WAREHOUSE_SHIPPING:
+        return <Badge className="bg-indigo-100 text-indigo-800 border-indigo-300 text-xs">待发货</Badge>
+      case TicketStatus.COMPLETED:
+        return <Badge className="bg-green-100 text-green-800 border-green-300 text-xs">已完成</Badge>
+      case TicketStatus.UNREPAIRABLE:
+        return <Badge className="bg-red-100 text-red-800 border-red-300 text-xs">无法维修</Badge>
+      case TicketStatus.DELAYED:
+        return <Badge className="bg-amber-100 text-amber-800 border-amber-300 text-xs">已延期</Badge>
+      case TicketStatus.CANCELLED:
+        return <Badge className="bg-gray-100 text-gray-800 border-gray-300 text-xs">已取消</Badge>
+      case TicketStatus.SCRAPPED:
+        return <Badge className="bg-red-100 text-red-800 border-red-300 text-xs">已报废</Badge>
         return <Badge className="bg-orange-100 text-orange-800 border-orange-300 text-xs">拒修退回</Badge>;
       default:
         return <Badge className="text-xs">{status}</Badge>;
@@ -110,7 +105,7 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
             <p className="text-xs text-muted-foreground">查看和管理所有维修工单</p>
           </div>
           <div className="flex items-center gap-2">
-            {(user?.role === "admin" || user?.role === "warehouse") && (
+            {(user?.role === UserRole.ADMIN || user?.role === UserRole.WAREHOUSE) && (
               <Button
                 variant="outline"
                 size="sm"
@@ -179,9 +174,9 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
               维修中
             </Button>
             <Button
-              variant={statusFilter === "completed" ? "default" : "outline"}
+              variant={statusFilter === TicketStatus.COMPLETED.toLowerCase() ? "default" : "outline"}
               size="sm"
-              onClick={() => setStatusFilter("completed")}
+              onClick={() => setStatusFilter(TicketStatus.COMPLETED.toLowerCase())}
               className="text-xs"
             >
               已完成
@@ -196,20 +191,19 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
               <Card
                 key={repair.id}
                 className="hover:shadow-md transition-shadow cursor-pointer"
-                onClick={() => setSelectedRepairId(repair.id)}
+                onClick={() => router.push(`/repairs/detail/${repair.id}`)}
               >
                 <CardContent className="p-4">
                   <div className="flex items-start justify-between mb-2">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-xs text-muted-foreground">工单 #{repair.id}</span>
                         {getStatusBadge(repair.status || "")}
                       </div>
                       <h3 className="font-semibold text-sm mb-1 truncate">
-                        {repair.deviceName || "未知设备"}
+                        工单号：{(repair as any).workOrderNumber || repair.id}
                       </h3>
                       <p className="text-xs text-muted-foreground mb-2 truncate">
-                        {repair.deviceModel || ""}
+                        序列号：{repair.deviceSerialNumber || "未知"}
                       </p>
                     </div>
                   </div>
@@ -219,9 +213,6 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
                       <p className="text-muted-foreground line-clamp-2 flex-1">
                         {repair.problem || "无故障描述"}
                       </p>
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>📍 {repair.location || "未知位置"}</span>
                     </div>
                     <div className="text-xs text-muted-foreground">
                       {repair.reportedAt || ""}
@@ -251,7 +242,7 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
         </div>
 
         {/* 底部操作栏 */}
-        {user?.role !== "admin" && (
+        {user?.role !== UserRole.ADMIN && (
           <div className="p-4 border-t border-border">
             <Button
               onClick={() => setIsAddDialogOpen(true)}
@@ -285,23 +276,6 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
           </div>
         </DialogContent>
       </Dialog>
-
-      {/* 工单详情对话框 */}
-      {selectedRepairId && (
-        <Dialog open={!!selectedRepairId} onOpenChange={(open) => !open && setSelectedRepairId(null)}>
-          <DialogContent className="max-w-7xl max-h-[90vh] overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle>工单详情</DialogTitle>
-            </DialogHeader>
-            <div className="py-2">
-              <RepairDetail
-                taskId={selectedRepairId}
-                onBack={() => setSelectedRepairId(null)}
-              />
-            </div>
-          </DialogContent>
-        </Dialog>
-      )}
     </>
   );
 }
