@@ -169,9 +169,10 @@ export async function PUT(
       }
     }
 
-    // 验证角色（包括User角色）
-    const validRoles = ["Admin", "Technician", "Warehouse", "Reporter", "User"]
-    if (role !== undefined && role !== null && role !== "" && !validRoles.includes(role)) {
+    // 验证角色 —— 使用大小写不敏感匹配，兼容 PascalCase 与 lowercase 两种写法
+    const validRoles = ["Admin", "Technician", "Warehouse", "Reporter", "Business", "User"]
+    if (role !== undefined && role !== null && role !== "" &&
+        !validRoles.some(r => r.toLowerCase() === role.toLowerCase())) {
       return NextResponse.json(
         { success: false, message: `角色必须是以下之一: ${validRoles.join(", ")}` },
         { status: 400 }

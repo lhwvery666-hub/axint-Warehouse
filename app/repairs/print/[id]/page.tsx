@@ -757,7 +757,8 @@ export default function RepairReportPrintPage() {
                         <strong>[故障]</strong>{' '}
                         {device.repairContent || '-'}
                       </div>
-                      {(device.repairActionLabel || device.repairNotes) && (() => {
+                      {/* 返厂维修（RMA）类型不在报告中展示处理记录 */}
+                      {device.repairAction !== "RMA" && (device.repairActionLabel || device.repairNotes) && (() => {
                         const isReporter = user?.role === UserRole.REPORTER;
                         const maskedLabel = getMaskedRepairActionLabel(
                           device.repairActionLabel,

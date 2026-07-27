@@ -178,7 +178,7 @@ function getStatusText(statusId: string): string {
   const statusTexts: Record<string, string> = {
     'created': '已创建',
     'pending': '待处理',
-    'in_repair': '维修中',
+    'in_repair': '维修检查中',
     'processing': '处理中',
     'completed': '已完成',
     'cancelled': '已取消',

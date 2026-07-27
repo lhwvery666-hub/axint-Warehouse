@@ -24,11 +24,13 @@ describe("工单工作流动作系统", () => {
       );
 
       // 核心工作流状态
+      // ⚠️ TECHNICIAN_REPAIRING 不在此列表中：该状态下的流转（提交处理结果 → 商务审核/
+      // 仓库发货）已改由 POST /api/tickets/complete-repair-batch/[batchId] 处理，
+      // 原来这里的 CONFIRM_SIGNATURE 死代码路径已被清理移除（见 ticket-workflow-actions.ts）。
       const coreStatuses = [
         TicketStatus.CREATED,
         TicketStatus.IN_REPAIR,
         TicketStatus.PENDING_REPORTER_CONFIRM,
-        TicketStatus.TECHNICIAN_REPAIRING,
         TicketStatus.BUSINESS_REVIEW,
         TicketStatus.WAREHOUSE_SHIPPING,
       ];
@@ -271,13 +273,15 @@ describe("工单工作流动作系统", () => {
       expect(step4?.action).toBe(TicketAction.UPLOAD_SIGNATURE);
       expect(step4?.nextStatus).toBe(TicketStatus.TECHNICIAN_REPAIRING);
 
-      // 5. 维修人员确认签字
+      // 5. 维修作业中阶段：不再由 WORKFLOW_TRANSITIONS 提供"一步转交商务"的动作
+      // （原 CONFIRM_SIGNATURE 死代码路径已移除），真正的完工提交走
+      // POST /api/tickets/complete-repair-batch/[batchId]，此处只验证
+      // 通用流转表里确实已经没有这条可能导致跳步的规则。
       const step5 = getAvailableAction(
         TicketStatus.TECHNICIAN_REPAIRING,
         UserRole.TECHNICIAN
       );
-      expect(step5?.action).toBe(TicketAction.CONFIRM_SIGNATURE);
-      expect(step5?.nextStatus).toBe(TicketStatus.BUSINESS_REVIEW);
+      expect(step5).toBeNull();
 
       // 6. 商务确认收费
       const step6 = getAvailableAction(

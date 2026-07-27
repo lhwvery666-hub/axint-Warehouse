@@ -21,6 +21,7 @@ import {
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
 import { format } from "date-fns"
 import { zhCN } from "date-fns/locale"
+import { toBeijingTime } from "@/lib/utils"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { TicketStatus, UserRole, OperationLogType, OPERATION_LOG_TYPE_LABELS, TICKET_STATUS_LABELS, normalizeTicketStatus } from "@/lib/enums"
@@ -36,19 +37,29 @@ interface Device {
   subCategory: string
   faultDescription: string
   manufactureDate?: string | null
+  arrivalDate?: string | null
   warrantyStatus?: string | null
   status?: string
   deviceImages?: string | null   // 现场上传的设备图片（JSON数组或逗号分隔路径）
   faultPoint?: string | null     // 故障点
+  quantity?: number
 }
 
 // 可以被仓库管理员确认（填写出厂日期并推进）的状态集合
-const CONFIRMABLE_STATUSES = new Set([
+// ⚠️ 曾经的 bug：直接用原始字符串做 Set.has 比较，一旦后端返回的状态大小写/格式不完全一致
+// （如历史脏数据），就会被判定为"不可确认"，导致设备在仓库确认页面显示不出来或按钮无法生效，
+// 表现为工单"卡死"在待处理。修复：统一先用 normalizeTicketStatus 归一化后再比较。
+const CONFIRMABLE_TICKET_STATUSES = new Set<TicketStatus>([
   TicketStatus.CREATED,
   TicketStatus.WAREHOUSE_CONFIRMING,
-  "Pending",
-  "Warehouse_Received",
+  TicketStatus.WAREHOUSE_CONFIRMED,
 ])
+const CONFIRMABLE_STATUSES = {
+  has: (status: string | null | undefined): boolean => {
+    const normalized = normalizeTicketStatus(status || "")
+    return !!normalized && CONFIRMABLE_TICKET_STATUSES.has(normalized)
+  }
+}
 
 interface BatchInfo {
   batchId: string
@@ -82,6 +93,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
   const [batchInfo, setBatchInfo] = useState<BatchInfo | null>(null)
   const [devices, setDevices] = useState<Device[]>([])
   const [manufactureDates, setManufactureDates] = useState<Record<string, Date | null>>({})
+  const [arrivalDates, setArrivalDates] = useState<Record<string, Date | null>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [operationLogs, setOperationLogs] = useState<OperationLog[]>([])
   // 展开查看现场信息的设备ID（null 表示未展开）
@@ -112,6 +124,15 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
         dates[device.id] = device.manufactureDate ? new Date(device.manufactureDate) : null
       })
       setManufactureDates(dates)
+
+      // 初始化到货日期：已有数据则回显，否则默认当天中午（东八区当天，避免跨日误差）
+      const todayNoon = new Date()
+      todayNoon.setHours(12, 0, 0, 0)
+      const arrivalDatesInit: Record<string, Date | null> = {}
+      result.data.devices.forEach((device: Device) => {
+        arrivalDatesInit[device.id] = device.arrivalDate ? new Date(device.arrivalDate) : todayNoon
+      })
+      setArrivalDates(arrivalDatesInit)
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : "加载失败"
       console.error("获取批次设备列表失败:", err)
@@ -138,10 +159,15 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
   // 确认批次并提交出厂日期（只提交需要确认的设备）
   const handleConfirmBatch = async () => {
     const devicesToConfirm = devices.filter(d => CONFIRMABLE_STATUSES.has(d.status || ""))
-    // 验证需要确认的设备都有出厂日期
-    const missingDates = devicesToConfirm.filter(device => !manufactureDates[device.id])
-    if (missingDates.length > 0) {
-      toast.error(`请为所有待确认设备填写出厂日期（还有 ${missingDates.length} 个设备未填写）`)
+    // 验证需要确认的设备都有出厂日期和到货日期
+    const missingManufacture = devicesToConfirm.filter(device => !manufactureDates[device.id])
+    if (missingManufacture.length > 0) {
+      toast.error(`请为所有待确认设备填写出厂日期（还有 ${missingManufacture.length} 个设备未填写）`)
+      return
+    }
+    const missingArrival = devicesToConfirm.filter(device => !arrivalDates[device.id])
+    if (missingArrival.length > 0) {
+      toast.error(`请为所有待确认设备填写到货日期（还有 ${missingArrival.length} 个设备未填写）`)
       return
     }
 
@@ -155,7 +181,9 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
         body: JSON.stringify({
           devices: devicesToConfirm.map(device => ({
             id: device.id,
-            manufactureDate: manufactureDates[device.id]?.toISOString()
+            manufactureDate: manufactureDates[device.id]?.toISOString(),
+            // 时区：发送本地时间对应的 UTC ISO 字符串，服务端存 UTC，前端读取后 format 为东八区日期
+            arrivalDate: arrivalDates[device.id]?.toISOString()
           }))
         }),
       })
@@ -294,7 +322,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
               const filled = needConfirm.filter(d => manufactureDates[d.id]).length
               return (
                 <Badge variant={filled === needConfirm.length && needConfirm.length > 0 ? "default" : "secondary"}>
-                  {filled} / {needConfirm.length} 待确认设备已填写
+                  {filled} / {needConfirm.length} 待确认已填写
                 </Badge>
               )
             })()}
@@ -314,6 +342,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                   <TableHead>物料名称</TableHead>
                   <TableHead>故障描述</TableHead>
                   <TableHead>当前状态</TableHead>
+                  <TableHead>到货日期 *</TableHead>
                   <TableHead>出厂日期 *</TableHead>
                   <TableHead>现场信息</TableHead>
                 </TableRow>
@@ -343,6 +372,58 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                           </Badge>
                         )}
                       </TableCell>
+                      {/* 到货日期列 */}
+                      <TableCell>
+                        {needsConfirm ? (
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className={cn(
+                                  "w-full justify-start text-left font-normal min-w-[140px]",
+                                  !arrivalDates[device.id] && "text-muted-foreground border-destructive"
+                                )}
+                              >
+                                <CalendarIcon className="mr-2 h-4 w-4" />
+                                {arrivalDates[device.id] ? (
+                                  format(arrivalDates[device.id]!, "yyyy-MM-dd", { locale: zhCN })
+                                ) : (
+                                  <span className="text-destructive">请选择日期</span>
+                                )}
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-auto p-0" align="start">
+                              <Calendar
+                                mode="single"
+                                selected={arrivalDates[device.id] || undefined}
+                                onSelect={(date) => {
+                                  setArrivalDates(prev => ({
+                                    ...prev,
+                                    [device.id]: date || null
+                                  }))
+                                }}
+                                initialFocus
+                                locale={zhCN}
+                                captionLayout="dropdown"
+                                fromYear={2010}
+                                toYear={new Date().getFullYear()}
+                                fixedWeeks
+                                disabled={(date) => date > new Date()}
+                              />
+                            </PopoverContent>
+                          </Popover>
+                        ) : (
+                          <span className="text-sm text-muted-foreground">
+                            {arrivalDates[device.id] ? (
+                              format(arrivalDates[device.id]!, "yyyy-MM-dd", { locale: zhCN })
+                            ) : (
+                              <span className="italic">—</span>
+                            )}
+                          </span>
+                        )}
+                      </TableCell>
+                      {/* 出厂日期列 */}
                       <TableCell>
                         {needsConfirm ? (
                           /* 待确认设备：允许编辑出厂日期（统一在底部确认按钮提交） */
@@ -517,7 +598,9 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
       {/* 确认按钮 */}
       {(() => {
         const devicesToConfirm = devices.filter(d => CONFIRMABLE_STATUSES.has(d.status || ""))
-        const allFilled = devicesToConfirm.length > 0 && devicesToConfirm.every(d => manufactureDates[d.id])
+        const allFilled = devicesToConfirm.length > 0 && 
+          devicesToConfirm.every(d => manufactureDates[d.id]) &&
+          devicesToConfirm.every(d => arrivalDates[d.id])
         if (devicesToConfirm.length === 0) return null
         return (
           <Card className="border-primary/50 bg-primary/5">
@@ -609,7 +692,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                         <p className="text-sm font-medium">{OPERATION_LOG_TYPE_LABELS[log.type as OperationLogType] || log.type}</p>
                         <p className="text-sm text-muted-foreground mt-0.5">{log.description}</p>
                         <p className="text-xs text-muted-foreground mt-1">
-                          {log.operator} · {format(new Date(log.time), "yyyy-MM-dd HH:mm", { locale: zhCN })}
+                          {log.operator} · {format(toBeijingTime(log.time), "yyyy-MM-dd HH:mm", { locale: zhCN })}
                         </p>
                       </div>
                     </div>

@@ -6,9 +6,11 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Package, CheckCircle, Clock, Loader2, AlertCircle, ChevronRight, Database, Truck, Download, CheckCircle2, RefreshCw } from "lucide-react";
+import { Package, CheckCircle, Clock, Loader2, AlertCircle, ChevronRight, Database, Truck, Download, CheckCircle2, RefreshCw, Search } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
+import { toBeijingTime } from "@/lib/utils";
 import DatabaseManager from "@/components/admin/database-manager";
 import WarehouseBatchConfirm from "@/components/warehouse-batch-confirm";
 import WarehouseBatchShipping from "@/components/warehouse-batch-shipping";
@@ -34,6 +36,7 @@ export default function WarehouseDashboard() {
   const [loading, setLoading] = useState(true);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [selectedMode, setSelectedMode] = useState<"confirm" | "shipping" | "view">("confirm");
+  const [searchQuery, setSearchQuery] = useState("");
 
   useEffect(() => {
     if (activeTab === "pending") {
@@ -180,6 +183,17 @@ export default function WarehouseDashboard() {
         </Button>
       </div>
 
+      {/* 搜索框 */}
+      <div className="relative mb-4">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
+        <Input
+          className="pl-10 h-11 text-base"
+          placeholder="搜索批次号、项目名称或设备类别..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
+      </div>
+
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
         <TabsList className="grid w-full md:w-auto grid-cols-5 md:grid-cols-5">
           <TabsTrigger value="pending" className="flex items-center gap-2">
@@ -243,7 +257,7 @@ export default function WarehouseDashboard() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {pendingBatches.map((batch, index) => {
+                  {pendingBatches.filter(b => !searchQuery.trim() || [b.batchId, b.projectName, b.projectLocation, b.category].some(v => v?.toLowerCase().includes(searchQuery.toLowerCase()))).map((batch, index) => {
                     // 调试：打印batch信息
                     if (index === 0) {
                       console.log('[Warehouse Dashboard] 第一个批次数据:', batch)
@@ -280,7 +294,7 @@ export default function WarehouseDashboard() {
                                 </div>
                                 <div>
                                   <span className="font-medium">创建时间：</span>
-                                  {format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
+                                  {format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
                                 </div>
                               </div>
                             </div>
@@ -323,7 +337,7 @@ export default function WarehouseDashboard() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {shippingBatches.map((batch, index) => {
+                  {shippingBatches.filter(b => !searchQuery.trim() || [b.batchId, b.projectName, b.projectLocation, b.category].some(v => v?.toLowerCase().includes(searchQuery.toLowerCase()))).map((batch, index) => {
                     const uniqueKey = `shipping-${batch.batchId}-${batch.createdAt}-${index}`
                     const isRmaBatch = batch.status === TicketStatus.PENDING_FACTORY
                       || batch.status === "pending_factory"
@@ -363,7 +377,7 @@ export default function WarehouseDashboard() {
                                 </div>
                                 <div>
                                   <span className="font-medium">创建时间：</span>
-                                  {format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
+                                  {format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
                                 </div>
                               </div>
                             </div>
@@ -406,7 +420,7 @@ export default function WarehouseDashboard() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {completedBatches.map((batch, index) => {
+                  {completedBatches.filter(b => !searchQuery.trim() || [b.batchId, b.projectName, b.projectLocation, b.category].some(v => v?.toLowerCase().includes(searchQuery.toLowerCase()))).map((batch, index) => {
                     const uniqueKey = `completed-${batch.batchId}-${batch.createdAt}-${index}`
                     return (
                       <Card key={uniqueKey} className="hover:border-primary/50 transition-colors cursor-pointer" onClick={() => {
@@ -437,7 +451,7 @@ export default function WarehouseDashboard() {
                                 </div>
                                 <div>
                                   <span className="font-medium">创建时间：</span>
-                                  {format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
+                                  {format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
                                 </div>
                               </div>
                             </div>
@@ -480,7 +494,7 @@ export default function WarehouseDashboard() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {allBatches.map((batch, index) => {
+                  {allBatches.filter(b => !searchQuery.trim() || [b.batchId, b.projectName, b.projectLocation, b.category].some(v => v?.toLowerCase().includes(searchQuery.toLowerCase()))).map((batch, index) => {
                     const uniqueKey = `all-${batch.batchId}-${batch.createdAt}-${index}`
                     // 根据状态确定查看模式和Badge
                     const getStatusInfo = (status: string) => {
@@ -526,7 +540,7 @@ export default function WarehouseDashboard() {
                                 </div>
                                 <div>
                                   <span className="font-medium">创建时间：</span>
-                                  {format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
+                                  {format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
                                 </div>
                               </div>
                             </div>

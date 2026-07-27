@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
-import { DB_FIELDS, TicketStatus, TicketActionType, normalizeTicketStatus } from "@/lib/enums"
+import { DB_FIELDS, TicketStatus, TicketActionType, normalizeTicketStatus, TICKET_STATUS_LABELS } from "@/lib/enums"
 import { TICKET_QUERY_MESSAGES, API_ERROR_MESSAGES } from "@/lib/api-messages"
 
 // 禁用该路由的缓存，确保详情页每次请求都命中数据库
@@ -453,7 +453,6 @@ export async function PUT(
     //   2. 专用工作流 API（如 warehouse-confirm-batch、reporter-confirm、batch-repair-report 等）
     //   3. 填写返厂快递单号时自动更新为 PENDING_FACTORY（新增）
     let newStatus: string | null = null
-    const statusAutoUpdated = false
 
     // 字段映射：前端字段名 -> Prisma 字段名
     const fieldMappings: Record<string, string> = {
@@ -742,8 +741,10 @@ export async function PUT(
           // 只填写快递单号，状态未变化（可能已经是 PENDING_FACTORY）
           description = `填写返厂快递单号：${body.factoryTrackingNum}`
         } else {
-          // 普通状态变更
-          description = `状态变更：${currentStatus} → ${finalStatus}`
+          // 普通状态变更（使用中文标签）
+          const currentStatusLabel = TICKET_STATUS_LABELS[normalizeTicketStatus(currentStatus) as TicketStatus] || currentStatus
+          const finalStatusLabel = TICKET_STATUS_LABELS[normalizeTicketStatus(finalStatus) as TicketStatus] || finalStatus
+          description = `状态变更：${currentStatusLabel} → ${finalStatusLabel}`
         }
         
         // 构建操作记录数据

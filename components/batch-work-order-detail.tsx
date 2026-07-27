@@ -28,9 +28,10 @@ import { RepairStatusTimeline } from "@/components/repair-status-timeline"
 import BatchInfoEditor from "@/components/batch-info-editor"
 import RepairForm from "@/components/repair-form"
 import { useAuth } from "@/context/auth-context"
-import { UserRole, TicketStatus, OperationLogType, normalizeTicketStatus, TERMINAL_STATUSES, REPAIR_ACTION_LABELS, RepairAction, FinalOutcome, FINAL_OUTCOME_LABELS } from "@/lib/enums"
+import { UserRole, TicketStatus, OperationLogType, normalizeTicketStatus, TERMINAL_STATUSES, REPAIR_ACTION_LABELS, RepairAction, FinalOutcome, FINAL_OUTCOME_LABELS, TICKET_STATUS_LABELS } from "@/lib/enums"
 import { format } from "date-fns"
 import { zhCN } from "date-fns/locale"
+import { toBeijingTime } from "@/lib/utils"
 import { toast } from "sonner"
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
 
@@ -105,6 +106,13 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
   const [signaturePreview, setSignaturePreview] = useState<string | null>(null)
   const [isUploadingSignature, setIsUploadingSignature] = useState(false)
 
+  // 盖章件附件（仅维修人员可见）
+  const [stampAttachments, setStampAttachments] = useState<Array<{
+    id: number; originalName: string; filePath: string; mimeType: string;
+    fileSize: number; uploadedByName: string; createdAt: string;
+  }>>([])
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false)
+
   // 发货信息（仅非现场人员可见）
   const [shippingInfo, setShippingInfo] = useState<{
     shippingType?: string | null
@@ -174,10 +182,79 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
     }
   }
 
+  // ── 盖章件附件（维修人员）────────────────────────────────────────────────────
+  const fetchStampAttachments = async () => {
+    try {
+      const res = await fetch(`/api/tickets/batch-attachments/${batchId}`)
+      const result = await res.json()
+      if (result.success) setStampAttachments(result.data)
+    } catch { /* 非关键 */ }
+  }
+
+  const MAX_ATTACH_SIZE = 10 * 1024 * 1024 // 10MB
+
+  const handleUploadAttachment = async (file: File) => {
+    if (file.size > MAX_ATTACH_SIZE) {
+      alert(`文件过大，最大支持 10MB（当前 ${(file.size / 1024 / 1024).toFixed(1)}MB）`)
+      return
+    }
+    setIsUploadingAttachment(true)
+    try {
+      const formData = new FormData()
+      formData.append("file", file)
+      const uploadRes = await fetch("/api/upload", { method: "POST", body: formData })
+      const uploadResult = await uploadRes.json()
+      if (!uploadResult.success) throw new Error(uploadResult.message || "上传失败")
+      const filePath: string = uploadResult.url || uploadResult.path || uploadResult.filePath
+      await fetch(`/api/tickets/batch-attachments/${batchId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileName: file.name,
+          originalName: file.name,
+          filePath,
+          mimeType: file.type,
+          fileSize: file.size,
+        }),
+      })
+      await fetchStampAttachments()
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "上传失败")
+    } finally {
+      setIsUploadingAttachment(false)
+    }
+  }
+
+  const handleDeleteAttachment = async (id: number) => {
+    if (!confirm("确认删除此附件？")) return
+    await fetch(`/api/tickets/batch-attachments/${batchId}?id=${id}`, { method: "DELETE" })
+    await fetchStampAttachments()
+  }
+
+  const handleDownloadAttachment = async (filePath: string, originalName: string) => {
+    try {
+      const res = await fetch(filePath)
+      if (!res.ok) throw new Error("下载失败")
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = originalName
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch {
+      // 降级：直接打开新标签页
+      window.open(filePath, "_blank")
+    }
+  }
+
   useEffect(() => {
     fetchBatchDevices()
     fetchOperationLogs()
     fetchShippingInfo()
+    fetchStampAttachments()
   }, [batchId, user?.role])
 
 
@@ -364,26 +441,33 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
   }
 
   // 获取状态徽章
+  // ⚠️ 曾经的 bug：statusMap 未覆盖 TECHNICIAN_REPAIRING/DELAYED/UNREPAIRABLE/SCRAPPED 等状态，
+  // 且未命中时会 fallback 到 CREATED（"待处理"），导致这些状态的工单被误显示成"待处理"。
+  // 修复：文案统一取自 TICKET_STATUS_LABELS（覆盖全部枚举），未命中样式时用灰色兜底而不是伪装成"待处理"。
   const getStatusBadge = (status: string) => {
     const normalizedStatus = normalizeTicketStatus(status || "")
-    
-    const statusMap: Record<string, { label: string; className: string }> = {
-      [TicketStatus.CREATED]: { label: "待处理", className: "bg-yellow-100 text-yellow-800 border-yellow-300" },
-      [TicketStatus.WAREHOUSE_CONFIRMING]: { label: "待仓库确认", className: "bg-orange-100 text-orange-800 border-orange-300" },
-      [TicketStatus.WAREHOUSE_CONFIRMED]: { label: "仓库已确认", className: "bg-blue-100 text-blue-800 border-blue-300" },
-      [TicketStatus.IN_REPAIR]: { label: "维修检查中", className: "bg-blue-100 text-blue-800 border-blue-300" },
-      [TicketStatus.PENDING_REPORTER_CONFIRM]: { label: "待现场确认", className: "bg-cyan-100 text-cyan-800 border-cyan-300" },
-      [TicketStatus.BUSINESS_REVIEW]: { label: "待商务审核", className: "bg-purple-100 text-purple-800 border-purple-300" },
-      [TicketStatus.WAREHOUSE_SHIPPING]: { label: "待仓库发货", className: "bg-green-100 text-green-800 border-green-300" },
-      [TicketStatus.COMPLETED]: { label: "已完成", className: "bg-green-100 text-green-800 border-green-300" },
-      [TicketStatus.CANCELLED]: { label: "已取消", className: "bg-gray-100 text-gray-800 border-gray-300" },
+    if (!normalizedStatus) return null
+
+    const classNameMap: Partial<Record<TicketStatus, string>> = {
+      [TicketStatus.CREATED]: "bg-yellow-100 text-yellow-800 border-yellow-300",
+      [TicketStatus.WAREHOUSE_CONFIRMING]: "bg-orange-100 text-orange-800 border-orange-300",
+      [TicketStatus.WAREHOUSE_CONFIRMED]: "bg-blue-100 text-blue-800 border-blue-300",
+      [TicketStatus.IN_REPAIR]: "bg-blue-100 text-blue-800 border-blue-300",
+      [TicketStatus.PENDING_REPORTER_CONFIRM]: "bg-cyan-100 text-cyan-800 border-cyan-300",
+      [TicketStatus.TECHNICIAN_REPAIRING]: "bg-indigo-100 text-indigo-800 border-indigo-300",
+      [TicketStatus.BUSINESS_REVIEW]: "bg-purple-100 text-purple-800 border-purple-300",
+      [TicketStatus.WAREHOUSE_SHIPPING]: "bg-green-100 text-green-800 border-green-300",
+      [TicketStatus.COMPLETED]: "bg-green-100 text-green-800 border-green-300",
+      [TicketStatus.DELAYED]: "bg-amber-100 text-amber-800 border-amber-300",
+      [TicketStatus.UNREPAIRABLE]: "bg-red-100 text-red-800 border-red-300",
+      [TicketStatus.CANCELLED]: "bg-gray-100 text-gray-800 border-gray-300",
+      [TicketStatus.SCRAPPED]: "bg-gray-100 text-gray-800 border-gray-300",
+      [TicketStatus.RETURN_UNREPAIRED]: "bg-gray-100 text-gray-800 border-gray-300",
     }
 
-    const statusInfo = statusMap[normalizedStatus] || statusMap[TicketStatus.CREATED]
-
     return (
-      <Badge variant="outline" className={statusInfo.className}>
-        {statusInfo.label}
+      <Badge variant="outline" className={classNameMap[normalizedStatus] || "bg-muted text-muted-foreground border-border"}>
+        {TICKET_STATUS_LABELS[normalizedStatus]}
       </Badge>
     )
   }
@@ -1054,6 +1138,10 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                     IconComponent = DollarSign
                     iconColor = "text-orange-600"
                     bgColor = "bg-orange-100"
+                  } else if (log.type === OperationLogType.BUSINESS_REVIEW_SKIPPED) {
+                    IconComponent = CheckCircle
+                    iconColor = "text-slate-600"
+                    bgColor = "bg-slate-100"
                   } else if (log.type === OperationLogType.WAREHOUSE_SHIPPED) {
                     IconComponent = Download
                     iconColor = "text-teal-600"
@@ -1069,7 +1157,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                         <div className="flex items-center justify-between">
                           <p className="font-medium text-sm">{log.operator}</p>
                           <p className="text-xs text-muted-foreground">
-                            {format(new Date(log.time), "MM-dd HH:mm", { locale: zhCN })}
+                            {format(toBeijingTime(log.time), "MM-dd HH:mm", { locale: zhCN })}
                           </p>
                         </div>
                         <p className="text-sm text-muted-foreground">{log.description}</p>
@@ -1286,6 +1374,74 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
           </Card>
         )
       })()}
+
+      {/* 盖章件附件（所有人可见） */}
+      {batchInfo && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Download className="w-4 h-4" />
+                盖章件附件
+              </CardTitle>
+              <label className="cursor-pointer">
+                <input
+                  type="file"
+                  accept="image/*,application/pdf"
+                  className="hidden"
+                  disabled={isUploadingAttachment}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    if (file) handleUploadAttachment(file)
+                    e.target.value = ""
+                  }}
+                />
+                <span className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors">
+                  <Upload className="w-3.5 h-3.5" />
+                  {isUploadingAttachment ? "上传中..." : "上传附件"}
+                </span>
+              </label>
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">支持图片和 PDF，单文件最大 10MB</p>
+          </CardHeader>
+          <CardContent>
+            {stampAttachments.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-6">暂无附件，可上传盖章后的报告文件</p>
+            ) : (
+              <div className="space-y-2">
+                {stampAttachments.map((att) => (
+                  <div key={att.id} className="flex items-center justify-between p-3 rounded-md border bg-muted/30">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">{att.originalName}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {att.uploadedByName} · {(att.fileSize / 1024).toFixed(0)} KB · {new Date(att.createdAt).toLocaleString("zh-CN")}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 ml-3">
+                      <button
+                        onClick={() => handleDownloadAttachment(att.filePath, att.originalName)}
+                        className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded border hover:bg-muted transition-colors"
+                      >
+                        <Download className="w-3 h-3" />
+                        下载
+                      </button>
+                      <button
+                        onClick={() => handleDeleteAttachment(att.id)}
+                        className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded border border-destructive text-destructive hover:bg-destructive/10 transition-colors"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* 删除确认对话框 */}
       <Dialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>

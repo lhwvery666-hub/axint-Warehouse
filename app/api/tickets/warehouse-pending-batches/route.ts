@@ -38,7 +38,7 @@ export async function GET() {
           MAX(t1.ProjectName) as projectName,
           MAX(t1.ProjectLocation) as projectLocation,
           MAX(t1.Category) as category,
-          COUNT(*) as deviceCount,
+          SUM(COALESCE(Quantity, 1)) as deviceCount,
           MIN(t1.${DB_FIELDS.CREATED_AT}) as createdAt,
           MAX(t1.${DB_FIELDS.STATUS}) as status
         FROM Repair_Tickets t1

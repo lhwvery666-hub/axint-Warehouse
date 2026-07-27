@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, UserRole, TicketActionType, TicketStatus } from "@/lib/enums"
+import { DB_FIELDS, UserRole, TicketActionType, TicketStatus, normalizeTicketStatus } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // PUT /api/tickets/manufacture-date/[deviceId]
@@ -101,8 +101,10 @@ export async function PUT(
       TicketStatus.REJECTED_NO_RETURN,
     ])
 
+    // ⚠️ 用 normalizeTicketStatus 归一化后再比较，避免大小写/历史脏数据导致误判需要回退
+    const normalizedCurrentStatus = normalizeTicketStatus(currentStatus)
     let didRevert = false
-    if (batchId && currentStatus && !SKIP_REVERT_STATUSES.has(currentStatus)) {
+    if (batchId && normalizedCurrentStatus && !SKIP_REVERT_STATUSES.has(normalizedCurrentStatus)) {
       // 将该批次所有设备回退至 Warehouse_Confirming
       await pool
         .request()

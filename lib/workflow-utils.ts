@@ -109,7 +109,7 @@ export const AGGREGATED_STATUS_CONFIG: Record<
     description: "仓库已确认出厂日期，维修人员检测中"
   },
   [AggregatedStatus.IN_REPAIR]: {
-    label: "维修中",
+    label: "维修作业中",
     color: "yellow",
     icon: "🔧",
     description: "现场已签字确认，维修人员正在维修"
@@ -181,7 +181,7 @@ export const WORKFLOW_STEPS: WorkflowStep[] = [
   {
     role: UserRole.TECHNICIAN,
     status: TicketStatus.IN_REPAIR,
-    label: "维修中",
+    label: "维修检查中",
     requiredFields: ["faultPoint", "materialCode", "deviceName", "fullSpec"],
     optionalFields: ["supplierName"],
   },
@@ -324,10 +324,12 @@ export function isTerminalStatus(status: string): boolean {
 // 根据角色获取待处理的工单状态
 export function getPendingStatusesForRole(role: string): TicketStatus[] {
   const roleMap: Record<UserRole, TicketStatus[]> = {
-    [UserRole.TECHNICIAN]: [TicketStatus.CREATED, TicketStatus.IN_REPAIR, TicketStatus.PROCESSING, TicketStatus.DELAYED],
+    // ⚠️ 必须包含 WAREHOUSE_CONFIRMING，否则仪表盘"待处理"卡片计数（Created + Warehouse_Confirming）
+    // 与点击卡片后联动过滤出的列表会不一致（部分工单被误过滤掉）
+    [UserRole.TECHNICIAN]: [TicketStatus.CREATED, TicketStatus.WAREHOUSE_CONFIRMING, TicketStatus.IN_REPAIR, TicketStatus.PROCESSING, TicketStatus.DELAYED],
     [UserRole.ADMIN]: [TicketStatus.ADMIN_REVIEW],
     [UserRole.BUSINESS]: [TicketStatus.ADMIN_REVIEW],
-    [UserRole.WAREHOUSE]: [TicketStatus.PENDING_SHIPMENT, TicketStatus.RETURN_UNREPAIRED],
+    [UserRole.WAREHOUSE]: [TicketStatus.WAREHOUSE_CONFIRMING, TicketStatus.WAREHOUSE_SHIPPING, TicketStatus.PENDING_SHIPMENT, TicketStatus.RETURN_UNREPAIRED],
   };
 
   // 字符串角色先归一化到枚举
@@ -580,4 +582,59 @@ export function countByAggregatedStatus(tickets: TicketLike[]): Record<Aggregate
   });
 
   return counts;
+}
+
+// ==================== 动态时间筛选（阶段2） ====================
+/**
+ * 时间范围筛选的"目标时间池"。
+ * 列表页的时间范围筛选（今日/最近7天/自定义等）默认比较工单的上报时间（reportedAt/createdAt），
+ * 但当用户按状态筛选到"已完成"或"待发货"这类后置阶段时，比较上报时间已经没有业务意义
+ * （用户真正关心的是"什么时候完工的"/"什么时候商务审核通过的"），因此需要动态切换比较的时间字段。
+ */
+export type TimeFilterPool = "completed" | "shipping" | "base";
+
+/** 会命中"完工池"（比较 warehouseShippedAt）的筛选值：既支持原始 TicketStatus，也支持聚合 AggregatedStatus */
+const COMPLETED_POOL_FILTER_VALUES: string[] = [TicketStatus.COMPLETED, AggregatedStatus.COMPLETED];
+/** 会命中"商务池"（比较 businessReviewedAt）的筛选值：既支持原始 TicketStatus，也支持聚合 AggregatedStatus */
+const SHIPPING_POOL_FILTER_VALUES: string[] = [TicketStatus.WAREHOUSE_SHIPPING, AggregatedStatus.PENDING_SHIPPING];
+
+/**
+ * 根据列表页当前选中的状态筛选值，判断本次时间范围筛选应该落在哪个"时间池"。
+ * @param filterStatus 列表页状态筛选控件的当前值（"all"、TicketStatus 枚举值或 AggregatedStatus 枚举值均可）
+ */
+export function resolveTimeFilterPool(filterStatus: string | null | undefined): TimeFilterPool {
+  if (!filterStatus || filterStatus === "all") return "base";
+  if (COMPLETED_POOL_FILTER_VALUES.includes(filterStatus)) return "completed";
+  if (SHIPPING_POOL_FILTER_VALUES.includes(filterStatus)) return "shipping";
+  return "base";
+}
+
+/** 携带关键节点时间字段的工单形状（来自 /api/tickets 的透传字段） */
+export interface TicketMilestoneDates {
+  warehouseShippedAt?: string | null;
+  businessReviewedAt?: string | null;
+  updatedAt?: string | null;
+}
+
+/**
+ * 根据时间池，从工单上取出本次时间范围比较真正应该使用的日期字符串。
+ * - completed 池：优先 warehouseShippedAt，为空时降级 updatedAt，再降级基础日期（兼容旧数据/遗留路径未写入的情况）
+ * - shipping 池：优先 businessReviewedAt，为空时降级基础日期
+ * - base 池：直接使用基础日期（各列表页原有的 reportedAt/createdAt 逻辑不变）
+ * @param pool resolveTimeFilterPool() 的返回值
+ * @param task 工单对象（需包含 warehouseShippedAt/businessReviewedAt/updatedAt 中的至少一个，缺失时自动降级）
+ * @param baseDateStr 该列表页原有逻辑算出的基础比较日期（如 reportedAt）
+ */
+export function getTimeFilterTargetDate(
+  pool: TimeFilterPool,
+  task: TicketMilestoneDates | null | undefined,
+  baseDateStr: string | null | undefined
+): string | null {
+  if (pool === "completed") {
+    return task?.warehouseShippedAt || task?.updatedAt || baseDateStr || null;
+  }
+  if (pool === "shipping") {
+    return task?.businessReviewedAt || baseDateStr || null;
+  }
+  return baseDateStr || null;
 }

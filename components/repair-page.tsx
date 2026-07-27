@@ -12,14 +12,16 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Calendar as CalendarComponent } from "@/components/ui/calendar"
 import { format, isAfter, isBefore, parseISO, subDays, subMonths } from "date-fns"
 import { zhCN } from "date-fns/locale"
-import { cn } from "@/lib/utils"
+import { cn, toBeijingTime } from "@/lib/utils"
 import { useAuth } from "@/context/auth-context"
 import RepairForm from "@/components/repair-form"
 import RepairDetailWrapper from "@/components/repair-detail-wrapper"
 import { useRepairContext } from "@/context/RepairContext"
 import { TicketChat } from "@/components/TicketChat"
-import { UserRole, TicketStatus, normalizeTicketStatus, OperationLogType, OPERATION_LOG_TYPE_LABELS, isTerminalStatus } from "@/lib/enums"
+import { UserRole, TicketStatus, normalizeTicketStatus, OperationLogType, OPERATION_LOG_TYPE_LABELS, isTerminalStatus, TICKET_STATUS_LABELS } from "@/lib/enums"
 import { toast } from "sonner"
+import { WorkOrderListRow } from "@/components/work-order-list-row"
+import { resolveTimeFilterPool, getTimeFilterTargetDate } from "@/lib/workflow-utils"
 
 // ==================== 类型定义 ====================
 /**
@@ -156,7 +158,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
       expectedCompletionDate: repair.expectedCompletionDate,
       // 批次相关字段
       batchId: (repair as any).batchId || null,
-      projectName: (repair as any).projectName || repair.projectLocation || "",
+      projectName: (repair as any).projectName || repair.projectLocation || repair.location || "",
       contactInfo: (repair as any).contactInfo || "",
       rawData: repair, // 保存原始数据
     }));
@@ -208,61 +210,99 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
     setTasks(groupedTasks);
   }, [repairs, view]); // 当repairs或视图变化时重新获取数据
 
+  // ⚠️ 曾经的 bug：① CREATED 与 WAREHOUSE_CONFIRMING 被强行合并显示"待处理"；
+  // ② normalizeTicketStatus 返回的是规范枚举值（如 "Warehouse_Shipping"），但这里却拿小写字符串
+  // "pending_shipment"/"unrepairable"/"delayed" 去比较，永远不会命中，导致这些状态显示不出徽章；
+  // ③ 缺少 WAREHOUSE_CONFIRMED / TECHNICIAN_REPAIRING / PENDING_REPORTER_CONFIRM 分支。
+  // 修复：统一用 TICKET_STATUS_LABELS 取文案，覆盖全部状态，不再吞掉或误合并。
   const getStatusBadge = (status: string) => {
-    // 使用枚举进行状态匹配
     const normalizedStatus = normalizeTicketStatus(status)
-    
-    if (normalizedStatus === TicketStatus.CREATED || normalizedStatus === TicketStatus.WAREHOUSE_CONFIRMING) {
+    if (!normalizedStatus) return null
+    const label = TICKET_STATUS_LABELS[normalizedStatus]
+
+    if (normalizedStatus === TicketStatus.CREATED) {
       return (
         <Badge className="bg-warning/15 text-warning-foreground border-warning/30 hover:bg-warning/20">
           <Clock className="w-3 h-3 mr-1" />
-          待处理
+          {label}
+        </Badge>
+      )
+    } else if (normalizedStatus === TicketStatus.WAREHOUSE_CONFIRMING) {
+      return (
+        <Badge className="bg-orange-100 text-orange-800 border-orange-300 hover:bg-orange-200">
+          <Clock className="w-3 h-3 mr-1" />
+          {label}
+        </Badge>
+      )
+    } else if (normalizedStatus === TicketStatus.WAREHOUSE_CONFIRMED) {
+      return (
+        <Badge className="bg-teal-100 text-teal-800 border-teal-300 hover:bg-teal-200">
+          <CheckCircle className="w-3 h-3 mr-1" />
+          {label}
         </Badge>
       )
     } else if (normalizedStatus === TicketStatus.IN_REPAIR) {
       return (
         <Badge className="bg-primary/15 text-primary border-primary/30 hover:bg-primary/20">
           <Wrench className="w-3 h-3 mr-1" />
-          维修中
+          {label}
+        </Badge>
+      )
+    } else if (normalizedStatus === TicketStatus.PENDING_REPORTER_CONFIRM) {
+      return (
+        <Badge className="bg-cyan-100 text-cyan-800 border-cyan-300 hover:bg-cyan-200">
+          <AlertCircle className="w-3 h-3 mr-1" />
+          {label}
+        </Badge>
+      )
+    } else if (normalizedStatus === TicketStatus.TECHNICIAN_REPAIRING) {
+      return (
+        <Badge className="bg-indigo-100 text-indigo-800 border-indigo-300 hover:bg-indigo-200">
+          <Wrench className="w-3 h-3 mr-1" />
+          {label}
         </Badge>
       )
     } else if (normalizedStatus === TicketStatus.BUSINESS_REVIEW) {
       return (
         <Badge className="bg-blue-100 text-blue-800 border-blue-300 hover:bg-blue-200">
           <AlertCircle className="w-3 h-3 mr-1" />
-          待商务处理
+          {label}
         </Badge>
       )
-    } else if (normalizedStatus === "pending_shipment") {
+    } else if (normalizedStatus === TicketStatus.WAREHOUSE_SHIPPING) {
       return (
         <Badge className="bg-purple-100 text-purple-800 border-purple-300 hover:bg-purple-200">
           <AlertCircle className="w-3 h-3 mr-1" />
-          待发货
+          {label}
         </Badge>
       )
-    } else if (normalizedStatus === TicketStatus.COMPLETED.toLowerCase()) {
+    } else if (normalizedStatus === TicketStatus.COMPLETED) {
       return (
         <Badge className="bg-green-100 text-green-800 border-green-300 hover:bg-green-200">
-          <AlertCircle className="w-3 h-3 mr-1" />
-          已完成
+          <CheckCircle className="w-3 h-3 mr-1" />
+          {label}
         </Badge>
       )
-    } else if (normalizedStatus === "unrepairable") {
+    } else if (normalizedStatus === TicketStatus.UNREPAIRABLE) {
       return (
         <Badge className="bg-red-100 text-red-800 border-red-300 hover:bg-red-200">
           <AlertCircle className="w-3 h-3 mr-1" />
-          无法维修
+          {label}
         </Badge>
       )
-    } else if (normalizedStatus === "delayed") {
+    } else if (normalizedStatus === TicketStatus.DELAYED) {
       return (
         <Badge className="bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200 text-xs">
           <Clock className="w-3 h-3 mr-1" />
-          已延期
+          {label}
         </Badge>
       )
     } else {
-      return null;
+      return (
+        <Badge variant="outline" className="text-muted-foreground">
+          {label}
+        </Badge>
+      )
     }
   }
 
@@ -297,13 +337,20 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
   }
 
   // 根据时间范围过滤任务
+  // ⚠️ 阶段2：时间比较的靶向字段跟随状态筛选（filterStatus）动态切换：
+  // filterStatus === TicketStatus.COMPLETED（已完成）→ warehouseShippedAt（缺失时降级 updatedAt）；
+  // filterStatus === TicketStatus.WAREHOUSE_SHIPPING（待发货）→ businessReviewedAt；
+  // 其余状态 / "全部" → 保持原有的 reportedAt 基础逻辑。详见 lib/workflow-utils.ts。
   const filterTasksByTimeRange = (task: any) => {
     if (filterTimeRange === "all") return true;
     
     // 获取完整的reportedAt日期字符串，而不是只取时间部分
-    const fullReportDate = task.reportedAt.includes(" ") ? 
+    const baseReportDate = task.reportedAt.includes(" ") ? 
       task.reportedAt : 
       repairs.find(r => r.id === task.id)?.reportedAt || "";
+
+    const pool = resolveTimeFilterPool(filterStatus);
+    const fullReportDate = getTimeFilterTargetDate(pool, task.rawData, baseReportDate) || "";
     
     // 解析日期字符串为Date对象
     const taskDate = parseISO(fullReportDate.split(" ")[0]);
@@ -343,8 +390,11 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
       return true
     })
     .filter(task => 
+      // ⚠️ 修复：task.status 是 RepairContext 转换后的全小写状态（如 "completed"），
+      // 而下拉框的 filterStatus 是后端规范枚举值（如 "Completed"），两者大小写/命名不一致，
+      // 必须先用 normalizeTicketStatus 统一归一化后再比较，否则筛选永远不匹配
       filterStatus === "all" || 
-      task.status === filterStatus
+      normalizeTicketStatus(task.status) === filterStatus
     )
     .filter(filterTasksByTimeRange)
     .filter(task => {
@@ -410,8 +460,11 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                 >
                   <option value="all">全部状态</option>
                   <option value={TicketStatus.CREATED}>待处理</option>
-                  <option value={TicketStatus.IN_REPAIR}>维修中</option>
+                  <option value={TicketStatus.WAREHOUSE_CONFIRMING}>待仓库确认</option>
+                  <option value={TicketStatus.WAREHOUSE_CONFIRMED}>仓库已确认</option>
+                  <option value={TicketStatus.IN_REPAIR}>维修检查中</option>
                   <option value={TicketStatus.PENDING_REPORTER_CONFIRM}>待现场确认</option>
+                  <option value={TicketStatus.TECHNICIAN_REPAIRING}>维修作业中</option>
                   <option value={TicketStatus.BUSINESS_REVIEW}>待商务处理</option>
                   <option value={TicketStatus.WAREHOUSE_SHIPPING}>待发货</option>
                   <option value={TicketStatus.COMPLETED}>已完成</option>
@@ -521,163 +574,66 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
               </Card>
             </div>
 
-            {/* 任务列表 */}
-            <div className="space-y-4 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
+            {/* 任务列表 —— 紧凑列表模式 */}
+            <Card className="border-border/50 dark:border-border overflow-hidden">
               {filteredTasks.length > 0 ? (
-                filteredTasks.map((task) => (
-                  <Card
-                    key={task.id}
-                    className="border-border/50 dark:border-border hover:border-primary/50 dark:hover:border-primary/40 hover:shadow-lg transition-all cursor-pointer active:scale-[0.98] bg-card/50 dark:bg-card backdrop-blur-sm"
-                    onClick={() => {
-                      // 如果是批次工单，显示批次设备选择
-                      if (task.isBatch && task.devices && task.devices.length > 0) {
-                        // 设置批次上下文并切换到批次选择视图
-                        setCurrentBatchTask(task);
-                        setSelectedTaskId(null);
-                        setView("batchSelect");
-                      } else if (task.batchId) {
-                        // 如果是批次中的单个设备，跳转到批次详情页
-                        // 这样可以查看批次级别的聊天和签字凭证
-                        router.push(`/batch/${task.batchId}`);
-                      } else {
-                        handleViewTask(task.id);
-                      }
-                    }}
-                  >
-                    <CardContent className="p-5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-2 flex-wrap">
-                          {getPriorityIndicator(task.priority)}
-                          {/* 批次工单显示批次信息，单独工单显示工单号 */}
-                          <h3 className="font-semibold text-foreground truncate text-base">
-                            {task.isBatch ? (
-                              <>工单号：{task.batchId}</>
-                            ) : (
-                              <>工单号：{task.workOrderNumber || task.id}</>
-                            )}
-                          </h3>
-                          {/* 消息红点提示 - 仅批次工单，仅当有未读消息时显示 */}
-                          {task.isBatch && (() => {
-                            const unread = getUnreadCount(task.batchId, task.rawData?.messageCount || 0);
-                            if (unread <= 0) return null;
-                            return (
-                              <div className="relative inline-flex items-center">
-                                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                                </svg>
-                                <span className="absolute -top-1 -right-1 flex h-3 w-3">
-                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                                  <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500 text-[8px] font-bold text-white items-center justify-center">
-                                    {unread > 9 ? '9+' : unread}
-                                  </span>
-                                </span>
-                              </div>
-                            );
-                          })()}
-                          {/* 签字凭证图标 - 仅批次工单 */}
-                          {task.isBatch && task.rawData?.signedReportPhoto && (
-                            <div className="inline-flex items-center text-green-600" title="已上传签字凭证">
-                              <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                              </svg>
-                            </div>
-                          )}
-                          {task.inWarranty !== undefined && (
-                            task.inWarranty ? (
-                              <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 text-xs">
-                                <ShieldCheck className="w-3 h-3 mr-1" />
-                                保修内
-                              </Badge>
-                            ) : (
-                              <Badge variant="outline" className="bg-red-50 text-red-700 border-red-200 text-xs">
-                                <ShieldAlert className="w-3 h-3 mr-1" />
-                                过保修
-                              </Badge>
-                            )
-                          )}
-                        </div>
-                        
-                        {/* 批次工单显示项目信息和设备数量 */}
-                        {task.isBatch ? (
-                          <>
-                            <p className="text-sm text-muted-foreground mb-1">
-                              <span className="font-medium">项目：</span> {task.projectName || "未知项目"}
-                            </p>
-                            <p className="text-sm text-muted-foreground mb-2">
-                              <span className="font-medium">联系人：</span> {task.contactInfo || "无"}
-                            </p>
-                            <div className="flex items-center gap-2 text-sm bg-muted/30 dark:bg-muted/50 rounded-md p-2">
-                              <Package className="w-4 h-4 text-primary shrink-0" />
-                              <span className="font-medium text-primary">{task.deviceCount} 台设备</span>
-                            </div>
-                            {/* 显示设备序列号列表 */}
-                            <div className="mt-2 flex flex-wrap gap-1">
-                              {task.devices.slice(0, 3).map((device: any, idx: number) => (
-                                <Badge key={idx} variant="outline" className="text-xs">
-                                  {device.deviceSerialNumber}
-                                </Badge>
-                              ))}
-                              {task.devices.length > 3 && (
-                                <Badge variant="outline" className="text-xs">
-                                  +{task.devices.length - 3}
-                                </Badge>
-                              )}
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <p className="text-sm text-muted-foreground mb-2 truncate flex items-center gap-1">
-                              <span className="font-medium">序列号:</span> {task.deviceSerialNumber || "未知"}
-                            </p>
-                            <div className="flex items-start gap-2 text-sm bg-muted/30 dark:bg-muted/50 rounded-md p-2">
-                              <AlertCircle className="w-4 h-4 text-muted-foreground dark:text-muted-foreground mt-0.5 shrink-0" />
-                              <span className="text-muted-foreground dark:text-muted-foreground line-clamp-2">{task.fault}</span>
-                            </div>
-                          </>
-                        )}
-                        </div>
-                        <div className="flex flex-col items-end gap-2 shrink-0">
-                          {getStatusBadge(task.status)}
-                          <span className="text-xs text-muted-foreground whitespace-nowrap">{task.reportedAt}</span>
-                          {task.status === "delayed" && task.expectedCompletionDate && (
-                            <span className="text-[11px] text-amber-500 whitespace-nowrap">
-                              延期至 {format(new Date(task.expectedCompletionDate), "yyyy-MM-dd")}
-                            </span>
-                          )}
-                          {/* 待补录 SN 提示 - 最终维修状态下不显示 */}
-                          {(() => {
-                            // 特殊情况：最终维修状态下，序列号可以为空，不显示"待补录"
-                            const isTerminal = isTerminalStatus(task.status)
-                            const needsSupplement = !isTerminal && (
-                              !task.productSN || 
-                              (typeof task.productSN === 'string' && task.productSN.trim() === "") || 
-                              (typeof task.productSN === 'string' && task.productSN.toUpperCase() === "PENDING") ||
-                              (typeof task.deviceSerialNumber === 'string' && task.deviceSerialNumber?.toUpperCase() === "PENDING")
-                            )
-                            return needsSupplement ? (
-                              <span className="text-[11px] text-warning whitespace-nowrap">
-                                待补录 SN
-                              </span>
-                            ) : null
-                          })()}
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))
+                <div className="flex flex-col">
+                  {filteredTasks.map((task) => {
+                    const unread = task.isBatch ? getUnreadCount(task.batchId, task.rawData?.messageCount || 0) : 0
+                    const isTerminal = isTerminalStatus(task.status)
+                    const needsSupplement = !isTerminal && (
+                      !task.productSN ||
+                      (typeof task.productSN === 'string' && task.productSN.trim() === "") ||
+                      (typeof task.productSN === 'string' && task.productSN.toUpperCase() === "PENDING") ||
+                      (typeof task.deviceSerialNumber === 'string' && task.deviceSerialNumber?.toUpperCase() === "PENDING")
+                    )
+
+                    return (
+                      <WorkOrderListRow
+                        key={task.id}
+                        title={task.isBatch ? `工单号：${task.batchId}` : `工单号：${task.workOrderNumber || task.id}`}
+                        isBatch={task.isBatch}
+                        projectName={task.isBatch ? task.projectName : undefined}
+                        contactInfo={task.isBatch ? task.contactInfo : undefined}
+                        deviceCount={task.isBatch ? task.deviceCount : undefined}
+                        deviceSerials={task.isBatch && task.devices ? task.devices.map((d: any) => d.deviceSerialNumber) : undefined}
+                        faultText={task.fault}
+                        inWarranty={task.inWarranty}
+                        priorityIndicator={getPriorityIndicator(task.priority)}
+                        statusNode={getStatusBadge(task.status)}
+                        reportedAt={task.reportedAt}
+                        unreadCount={unread}
+                        hasSignedPhoto={task.isBatch && !!task.rawData?.signedReportPhoto}
+                        delayedText={
+                          task.status === "delayed" && task.expectedCompletionDate
+                            ? `延期至 ${format(new Date(task.expectedCompletionDate), "yyyy-MM-dd")}`
+                            : undefined
+                        }
+                        pendingSnText={needsSupplement ? "待补录 SN" : undefined}
+                        onClick={() => {
+                          // 只要有批次ID（不管是批次工单还是批次中的单个设备），都跳转到批次详情页
+                          // 与首页仪表盘保持一致，展示统一的工单详情页（阶段进度条、设备列表、盖章件、打印等）
+                          // 携带 from=repair，方便详情页"返回"时能回到维修工单列表而不是首页
+                          if (task.batchId) {
+                            router.push(`/batch/${task.batchId}?from=repair`);
+                          } else {
+                            handleViewTask(task.id);
+                          }
+                        }}
+                      />
+                    )
+                  })}
+                </div>
               ) : (
-                <Card className="md:col-span-2 border-dashed border-border/50 bg-muted/20">
-                  <CardContent className="p-8 text-center">
-                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
-                      <AlertCircle className="h-8 w-8 text-muted-foreground" />
-                    </div>
-                    <p className="text-muted-foreground font-medium">暂无维修任务</p>
-                    <p className="text-xs text-muted-foreground mt-1">请点击"新建维修"按钮添加维修任务</p>
-                  </CardContent>
-                </Card>
+                <CardContent className="p-8 text-center">
+                  <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
+                    <AlertCircle className="h-8 w-8 text-muted-foreground" />
+                  </div>
+                  <p className="text-muted-foreground font-medium">暂无维修任务</p>
+                  <p className="text-xs text-muted-foreground mt-1">请点击"新建维修"按钮添加维修任务</p>
+                </CardContent>
               )}
-            </div>
+            </Card>
           </div>
         </div>
       )}
@@ -831,6 +787,10 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                         IconComponent = DollarSign
                         iconColor = "text-orange-600"
                         bgColor = "bg-orange-100"
+                      } else if (log.type === OperationLogType.BUSINESS_REVIEW_SKIPPED) {
+                        IconComponent = CheckCircle
+                        iconColor = "text-slate-600"
+                        bgColor = "bg-slate-100"
                       } else if (log.type === OperationLogType.WAREHOUSE_SHIPPED) {
                         IconComponent = Download
                         iconColor = "text-teal-600"
@@ -846,7 +806,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                             <div className="flex items-center justify-between">
                               <p className="font-medium text-sm">{log.operator}</p>
                               <p className="text-xs text-muted-foreground">
-                                {format(new Date(log.time), "MM-dd HH:mm", { locale: zhCN })}
+                                {format(toBeijingTime(log.time), "MM-dd HH:mm", { locale: zhCN })}
                               </p>
                             </div>
                             <p className="text-sm text-muted-foreground">{log.description}</p>

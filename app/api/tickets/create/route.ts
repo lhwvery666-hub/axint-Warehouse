@@ -5,6 +5,7 @@ import { TicketStatus, SPECIAL_VALUES } from "@/lib/enums"; // ✅ Rule 4 — �
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
+import { generateSequentialBatchId } from "@/lib/batch-number";
 // POST /api/tickets/create
 // 现场人员提交报修：创建新的维修工单
 export async function POST(request: Request) {
@@ -170,6 +171,7 @@ export async function POST(request: Request) {
     const hasDamageImages = availableColumns.some((col: string) => col.toLowerCase() === "damageimages")
     const hasWarehouse = availableColumns.some((col: string) => col.toLowerCase() === "warehouse")
     const hasWorkOrderNumber = availableColumns.some((col: string) => col.toLowerCase() === "workordernumber")
+    const hasBatchId = availableColumns.some((col: string) => col.toLowerCase() === "batchid")
     
     // 兼容旧字段
     const hasContactName = availableColumns.some((col: string) => col.toLowerCase() === "contactname")
@@ -183,6 +185,12 @@ export async function POST(request: Request) {
     const hasReportByUserID = availableColumns.some((col: string) => col.toLowerCase() === "reportbyuserid" || col.toLowerCase() === "reportbyuserid")
 
     const reportTime = new Date().toISOString().slice(0, 19).replace("T", " ")
+
+    // ⚠️ 统一编号体系：本路由是遗留的单设备报修入口（与主流程 /api/tickets/batch 并存），
+    // 曾经完全没有 BatchId 概念。现在统一改为"单设备也是一个只有1台设备的批次"，
+    // 用同一套并发安全的顺序批次号生成器（WO+YYMMDD+0001），
+    // 避免系统里同时存在两套工单编号规则。
+    const batchId = hasBatchId ? await generateSequentialBatchId(pool) : null
 
     // ==========================================
     // 分支 1：暂缓验证流程 (PENDING)
@@ -236,6 +244,7 @@ export async function POST(request: Request) {
       if (hasQuantity) { insertPending += `, Quantity`; valuesPending += `, @quantity`; requestPending.input("quantity", quantity) }
       if (hasProductSn) { insertPending += `, ProductSN`; valuesPending += `, @productSn`; requestPending.input("productSn", "PENDING") }
       if (hasWorkOrderNumber) { insertPending += `, WorkOrderNumber`; valuesPending += `, @workOrderNumber`; requestPending.input("workOrderNumber", workOrderNumber) }
+      if (hasBatchId && batchId) { insertPending += `, BatchId`; valuesPending += `, @batchId`; requestPending.input("batchId", batchId) }
       // 注意：FaultDescription 已经在基础字段中，不需要重复添加
       
       // 兼容旧字段
@@ -377,6 +386,7 @@ export async function POST(request: Request) {
     if (hasQuantity) { insertQuery += `, Quantity`; valuesQuery += `, @quantity`; requestNormal.input("quantity", quantity) }
     if (hasProductSn) { insertQuery += `, ProductSN`; valuesQuery += `, @productSn`; requestNormal.input("productSn", deviceSn) } // 正常流程存真实SN
     if (hasWorkOrderNumber) { insertQuery += `, WorkOrderNumber`; valuesQuery += `, @workOrderNumber`; requestNormal.input("workOrderNumber", workOrderNumber) }
+    if (hasBatchId && batchId) { insertQuery += `, BatchId`; valuesQuery += `, @batchId`; requestNormal.input("batchId", batchId) }
     // 注意：FaultDescription 已经在基础字段中，不需要重复添加
     
     // 兼容旧字段

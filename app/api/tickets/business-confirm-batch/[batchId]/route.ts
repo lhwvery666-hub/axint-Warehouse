@@ -27,13 +27,8 @@ export async function POST(
       )
     }
 
-    // 如果收费，必须确认收款
-    if (isChargeable && !isPaymentReceived) {
-      return NextResponse.json(
-        { success: false, message: "收费项目必须确认收款" },
-        { status: 400 }
-      )
-    }
+    // ⚠️ 任务3：发货授权与收款/开票解耦——不再因"收费但未收款"而硬阻断状态推进。
+    // 商务可以先授权发货让货物走起来，未结清的收款/开票留给"财务跟进"视图持续处理。
 
     // 验证用户权限
     const cookieStore = await cookies()

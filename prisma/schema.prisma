@@ -158,6 +158,13 @@ model Repair_Tickets {
   /// 处理说明（维修过程与方案描述）
   RepairNotes            String?  @map("RepairNotes")            @db.NVarChar(Max)
 
+  // ── 补齐 Schema 漂移：以下字段实际存在于数据库并被多处 API 通过原生 SQL 读写，
+  //    此前未在本文件声明，导致 schema.prisma 与真实数据库结构不一致 ──
+  /// 报修时间（现场人员提交工单的时间，与行创建时间 CreatedAt 语义不同，允许补录/回溯）
+  ReportTime  DateTime?
+  /// 到货日期（仓库确认时填写，设备实际抵达仓库的日期）
+  ArrivalDate DateTime?
+
   @@map("Repair_Tickets")
 }
 

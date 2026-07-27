@@ -31,7 +31,7 @@ import { useNotificationContext } from "@/context/NotificationContext"
 import { useAuth } from "@/context/auth-context"
 import WorkflowProgress from "@/components/workflow-progress"
 import { calculateProgress, getCurrentStep, getNextStep, STATUS_TRANSITIONS } from "@/lib/workflow-utils"
-import { UserRole, TicketStatus, normalizeTicketStatus, TERMINAL_STATUSES, WarrantyStatus, FaultCategory, RepairAction, REPAIR_ACTION_LABELS, FinalOutcome, FINAL_OUTCOME_LABELS } from "@/lib/enums"
+import { UserRole, TicketStatus, normalizeTicketStatus, TERMINAL_STATUSES, WarrantyStatus, FaultCategory, RepairAction, REPAIR_ACTION_LABELS, FinalOutcome, FINAL_OUTCOME_LABELS, TICKET_STATUS_LABELS, isPendingSNPlaceholder } from "@/lib/enums"
 import TicketActionBar from "@/components/ticket-action-bar"
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -169,6 +169,9 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
   // 维修报告已提交后，是否允许重新编辑（点击"修改报告"后置为 true）
   const [isEditingRepairAfterSubmit, setIsEditingRepairAfterSubmit] = useState(false)
   const [isLoadingFullSpec, setIsLoadingFullSpec] = useState(false)
+
+  // 工作台板块展开状态（受控），用于在提示中引导用户跳转到对应板块（如"产品序列号"补录）
+  const [openWorkbenchPanels, setOpenWorkbenchPanels] = useState<string[]>([])
 
   // 补录 SN 相关状态
   const [isSupplementSNDialogOpen, setIsSupplementSNDialogOpen] = useState(false)
@@ -563,10 +566,8 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
   const isTerminalStatus = normalizedStatus ? TERMINAL_STATUSES.includes(normalizedStatus) : false
   
   const needsSupplementSN = !isTerminalStatus && (
-    !repairData.productSN || 
-    (typeof repairData.productSN === 'string' && repairData.productSN.trim() === "") || 
-    (typeof repairData.productSN === 'string' && repairData.productSN.toUpperCase() === "PENDING") ||
-    (typeof repairData.deviceSerialNumber === 'string' && repairData.deviceSerialNumber.toUpperCase() === "PENDING")
+    isPendingSNPlaceholder(repairData.productSN as string | null | undefined) ||
+    isPendingSNPlaceholder(repairData.deviceSerialNumber as string | null | undefined)
   )
 
   // 处理补录 SN
@@ -1396,15 +1397,23 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
     if (statusLower === "cancelled" || status === "Cancelled") {
       return <Badge variant="outline" className="bg-gray-50 text-gray-700 border-gray-300">已取消</Badge>
     }
+    // ⚠️ 曾经的 bug：WAREHOUSE_CONFIRMING 被强行并入 CREATED 显示"待处理"，
+    // 且缺少 PENDING_REPORTER_CONFIRM / TECHNICIAN_REPAIRING 分支。
+    // 修复：拆分独立展示，未覆盖到的状态统一用 TICKET_STATUS_LABELS 兜底（而不是固定显示"待处理"/"未知状态"）。
     const normalizedStatus = normalizeTicketStatus(status)
     switch (normalizedStatus) {
       case TicketStatus.CREATED:
-      case TicketStatus.WAREHOUSE_CONFIRMING:
         return <Badge className="bg-warning/15 text-warning-foreground border-warning/30">待处理</Badge>
+      case TicketStatus.WAREHOUSE_CONFIRMING:
+        return <Badge className="bg-orange-100 text-orange-800 border-orange-300">待仓库确认</Badge>
       case TicketStatus.WAREHOUSE_CONFIRMED:
         return <Badge className="bg-emerald-100 text-emerald-800 border-emerald-300">仓库已确认</Badge>
       case TicketStatus.IN_REPAIR:
-        return <Badge className="bg-primary/15 text-primary border-primary/30">维修中</Badge>
+        return <Badge className="bg-primary/15 text-primary border-primary/30">维修检查中</Badge>
+      case TicketStatus.PENDING_REPORTER_CONFIRM:
+        return <Badge className="bg-cyan-100 text-cyan-800 border-cyan-300">待现场确认</Badge>
+      case TicketStatus.TECHNICIAN_REPAIRING:
+        return <Badge className="bg-indigo-100 text-indigo-800 border-indigo-300">维修作业中</Badge>
       case TicketStatus.BUSINESS_REVIEW:
         return <Badge className="bg-blue-100 text-blue-800 border-blue-300">待商务处理</Badge>
       case TicketStatus.WAREHOUSE_SHIPPING:
@@ -1416,7 +1425,9 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
       case TicketStatus.UNREPAIRABLE:
         return <Badge className="bg-red-100 text-red-800 border-red-300">无法维修</Badge>
       default:
-        return <Badge className="bg-muted text-muted-foreground border-border">未知状态</Badge>
+        return normalizedStatus
+          ? <Badge className="bg-muted text-muted-foreground border-border">{TICKET_STATUS_LABELS[normalizedStatus]}</Badge>
+          : <Badge className="bg-muted text-muted-foreground border-border">未知状态</Badge>
     }
   }
 
@@ -1520,9 +1531,9 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
           
           <TabsContent value="workbench" className="mt-6 space-y-4">
             {/* 4个工作台板块 */}
-            <Accordion type="multiple" defaultValue={[]} className="w-full">
+            <Accordion type="multiple" value={openWorkbenchPanels} onValueChange={setOpenWorkbenchPanels} className="w-full">
               {/* 板块1：现场报告（基础信息） */}
-              <AccordionItem value="panel1">
+              <AccordionItem value="panel1" id="panel1-anchor">
                 <AccordionTrigger className="text-base font-semibold">
                   <div className="flex items-center gap-2">
                     <FileText className="h-5 w-5" />
@@ -1722,17 +1733,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                         (user?.role === UserRole.ADMIN || 
                          repairData.cancelRequestStatus === "Pending" ||
                          repairData.status === TicketStatus.COMPLETED ||
-                        // 仅在 Created / Warehouse_Confirming 两个状态下锁定维修工作台（仓库确认前）。
-                        // 返厂状态（PENDING_FACTORY / FACTORY_FINISHED）不属于仓库确认流程，不在此集合中。
-                        (user?.role === UserRole.TECHNICIAN && 
-                         (() => {
-                           const ns = normalizeTicketStatus(repairData.status || "")
-                           const WAREHOUSE_LOCK_STATUSES = new Set<TicketStatus | null>([
-                             TicketStatus.CREATED,
-                             TicketStatus.WAREHOUSE_CONFIRMING,
-                           ])
-                           return WAREHOUSE_LOCK_STATUSES.has(ns)
-                         })()) ||
                         // 维修报告已提交（Pending_Reporter_Confirm）且未进入二次编辑模式时，工作台只读
                         (user?.role === UserRole.TECHNICIAN &&
                          normalizeTicketStatus(repairData.status || "") === TicketStatus.PENDING_REPORTER_CONFIRM &&
@@ -1743,41 +1743,26 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                          normalizeTicketStatus(repairData.status || "") === TicketStatus.TECHNICIAN_REPAIRING)
                         ) && "pointer-events-none opacity-75"
                       )}>
-                        {/* 等待仓库确认的提示（仅维修人员看到） */}
-                        {/* 仅 Created / Warehouse_Confirming 会显示此 Alert。                           */}
-                        {/* 返厂状态（PENDING_FACTORY / FACTORY_FINISHED）不在集合内，永不触发。 */}
-                        {(() => {
-                          const normalizedStatus = normalizeTicketStatus(repairData.status || "")
-                          const WAREHOUSE_LOCK_STATUSES = new Set<TicketStatus | null>([
-                            TicketStatus.CREATED,
-                            TicketStatus.WAREHOUSE_CONFIRMING,
-                          ])
-                          const shouldLock = user?.role === UserRole.TECHNICIAN &&
-                            WAREHOUSE_LOCK_STATUSES.has(normalizedStatus)
-                          
-                          if (user?.role === UserRole.TECHNICIAN) {
-                            console.log("[维修工作台] 状态检查:", {
-                              原始状态: repairData.status,
-                              规范化状态: normalizedStatus,
-                              应该锁定: shouldLock,
-                            })
-                          }
-                          
-                          return shouldLock
-                        })() && (
+                        {/* SN 码非强制项软提醒：不阻塞表单编辑，仅提示核实。
+                            部分易耗品本身没有 SN 码，绝不能因为序列号"待补录/待验证"而锁死"物料与费用"等表单。 */}
+                        {needsSupplementSN && (
                           <Alert className="mb-4 border-yellow-300 bg-yellow-50 pointer-events-auto">
                             <AlertCircle className="h-4 w-4 text-yellow-600" />
                             <AlertDescription className="text-yellow-800">
-                              <p className="font-semibold mb-1">等待仓库确认</p>
-                              {normalizeTicketStatus(repairData.status || "") === TicketStatus.WAREHOUSE_CONFIRMING ? (
-                                <p className="text-sm">
-                                  设备序列号或型号已变更，需要仓库管理员重新确认设备信息。请通知仓库管理员在「仓库管理工作台 → 待确认批次」中刷新并重新确认此批次。
-                                </p>
-                              ) : (
-                                <p className="text-sm">
-                                  此工单尚未经过仓库管理员确认，维修工作台暂时锁定。请等待仓库管理员在「待确认批次」中确认设备信息并填写出厂日期后，再进行后续操作。
-                                </p>
-                              )}
+                              <p className="text-sm">
+                                当前设备未录入SN码，如果是核心设备请确认是否需要补录；若是无码易耗品可忽略此提示并继续正常维修。
+                              </p>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="mt-2 border-yellow-400 text-yellow-800 hover:bg-yellow-100"
+                                onClick={() => {
+                                  setOpenWorkbenchPanels(prev => prev.includes("panel1") ? prev : [...prev, "panel1"])
+                                  document.getElementById("panel1-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" })
+                                }}
+                              >
+                                去补录序列号（可选）
+                              </Button>
                             </AlertDescription>
                           </Alert>
                         )}

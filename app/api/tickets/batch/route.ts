@@ -5,6 +5,7 @@ import { cookies } from "next/headers";
 import { TicketStatus, DB_FIELDS, TicketActionType } from "@/lib/enums";
 import { API_DEBUG_MESSAGES, API_ERROR_MESSAGES, API_SUCCESS_MESSAGES } from "@/lib/api-messages";
 import { prisma } from "@/lib/prisma";
+import { generateSequentialBatchId } from "@/lib/batch-number";
 
 // ==================== 类型定义 ====================
 
@@ -69,9 +70,12 @@ export async function POST(request: Request) {
     }
 
     // ✅ 防呆校验：拦截同一批次内的重复序列号
+    // 注意：PENDING_VERIFY / PENDING 是"标签磨损/无法辨识"的特殊占位值，
+    // 多台设备同时无法辨识属于正常情况，必须从查重范围中排除。
+    const PENDING_PLACEHOLDERS = ["PENDING_VERIFY", "PENDING", "待验证"];
     const submittedSNs: string[] = items
       .map((item) => (item.deviceSn ?? "").trim())
-      .filter((sn) => sn !== "");
+      .filter((sn) => sn !== "" && !PENDING_PLACEHOLDERS.includes(sn));
 
     const duplicateSNs = submittedSNs.filter(
       (sn, index) => submittedSNs.indexOf(sn) !== index
@@ -102,12 +106,13 @@ export async function POST(request: Request) {
 
     // ── 准备工作 ──────────────────────────────────────────────────
 
-    const now = new Date();
-    const dateStr = now.toISOString().slice(2, 10).replace(/-/g, ''); // YYMMDD
-    const timeStr = now.getTime().toString().slice(-4);
-    const batchId = `WO${dateStr}${timeStr}`;
-
     const pool = await getDbConnection();
+
+    // ⚠️ 曾经的实现：用当前时间戳后4位拼接批次号（WO+YYMMDD+时间戳后4位），
+    // 后缀每10秒循环一次，同一天内并发创建极易撞号，且无数据库层唯一约束兜底。
+    // 修复：改用并发安全的顺序批次号生成器（sp_getapplock + 独立序列表原子自增），
+    // 格式不变为 WO+YYMMDD+0001，保证同一天内绝对不重复、按创建顺序递增。
+    const batchId = await generateSequentialBatchId(pool);
 
     // 动态检查表结构（读取操作，事务外执行）
     const columnsResult = await pool.request().query(`

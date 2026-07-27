@@ -44,7 +44,7 @@ export async function GET(request: Request) {
         ReportTime,
         SubmitDate,
         ContactInfo,
-        ProjectName,
+        COALESCE(NULLIF(ProjectLocation,''), NULLIF(ProjectName,''), NULLIF(ClientName,''), '') AS ProjectName,
         Category,
         ModelName,
         Quantity,
@@ -69,7 +69,11 @@ export async function GET(request: Request) {
         ReturnTrackingNum,
         Status,
         WarrantyStatus,
-        RepairResult
+        RepairResult,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_NAME = 'Repair_Tickets' AND COLUMN_NAME = 'ArrivalDate'
+        ) THEN ArrivalDate ELSE NULL END AS ArrivalDate
       FROM Repair_Tickets
       ${whereClause}
       ORDER BY ReportTime DESC
@@ -130,6 +134,7 @@ export async function GET(request: Request) {
         
         // 仓库管理员
         '收到日期',
+        '到货日期',
         '出厂日期',
         '返还客户日期',
         '返还客户数量',
@@ -188,6 +193,7 @@ function createExportRow(ticket: any, serialNumber: string, quantity: number): a
     
     // 仓库管理员
     formatDate(ticket.ReceivedDate),
+    formatDateCST(ticket.ArrivalDate),
     formatDate(ticket.FactoryShipDate),
     formatDate(ticket.ReturnDate),
     ticket.ReturnQuantity || '',
@@ -196,11 +202,22 @@ function createExportRow(ticket: any, serialNumber: string, quantity: number): a
 }
 
 /**
- * 格式化日期
+ * 格式化日期（UTC）
  */
 function formatDate(date: any): string {
   if (!date) return '';
   const d = new Date(date);
   if (isNaN(d.getTime())) return '';
   return d.toISOString().split('T')[0];
+}
+
+/**
+ * 格式化日期（东八区，避免时区偏差）
+ */
+function formatDateCST(date: any): string {
+  if (!date) return '';
+  const d = new Date(date);
+  if (isNaN(d.getTime())) return '';
+  const cst = new Date(d.getTime() + 8 * 60 * 60 * 1000);
+  return cst.toISOString().split('T')[0];
 }

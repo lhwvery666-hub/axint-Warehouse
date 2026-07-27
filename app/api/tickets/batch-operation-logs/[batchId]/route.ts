@@ -244,6 +244,8 @@ export async function GET(
           return OperationLogType.TECHNICIAN_COMPLETED
         case TicketActionType.BUSINESS_REVIEWED:
           return OperationLogType.BUSINESS_REVIEWED
+        case TicketActionType.BUSINESS_REVIEW_SKIPPED:
+          return OperationLogType.BUSINESS_REVIEW_SKIPPED
         case TicketActionType.WAREHOUSE_SHIPPED:
           return OperationLogType.WAREHOUSE_SHIPPED
         // 兼容旧数据（STATUS_CHANGE 曾被仓库确认复用）

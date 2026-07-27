@@ -26,6 +26,13 @@ interface TicketDbRow {
   Problem: string | null
   CustomerName: string | null
   SignedReportPhoto: string | null
+  Quantity: number | null
+  // ── 关键节点时间字段（用于前端时间范围筛选按状态维度动态切换） ──
+  WarehouseShippedAt: Date | string | null
+  BusinessReviewedAt: Date | string | null
+  TechnicianCompletedAt: Date | string | null
+  // ── 通用更新时间（completed 池在 WarehouseShippedAt 缺失时的降级兜底） ──
+  UpdatedAt: Date | string | null
 }
 
 interface DeviceInfoRow {
@@ -70,6 +77,12 @@ interface MappedTicket {
   customerName: string
   signedReportPhoto: string | null
   messageCount: number
+  quantity: number
+  // ── 关键节点时间字段（ISO 字符串，可为空） ──
+  warehouseShippedAt: string | null
+  businessReviewedAt: string | null
+  technicianCompletedAt: string | null
+  updatedAt: string | null
 }
 
 // GET /api/tickets
@@ -119,7 +132,9 @@ export async function GET() {
           FaultDescription: null, ReportByUserID: null, CourierCompany: null,
           CourierNumber: null, Status: null, ReportTime: null, ProductSN: null,
           WorkOrderNumber: null, BatchId: null, ContactInfo: null, SenderAddress: null,
-          Problem: null, CustomerName: null, SignedReportPhoto: null,
+          Problem: null, CustomerName: null, SignedReportPhoto: null, Quantity: null,
+          WarehouseShippedAt: null, BusinessReviewedAt: null, TechnicianCompletedAt: null,
+          UpdatedAt: null,
         }
 
         if (idx < 3) {
@@ -128,7 +143,10 @@ export async function GET() {
 
         actualColumns.forEach((actualCol: string) => {
           const lowerCol = actualCol.toLowerCase()
-          if (lowerCol === 'id' || lowerCol === 'ticketid' || lowerCol === 'repair_ticket_id') {
+          // ⚠️ 只匹配 'id' 和 'repair_ticket_id'，严禁包含 'ticketid'。
+          // 表中 TicketId(NVarChar, 可空) 和 Id(INT 主键) 是两个不同字段，
+          // 若把 ticketid 也映射到 mapped.Id，TicketId 为 null 时会将主键覆盖为 null。
+          if (lowerCol === 'id' || lowerCol === 'repair_ticket_id') {
             mapped.Id = (row[actualCol] as number | string | null) ?? null
             if (idx < 3) console.log(`🔍 映射 Id: actualCol="${actualCol}", mapped.Id=${mapped.Id}`)
           } else if (lowerCol === 'devicesn' || lowerCol === 'device_sn') {
@@ -165,6 +183,16 @@ export async function GET() {
             mapped.CustomerName = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'signedreportphoto' || lowerCol === 'signed_report_photo') {
             mapped.SignedReportPhoto = (row[actualCol] as string | null) ?? null
+          } else if (lowerCol === 'quantity') {
+            mapped.Quantity = row[actualCol] != null ? Number(row[actualCol]) : null
+          } else if (lowerCol === 'warehouseshippedat') {
+            mapped.WarehouseShippedAt = (row[actualCol] as Date | string | null) ?? null
+          } else if (lowerCol === 'businessreviewedat') {
+            mapped.BusinessReviewedAt = (row[actualCol] as Date | string | null) ?? null
+          } else if (lowerCol === 'techniciancompletedat') {
+            mapped.TechnicianCompletedAt = (row[actualCol] as Date | string | null) ?? null
+          } else if (lowerCol === 'updatedat') {
+            mapped.UpdatedAt = (row[actualCol] as Date | string | null) ?? null
           }
         })
 
@@ -364,6 +392,11 @@ export async function GET() {
         senderAddress: row.SenderAddress ?? "",
         customerName: row.CustomerName ?? "",
         signedReportPhoto: row.SignedReportPhoto ?? null,
+        quantity: row.Quantity ?? 1,
+        warehouseShippedAt: row.WarehouseShippedAt ? new Date(row.WarehouseShippedAt as string).toISOString() : null,
+        businessReviewedAt: row.BusinessReviewedAt ? new Date(row.BusinessReviewedAt as string).toISOString() : null,
+        technicianCompletedAt: row.TechnicianCompletedAt ? new Date(row.TechnicianCompletedAt as string).toISOString() : null,
+        updatedAt: row.UpdatedAt ? new Date(row.UpdatedAt as string).toISOString() : null,
         messageCount: 0, // 将在下方填充
       }
     })

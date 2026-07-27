@@ -38,7 +38,7 @@ export function RepairStatusTimeline({ currentStatus, className }: RepairStatusT
     },
     {
       key: TicketStatus.IN_REPAIR,
-      label: "维修检查",
+      label: "维修检查中",
       description: "检查并填报告"
     },
     {
@@ -48,8 +48,8 @@ export function RepairStatusTimeline({ currentStatus, className }: RepairStatusT
     },
     {
       key: TicketStatus.TECHNICIAN_REPAIRING,
-      label: "维修中",
-      description: "维修人员维修"
+      label: "维修作业中",
+      description: "维修人员实际维修"
     },
     {
       key: TicketStatus.BUSINESS_REVIEW,

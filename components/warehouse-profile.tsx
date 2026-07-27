@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { TicketStatus, normalizeTicketStatus } from "@/lib/enums"
 import {
   User, Phone, Save, Edit2, LogOut, Loader2,
   Package, CheckCircle, Clock, Truck, Settings, Moon, Sun,
@@ -57,12 +58,16 @@ export default function WarehouseProfile() {
         const pendingBatches: unknown[] = pendingJson?.data ?? []
         const completedBatches: unknown[] = completedJson?.data ?? []
 
+        // ⚠️ 曾经的 bug：这里用全大写 "WAREHOUSE_CONFIRMING"/"WAREHOUSE_SHIPPING" 与实际枚举值
+        // "Warehouse_Confirming"/"Warehouse_Shipping" 比较，大小写不一致导致永远匹配不上，统计始终为 0。
+        // 修复：统一用 normalizeTicketStatus 归一化后再比较。
         setStats({
-          pendingConfirm: (pendingBatches as { status?: string }[]).filter(
-            (b) => b.status === "WAREHOUSE_CONFIRMING" || b.status === "Created",
-          ).length,
+          pendingConfirm: (pendingBatches as { status?: string }[]).filter((b) => {
+            const s = normalizeTicketStatus(b.status)
+            return s === TicketStatus.WAREHOUSE_CONFIRMING || s === TicketStatus.CREATED
+          }).length,
           pendingShip: (pendingBatches as { status?: string }[]).filter(
-            (b) => b.status === "WAREHOUSE_SHIPPING",
+            (b) => normalizeTicketStatus(b.status) === TicketStatus.WAREHOUSE_SHIPPING,
           ).length,
           totalConfirmed: completedBatches.length,
           totalShipped: completedBatches.length,

@@ -25,3 +25,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 运行时用户上传内容（签字照片/损坏照片等），属于业务数据不属于源代码，不入库
+/public/uploads/
+
+# 本地打包产物（部署 zip 包，体积大且是编译产物）
+/update-*.zip
+/update-*/

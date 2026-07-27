@@ -35,8 +35,10 @@ export async function getCurrentUserRole(): Promise<{
         // 补充设置 userRole cookie
         cookieStore.set("userRole", userRole || "", {
           httpOnly: true,
-          secure: process.env.NODE_ENV === "production",
+          secure: false,
           sameSite: "lax",
+          maxAge: 60 * 60 * 24,
+          path: "/",
         })
         console.log(`[Auth Utils] ✅ 已从数据库补充 userRole: "${userRole}"`)
       } else {
@@ -99,7 +101,7 @@ export async function checkUserRole(
  * 判断是否是 NextResponse（错误响应）
  */
 export function isErrorResponse(
-  result: any
+  result: unknown
 ): result is NextResponse {
   return result instanceof NextResponse
 }

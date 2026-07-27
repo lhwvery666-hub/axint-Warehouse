@@ -85,26 +85,26 @@ export async function POST(request: Request) {
       )
     }
 
-    // 设置 session cookie（存储用户ID和角色）
-    // 使用会话 cookie，关闭浏览器后自动失效，需要重新登录
+    // 设置持久化 cookie（24小时有效期）
+    // secure: false — 内网 HTTP 部署，Secure 标志会导致浏览器在非 HTTPS 下拒绝存储 cookie
+    const COOKIE_MAX_AGE = 60 * 60 * 24 // 24 小时（秒）
     const cookieStore = await cookies()
     cookieStore.set("userId", row.UserID.toString(), {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: false,
       sameSite: "lax",
-      // 不设置 maxAge，使用会话 cookie（关闭浏览器后失效）
-      // 如果需要"记住我"功能，可以添加 maxAge: 60 * 60 * 24 * 7 (7天)
+      maxAge: COOKIE_MAX_AGE,
+      path: "/",
     })
     
-    // 设置用户角色 cookie，用于权限验证
     cookieStore.set("userRole", row.Role || "", {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: false,
       sameSite: "lax",
+      maxAge: COOKIE_MAX_AGE,
+      path: "/",
     })
 
-    // 兼容依赖 "user" JSON cookie 的新接口（如 /api/upload、workflow-action）
-    // 结构：{ id, username, realName, role }，后续通过 normalizeUserRole 进行规范化
     const userPayload = {
       id: row.UserID.toString(),
       username: row.Username,
@@ -113,8 +113,10 @@ export async function POST(request: Request) {
     }
     cookieStore.set("user", JSON.stringify(userPayload), {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: false,
       sameSite: "lax",
+      maxAge: COOKIE_MAX_AGE,
+      path: "/",
     })
 
     return NextResponse.json({

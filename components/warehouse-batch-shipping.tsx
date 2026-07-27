@@ -22,9 +22,10 @@ import {
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
 import { format } from "date-fns"
 import { zhCN } from "date-fns/locale"
+import { toBeijingTime } from "@/lib/utils"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import { TicketStatus, TICKET_STATUS_LABELS, normalizeTicketStatus, UserRole, OperationLogType } from "@/lib/enums"
+import { TicketStatus, TICKET_STATUS_LABELS, normalizeTicketStatus, UserRole, OperationLogType, REPAIR_ACTION_LABELS, RepairAction, FINAL_OUTCOME_LABELS, FinalOutcome } from "@/lib/enums"
 import { TicketChat } from "@/components/TicketChat"
 import { useAuth } from "@/context/auth-context"
 
@@ -38,6 +39,9 @@ interface Device {
   deviceImages?: string | null   // 现场上传的设备图片（JSON数组或逗号分隔路径）
   problem?: string | null        // 故障描述
   faultPoint?: string | null     // 故障点
+  repairAction?: string | null   // 维修处理方式
+  finalOutcome?: string | null   // 最终处置结果
+  quantity?: number              // 设备数量
 }
 
 interface BatchInfo {
@@ -49,6 +53,10 @@ interface BatchInfo {
   category: string
   subCategory: string
   status: string
+  trackingNumber?: string
+  expressCompany?: string
+  factoryTrackingNum?: string | null
+  factoryShipDate?: string | null
 }
 
 interface WarehouseBatchShippingProps {
@@ -80,6 +88,10 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
   const [isSavingDates, setIsSavingDates] = useState(false)
   const [manufactureDates, setManufactureDates] = useState<Record<string, Date | null>>({})
 
+  // ── 返厂快递信息 ──────────────────────────────────────────────────────────────
+  const [factoryTrackingInput, setFactoryTrackingInput] = useState("")
+  const [isSavingFactoryTracking, setIsSavingFactoryTracking] = useState(false)
+
   // ── 双轨独立编辑模式 ──────────────────────────────────────────────────────────
   // isEditShippingMode: 控制"发货方式"表单的编辑（可能回退状态至 WAREHOUSE_SHIPPING）
   const [isEditShippingMode, setIsEditShippingMode] = useState(false)
@@ -106,7 +118,8 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
 
       setBatchInfo(result.data.batchInfo)
       setDevices(result.data.devices)
-      setReturnQuantity(result.data.devices.length.toString())
+      setReturnQuantity(result.data.batchInfo.deviceCount.toString())
+      setFactoryTrackingInput(result.data.batchInfo.factoryTrackingNum || "")
       
       // 初始化出厂日期
       const dates: Record<string, Date | null> = {}
@@ -147,6 +160,33 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
       }
     } catch (err: any) {
       console.error("获取操作记录失败:", err)
+    }
+  }
+
+  // ── 保存返厂快递单号 ──────────────────────────────────────────────────────────
+  const handleSaveFactoryTracking = async () => {
+    if (!factoryTrackingInput.trim()) {
+      toast.error("请填写返厂快递单号")
+      return
+    }
+    setIsSavingFactoryTracking(true)
+    try {
+      const response = await fetch(`/api/tickets/factory-tracking/${batchId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ factoryTrackingNum: factoryTrackingInput.trim(), factoryShipDate: new Date().toISOString() }),
+      })
+      const result = await response.json()
+      if (result.success) {
+        toast.success("返厂快递单号已保存")
+        await fetchBatchData()
+      } else {
+        toast.error(result.message || "保存失败")
+      }
+    } catch (err) {
+      toast.error("保存失败，请重试")
+    } finally {
+      setIsSavingFactoryTracking(false)
     }
   }
 
@@ -240,7 +280,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
           shippingType,
           returnDate: returnDate?.toISOString(),
           returnTrackingNum: returnTrackingNum.trim(),
-          returnQuantity: parseInt(returnQuantity) || devices.length
+          returnQuantity: parseInt(returnQuantity) || batchInfo?.deviceCount || devices.length
         })
       })
 
@@ -287,7 +327,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
           shippingType,
           returnDate: returnDate?.toISOString(),
           returnTrackingNum: returnTrackingNum.trim(),
-          returnQuantity: parseInt(returnQuantity) || devices.length
+          returnQuantity: parseInt(returnQuantity) || batchInfo?.deviceCount || devices.length
         }),
       })
 
@@ -295,8 +335,8 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
       if (result.success) {
         toast.success(
           shippingType === "return"
-            ? `批次设备已发回客户，共 ${devices.length} 台`
-            : `批次设备已入库，共 ${devices.length} 台`
+            ? `批次设备已发回客户，共 ${batchInfo?.deviceCount || devices.length} 台`
+            : `批次设备已入库，共 ${batchInfo?.deviceCount || devices.length} 台`
         )
         onCompleted?.()
       } else {
@@ -354,7 +394,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
           <div>
             <h1 className="text-2xl font-bold">仓库发货处理</h1>
             <p className="text-sm text-muted-foreground">
-              批次号：{batchId} | 共 {devices.length} 台设备
+              批次号：{batchId} | 共 {batchInfo.deviceCount} 台设备
             </p>
           </div>
         </div>
@@ -405,8 +445,20 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
             </div>
             <div>
               <p className="text-sm text-muted-foreground">设备数量</p>
-              <p className="font-medium text-lg text-primary">{devices.length} 台</p>
+              <p className="font-medium text-lg text-primary">{batchInfo.deviceCount} 台</p>
             </div>
+            {batchInfo.expressCompany && (
+              <div>
+                <p className="text-sm text-muted-foreground">寄件快递公司</p>
+                <p className="font-medium">{batchInfo.expressCompany}</p>
+              </div>
+            )}
+            {batchInfo.trackingNumber && (
+              <div>
+                <p className="text-sm text-muted-foreground">寄件快递单号</p>
+                <p className="font-medium font-mono">{batchInfo.trackingNumber}</p>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -637,6 +689,33 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                     )}
                   </CardContent>
                 </Card>
+
+                {/* 维修人员处理信息 */}
+                {(device.repairAction || device.finalOutcome) && (
+                  <Card className="bg-blue-50/50 border-blue-200 mt-3">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-base text-blue-800">维修处理信息</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      {device.repairAction && (
+                        <div>
+                          <Label className="text-sm text-muted-foreground">处理方式</Label>
+                          <p className="font-medium mt-1">
+                            {REPAIR_ACTION_LABELS[device.repairAction as RepairAction] || device.repairAction}
+                          </p>
+                        </div>
+                      )}
+                      {device.finalOutcome && (
+                        <div>
+                          <Label className="text-sm text-muted-foreground">最终处置结果</Label>
+                          <p className="font-medium mt-1">
+                            {FINAL_OUTCOME_LABELS[device.finalOutcome as FinalOutcome] || device.finalOutcome}
+                          </p>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
               </div>
             )
           })()}
@@ -665,6 +744,49 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
           )}
         </CardContent>
       </Card>
+
+      {/* ── 返厂快递信息（仅返厂维修场景显示）──────────────────────────────────── */}
+      {(normalizeTicketStatus(batchInfo.status) === TicketStatus.PENDING_FACTORY ||
+        normalizeTicketStatus(batchInfo.status) === TicketStatus.FACTORY_FINISHED ||
+        batchInfo.factoryTrackingNum) && (
+        <Card className="border-orange-200 bg-orange-50/40">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-orange-800">
+              <Truck className="w-5 h-5" />
+              返厂快递信息
+            </CardTitle>
+            <CardDescription>设备寄往维修工厂的快递单号</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {batchInfo.factoryTrackingNum ? (
+              <div className="flex items-center gap-6">
+                <div>
+                  <p className="text-sm text-muted-foreground">返厂快递单号</p>
+                  <p className="font-mono font-semibold text-lg">{batchInfo.factoryTrackingNum}</p>
+                </div>
+                {batchInfo.factoryShipDate && (
+                  <div>
+                    <p className="text-sm text-muted-foreground">寄出日期</p>
+                    <p className="font-medium">{format(new Date(batchInfo.factoryShipDate), "yyyy-MM-dd", { locale: zhCN })}</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Input
+                  value={factoryTrackingInput}
+                  onChange={(e) => setFactoryTrackingInput(e.target.value)}
+                  placeholder="请输入返厂快递单号"
+                  className="font-mono max-w-xs"
+                />
+                <Button size="sm" onClick={handleSaveFactoryTracking} disabled={isSavingFactoryTracking}>
+                  {isSavingFactoryTracking ? "保存中..." : "保存"}
+                </Button>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* ── 发货方式（发货信息独立编辑轨道）─────────────────────────────────── */}
       <Card className="border-primary/50">
@@ -705,8 +827,8 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
             <Alert className="mt-2 border-amber-300 bg-amber-50">
               <AlertCircle className="h-4 w-4 text-amber-600" />
               <AlertDescription className="text-amber-800 text-sm">
-                <span className="font-semibold">🔒 发货信息暂不可编辑</span>：当前工单状态为"
-                <span className="font-mono">{batchInfo.status}</span>"，
+                      <span className="font-semibold">发货信息暂不可编辑</span>：当前工单状态为"
+                <span className="font-medium">{TICKET_STATUS_LABELS[normalizeTicketStatus(batchInfo.status)] || batchInfo.status}</span>"，
                 需要维修人员完成维修并选择最终处理结果（维修完成 / 报废 / 寄回）后，
                 工单流转至"待发货"状态，仓库才可填写发货信息。
               </AlertDescription>
@@ -802,7 +924,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                     id="returnQuantity"
                     type="number"
                     min="1"
-                    max={devices.length}
+                    max={batchInfo?.deviceCount || devices.length}
                     value={returnQuantity}
                     onChange={(e) => setReturnQuantity(e.target.value)}
                     placeholder="请输入发货数量"
@@ -832,7 +954,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
               <AlertDescription className="text-blue-800">
                 <p className="font-medium mb-1">产品入库</p>
                 <p className="text-sm">
-                  批次中的 {devices.length} 台设备将被标记为"已入库"，不发回客户。设备将存储在仓库中，可随时查询。
+                  批次中的 {batchInfo?.deviceCount || devices.length} 台设备将被标记为"已入库"，不发回客户。设备将存储在仓库中，可随时查询。
                 </p>
               </AlertDescription>
             </Alert>
@@ -964,6 +1086,8 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                     IconComponent = CheckCircle; iconColor = "text-green-600"; bgColor = "bg-green-100"
                   } else if (log.type === OperationLogType.BUSINESS_REVIEWED) {
                     IconComponent = DollarSign; iconColor = "text-orange-600"; bgColor = "bg-orange-100"
+                  } else if (log.type === OperationLogType.BUSINESS_REVIEW_SKIPPED) {
+                    IconComponent = CheckCircle; iconColor = "text-slate-600"; bgColor = "bg-slate-100"
                   } else if (log.type === OperationLogType.WAREHOUSE_SHIPPED) {
                     IconComponent = Download; iconColor = "text-teal-600"; bgColor = "bg-teal-100"
                   }
@@ -977,7 +1101,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                         <div className="flex items-center justify-between">
                           <p className="font-medium text-sm">{log.operator}</p>
                           <p className="text-xs text-muted-foreground">
-                            {format(new Date(log.time), "MM-dd HH:mm", { locale: zhCN })}
+                            {format(toBeijingTime(log.time), "MM-dd HH:mm", { locale: zhCN })}
                           </p>
                         </div>
                         <p className="text-sm text-muted-foreground">{log.description}</p>

@@ -9,12 +9,13 @@ export interface RepairTicket {
   workOrderNumber?: string;
   batchId?: string | null; // 批次ID - 用于批次工单分组
   projectName?: string; // 项目名称
+  projectLocation?: string; // 项目名称（后端原始字段名，兼容旧渲染代码）
   contactInfo?: string; // 联系信息
   deviceId: number;
   deviceName: string;
   deviceModel: string;
   problem: string;
-  status: "created" | "in_repair" | "admin_review" | "pending_shipment" | "completed" | "cancelled" | "unrepairable" | "delayed" | "pending" | "processing"; // 支持新旧状态
+  status: string; // 支持新旧状态；⚠️ 除少数兼容旧值外，其余状态保留后端原始小写值（如 warehouse_confirming/technician_repairing 等），下游请用 normalizeTicketStatus 归一化后再比较
   priority: "low" | "medium" | "high" | "critical";
   location: string;
   reportedBy: string;
@@ -33,6 +34,11 @@ export interface RepairTicket {
   warrantyEnd?: string;
   signedReportPhoto?: string | null;
   messageCount?: number;
+  // ── 关键节点时间字段（用于列表页时间范围筛选按状态动态切换比较目标） ──
+  warehouseShippedAt?: string | null;
+  businessReviewedAt?: string | null;
+  technicianCompletedAt?: string | null;
+  updatedAt?: string | null;
 }
 
 // 创建Context
@@ -123,16 +129,18 @@ export function RepairProvider({ children }: { children: ReactNode }) {
               return null;
             }
 
-            // 状态映射：支持新状态和旧状态（向后兼容）
-            // 保留新状态的原始值，以便在详情页正确显示
+            // 状态映射：仅对少数旧状态做归并兼容，其余状态原样保留 dbStatus
+            // ⚠️ 曾经的 bug：这里最后 fallback 到 "created"，导致所有未在下面显式列出的新流程状态
+            // （待仓库确认/仓库已确认/待仓库发货/维修进行中/待现场确认/待商务审核等）全部被强制显示成"待处理"。
+            // 修复：未命中兼容分支时，保留 dbStatus 原始值，交给下游 normalizeTicketStatus 正确归一化。
             const mappedStatus =
               dbStatus === "created" || dbStatus === "pending" // 待维修/待处理
                 ? "created"
                 : dbStatus === "in_repair" || dbStatus === "processing" // 维修中
                 ? "in_repair"
-                : dbStatus === "admin_review" // 待商务处理
+                : dbStatus === "admin_review" // 待商务处理（旧值，归并到 business_review 语义）
                 ? "admin_review"
-                : dbStatus === "pending_shipment" // 待发货
+                : dbStatus === "pending_shipment" // 待发货（旧值，归并到 warehouse_shipping 语义）
                 ? "pending_shipment"
                 : dbStatus === "completed"
                 ? "completed"
@@ -140,13 +148,17 @@ export function RepairProvider({ children }: { children: ReactNode }) {
                 ? "unrepairable"
                 : dbStatus === "delayed"
                 ? "delayed"
-                : "created"; // 默认
+                : dbStatus; // 其余状态（如 warehouse_confirming、warehouse_confirmed、warehouse_shipping、
+                            // technician_repairing、pending_reporter_confirm、business_review、cancelled 等）保留原值
 
             return {
               id: ticket.id || "",
               workOrderNumber: ticket.workOrderNumber || "",
               batchId: ticket.batchId || null, // 🔥 批次ID - 关键字段！
-              projectName: ticket.projectName || "", // 项目名称
+              // ⚠️ 后端 /api/tickets 实际返回的字段名是 projectLocation，没有 projectName
+              // 这里同时写入两个键，保证下游无论读哪个字段名都能取到值
+              projectName: ticket.projectLocation || ticket.projectName || "", // 项目名称
+              projectLocation: ticket.projectLocation || ticket.projectName || "",
               contactInfo: ticket.contactInfo || "", // 联系信息
               deviceId: ticket.deviceSerialNumber
                 ? parseInt(ticket.deviceSerialNumber.slice(-6), 36) || 0
@@ -168,6 +180,10 @@ export function RepairProvider({ children }: { children: ReactNode }) {
               damagePhotos: [],
               signedReportPhoto: ticket.signedReportPhoto || null,
               messageCount: ticket.messageCount || 0,
+              warehouseShippedAt: ticket.warehouseShippedAt || null,
+              businessReviewedAt: ticket.businessReviewedAt || null,
+              technicianCompletedAt: ticket.technicianCompletedAt || null,
+              updatedAt: ticket.updatedAt || null,
             };
           })
           .filter((item): item is RepairTicket => item !== null);

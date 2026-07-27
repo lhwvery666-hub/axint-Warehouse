@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { DB_FIELDS, UserRole, TicketActionType, TicketStatus, SPECIAL_VALUES, DEFAULT_VALUES } from "@/lib/enums"
+import { DB_FIELDS, UserRole, TicketActionType, TicketStatus, SPECIAL_VALUES, DEFAULT_VALUES, isPendingSNPlaceholder, normalizeTicketStatus } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
@@ -151,16 +151,27 @@ function buildDeviceUpdateFields(
     `${DB_FIELDS.MATERIAL_CODE} = ${device.materialCode ? `N'${(device.materialCode as string).replace(/'/g, "''")}'` : "NULL"}`,
   ]
 
+  // ⚠️ 曾经的 bug：不同代码路径写入的"无序列号"占位值不统一（"PENDING"/"PENDING_VERIFY"/"待验证"/空），
+  // 如果只做精确字符串比较，占位值 A → 占位值 B 会被误判为"设备身份变更"，
+  // 导致本来无 SN 的易耗品/待补录设备，只要保存一次报告就被强行打回「待仓库确认」，永远卡在仓库阶段。
+  // 修复：占位值之间互相切换不算身份变更，只有"两者不都是占位值，且序列号确实不同"才算真正变更。
+  const snActuallyChanged =
+    isPendingSNPlaceholder(newSn) && isPendingSNPlaceholder(existing.sn)
+      ? false
+      : norm(newSn) !== norm(existing.sn)
+
   // ── 变更摘要：基础字段（真正 Diff，空值归一化后对比）────────────────────────
-  if (norm(newSn)                      !== norm(existing.sn))              changedLabels.push(`序列号: ${existing.sn || "空"} → ${newSn}`)
+  if (snActuallyChanged)                                                   changedLabels.push(`序列号: ${existing.sn || "空"} → ${newSn}`)
   if (norm(newModel)                   !== norm(existing.modelName))       changedLabels.push(`型号: ${existing.modelName || "空"} → ${newModel}`)
   if (norm(device.faultDescription)    !== norm(existing.faultDescription)) changedLabels.push("故障描述")
   if (norm(device.materialCode)        !== norm(existing.materialCode))    changedLabels.push("物料编码")
   if (norm(device.deviceName)          !== norm(existing.deviceName))      changedLabels.push("设备名称")
 
   // ── Rule 1：设备身份变更 → 回退至「待仓库确认」────────────────────────────────
-  const identityChanged = norm(newSn) !== norm(existing.sn) || norm(newModel) !== norm(existing.modelName)
-  if (identityChanged && STATUSES_NEED_WAREHOUSE_RECONFIRM.has(existing.status)) {
+  // 归一化后再比较，避免历史脏数据/大小写差异导致该守卫规则误判或漏判
+  const normalizedExistingStatus = normalizeTicketStatus(existing.status)
+  const identityChanged = snActuallyChanged || norm(newModel) !== norm(existing.modelName)
+  if (identityChanged && normalizedExistingStatus && STATUSES_NEED_WAREHOUSE_RECONFIRM.has(normalizedExistingStatus)) {
     updateFields.push(`${DB_FIELDS.STATUS} = N'${TicketStatus.WAREHOUSE_CONFIRMING}'`)
     statusRollback = { newStatus: TicketStatus.WAREHOUSE_CONFIRMING, reason: "设备身份（SN/型号）变更" }
     console.log(`🔄 [Rule1 回退] SN: ${existing.sn}→${newSn}，型号: ${existing.modelName}→${newModel}，状态回退至 Warehouse_Confirming`)
@@ -174,7 +185,7 @@ function buildDeviceUpdateFields(
     const newCostNormalized = newCostStr           !== null ? String(parseFloat(newCostStr))          : null
     const costChanged = newCostNormalized !== oldCostNormalized
 
-    if (costChanged && STATUSES_NEED_REPORTER_RECONFIRM_ON_COST.has(existing.status)) {
+    if (costChanged && normalizedExistingStatus && STATUSES_NEED_REPORTER_RECONFIRM_ON_COST.has(normalizedExistingStatus)) {
       statusRollback = { newStatus: TicketStatus.PENDING_REPORTER_CONFIRM, reason: "维修费用变更" }
       updateFields.push(`${DB_FIELDS.STATUS} = N'${TicketStatus.PENDING_REPORTER_CONFIRM}'`)
       updateFields.push(`${DB_FIELDS.SIGNED_REPORT_PHOTO} = NULL`)

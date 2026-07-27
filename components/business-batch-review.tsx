@@ -32,6 +32,7 @@ import { TicketChat } from "@/components/TicketChat"
 import { useAuth } from "@/context/auth-context"
 import { format } from "date-fns"
 import { zhCN } from "date-fns/locale"
+import { toBeijingTime } from "@/lib/utils"
 
 interface Device {
   id: string
@@ -60,6 +61,16 @@ interface OperationLog {
   operator: string
   description: string
 }
+
+// 商务审核已经处理过（授权发货及以后的终态节点），后续只需要在"财务跟进"里补充
+// 收款/开票信息，不应该再触发状态推进（对应 handleSaveBusinessInfo 而非 handleConfirmBusiness）。
+const POST_REVIEW_STATUSES: string[] = [
+  TicketStatus.WAREHOUSE_SHIPPING,
+  TicketStatus.COMPLETED,
+  TicketStatus.SCRAPPED,
+  TicketStatus.RETURN_UNREPAIRED,
+  TicketStatus.REJECTED_NO_RETURN,
+]
 
 interface BusinessBatchReviewProps {
   batchId: string
@@ -232,13 +243,16 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
 
 
   const handleConfirmBusiness = async () => {
-    if (isChargeable && !isPaymentReceived) {
-      toast.error("收费项目必须确认收款后才能完成审核")
-      return
-    }
-
-    if (isChargeable && !isInvoiced) {
-      const confirmed = window.confirm("收费项目尚未开票，确定继续吗？")
+    // ⚠️ 任务3：发货授权与收款/开票解耦——不再硬性阻断未收款/未开票的批次。
+    // 商务可以先授权发货让货物走起来，未结清的收款/开票留给"财务跟进"视图持续处理。
+    if (isChargeable && (!isPaymentReceived || !isInvoiced)) {
+      const pendingParts = [
+        !isPaymentReceived ? "尚未收款" : "",
+        !isInvoiced ? "尚未开票" : "",
+      ].filter(Boolean).join("、")
+      const confirmed = window.confirm(
+        `该批次工单${pendingParts}，授权发货后仍会推进到仓库发货环节，请后续在「财务跟进」中继续处理收款/开票。是否继续？`
+      )
       if (!confirmed) return
     }
 
@@ -276,11 +290,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
 
   // 保存商务信息修改（不改变状态）
   const handleSaveBusinessInfo = async () => {
-    if (isChargeable && !isPaymentReceived) {
-      toast.error("收费项目必须确认收款")
-      return
-    }
-
+    // ⚠️ 任务3：保存是"财务跟进"的中间进度，不再强制要求先确认收款才能保存。
     setIsSubmitting(true)
     try {
       const response = await fetch(`/api/tickets/business-info/${batchId}`, {
@@ -351,12 +361,13 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Badge className={batchInfo.status === TicketStatus.WAREHOUSE_SHIPPING ? "bg-green-600" : "bg-purple-600"}>
-            {batchInfo.status === TicketStatus.WAREHOUSE_SHIPPING ? "已审核" : 
+          <Badge className={POST_REVIEW_STATUSES.includes(batchInfo.status) ? "bg-green-600" : "bg-purple-600"}>
+            {POST_REVIEW_STATUSES.includes(batchInfo.status) ? "已审核" : 
              batchInfo.status === TicketStatus.BUSINESS_REVIEW ? "待审核" : "未到审核节点"}
           </Badge>
-          {/* 重新编辑按钮：审核已完成且当前为只读时显示 */}
-          {!isEditMode && (batchInfo.status === TicketStatus.WAREHOUSE_SHIPPING || batchInfo.status === TicketStatus.BUSINESS_REVIEW) && (
+          {/* 重新编辑按钮：审核已完成（含已发货/已完成等终态）且当前为只读时显示，
+              保证"财务跟进"视图里已发货甚至已完成的批次仍能继续补充收款/开票信息 */}
+          {!isEditMode && (POST_REVIEW_STATUSES.includes(batchInfo.status) || batchInfo.status === TicketStatus.BUSINESS_REVIEW) && (
             <Button
               variant="outline"
               size="sm"
@@ -621,20 +632,20 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
               <div>
                 <p className="font-semibold">
                   {!isEditMode 
-                    ? batchInfo.status === TicketStatus.WAREHOUSE_SHIPPING 
+                    ? POST_REVIEW_STATUSES.includes(batchInfo.status) 
                       ? "商务审核已完成" 
                       : "开始商务审核"
-                    : batchInfo.status === TicketStatus.WAREHOUSE_SHIPPING
+                    : POST_REVIEW_STATUSES.includes(batchInfo.status)
                       ? "保存商务信息修改"
-                      : "完成商务审核"}
+                      : "授权发货"}
                 </p>
                 <p className="text-sm text-muted-foreground mt-1">
                   {!isEditMode 
                     ? "请点击右上角「重新编辑」按钮开始审核或修改信息"
-                    : batchInfo.status === TicketStatus.WAREHOUSE_SHIPPING
-                      ? "保存修改后的商务信息，不改变工单状态"
+                    : POST_REVIEW_STATUSES.includes(batchInfo.status)
+                      ? "保存修改后的商务信息（如补充收款/开票状态），不改变工单状态"
                       : isChargeable 
-                        ? "确认收款和开票情况后，批次工单将转至仓库发货环节" 
+                        ? "填写维修费用后即可授权发货；即使尚未收款/开票，也可先发货，后续在「财务跟进」中继续处理" 
                         : "确认后，批次工单将转至仓库发货环节"
                   }
                 </p>
@@ -642,12 +653,12 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
             </div>
             {isEditMode && (
               <div className="flex items-center gap-2 flex-wrap">
-                {batchInfo.status === TicketStatus.WAREHOUSE_SHIPPING ? (
+                {POST_REVIEW_STATUSES.includes(batchInfo.status) ? (
                   <>
                     <Button
                       size="lg"
                       onClick={handleSaveBusinessInfo}
-                      disabled={isSubmitting || (isChargeable && (!isPaymentReceived || !totalCost))}
+                      disabled={isSubmitting || (isChargeable && !totalCost)}
                       className="w-full md:w-auto min-w-[180px]"
                     >
                       {isSubmitting ? (
@@ -669,7 +680,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                       size="lg"
                       variant="outline"
                       onClick={handleSaveBusinessInfo}
-                      disabled={isSubmitting || (isChargeable && (!isPaymentReceived || !totalCost))}
+                      disabled={isSubmitting || (isChargeable && !totalCost)}
                       className="w-full md:w-auto min-w-[140px]"
                     >
                       <Save className="w-4 h-4 mr-2" />
@@ -678,7 +689,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                     <Button
                       size="lg"
                       onClick={handleConfirmBusiness}
-                      disabled={isSubmitting || (isChargeable && (!isPaymentReceived || !totalCost))}
+                      disabled={isSubmitting || (isChargeable && !totalCost)}
                       className="w-full md:w-auto min-w-[180px]"
                     >
                       {isSubmitting ? (
@@ -689,7 +700,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                       ) : (
                         <span className="flex items-center gap-2">
                           <CheckCircle className="w-4 h-4" />
-                          完成审核
+                          授权发货
                         </span>
                       )}
                     </Button>
@@ -767,6 +778,10 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                     IconComponent = DollarSign
                     iconColor = "text-orange-600"
                     bgColor = "bg-orange-100"
+                  } else if (log.type === OperationLogType.BUSINESS_REVIEW_SKIPPED) {
+                    IconComponent = CheckCircle
+                    iconColor = "text-slate-600"
+                    bgColor = "bg-slate-100"
                   } else if (log.type === OperationLogType.WAREHOUSE_SHIPPED) {
                     IconComponent = Download
                     iconColor = "text-teal-600"
@@ -782,7 +797,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                         <div className="flex items-center justify-between">
                           <p className="font-medium text-sm">{log.operator}</p>
                           <p className="text-xs text-muted-foreground">
-                            {format(new Date(log.time), "MM-dd HH:mm", { locale: zhCN })}
+                            {format(toBeijingTime(log.time), "MM-dd HH:mm", { locale: zhCN })}
                           </p>
                         </div>
                         <p className="text-sm text-muted-foreground">{log.description}</p>

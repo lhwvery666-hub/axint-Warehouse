@@ -7,7 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { UserRole, TicketStatus } from "@/lib/enums";
+import { UserRole, TicketStatus, normalizeTicketStatus, TICKET_STATUS_LABELS } from "@/lib/enums";
 import { 
   ArrowLeft,
   Search,
@@ -86,10 +86,12 @@ export default function BusinessRepairsPage() {
     );
   });
 
+  // ⚠️ 曾经的 bug：直接用原始字符串 status 与 TicketStatus 枚举做 switch 比较，一旦大小写/格式不完全
+  // 一致就全部落到 default 分支。修复：先用 normalizeTicketStatus 归一化后再匹配，并补充仓库已确认状态。
   const getStatusBadge = (status: string) => {
-    switch (status) {
+    const normalized = normalizeTicketStatus(status)
+    switch (normalized) {
       case TicketStatus.CREATED:
-      case TicketStatus.PENDING:
         return (
           <Badge variant="outline" className="bg-yellow-50 border-yellow-300 text-yellow-800">
             <Clock className="w-3 h-3 mr-1" />
@@ -103,16 +105,35 @@ export default function BusinessRepairsPage() {
             待仓库确认
           </Badge>
         );
+      case TicketStatus.WAREHOUSE_CONFIRMED:
+        return (
+          <Badge variant="outline" className="bg-emerald-50 border-emerald-300 text-emerald-800">
+            <CheckCircle className="w-3 h-3 mr-1" />
+            仓库已确认
+          </Badge>
+        );
       case TicketStatus.IN_REPAIR:
-      case TicketStatus.TECHNICIAN_REPAIRING:
         return (
           <Badge variant="outline" className="bg-cyan-50 border-cyan-300 text-cyan-800">
             <TrendingUp className="w-3 h-3 mr-1" />
-            维修中
+            维修检查中
+          </Badge>
+        );
+      case TicketStatus.TECHNICIAN_REPAIRING:
+        return (
+          <Badge variant="outline" className="bg-indigo-50 border-indigo-300 text-indigo-800">
+            <TrendingUp className="w-3 h-3 mr-1" />
+            维修作业中
+          </Badge>
+        );
+      case TicketStatus.PENDING_REPORTER_CONFIRM:
+        return (
+          <Badge variant="outline" className="bg-cyan-50 border-cyan-300 text-cyan-800">
+            <Clock className="w-3 h-3 mr-1" />
+            待现场确认
           </Badge>
         );
       case TicketStatus.BUSINESS_REVIEW:
-      case TicketStatus.ADMIN_REVIEW:
         return (
           <Badge variant="outline" className="bg-purple-50 border-purple-300 text-purple-800">
             <DollarSign className="w-3 h-3 mr-1" />
@@ -137,7 +158,7 @@ export default function BusinessRepairsPage() {
         return (
           <Badge variant="outline">
             <AlertCircle className="w-3 h-3 mr-1" />
-            {status}
+            {normalized ? TICKET_STATUS_LABELS[normalized] : status}
           </Badge>
         );
     }

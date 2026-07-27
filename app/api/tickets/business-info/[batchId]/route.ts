@@ -114,13 +114,9 @@ export async function PUT(
       )
     }
 
-    // 验证：如果收费，必须确认收款
-    if (isChargeable && !isPaymentReceived) {
-      return NextResponse.json(
-        { success: false, message: "收费项目必须确认收款" },
-        { status: 400 }
-      )
-    }
+    // ⚠️ 任务3：本接口是"保存财务跟进进度"的接口，不推进工单状态，
+    // 硬阻断"未收款不能保存"在这里没有意义，且会阻止财务跟进视图对中间状态的持续更新。
+    // 不再强制要求收费项目必须先确认收款才能保存。
 
     const pool = await getDbConnection()
 

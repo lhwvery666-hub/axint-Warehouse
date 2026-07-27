@@ -1,6 +1,6 @@
 "use client";
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Dashboard from "@/components/dashboard";
 import RepairPage from "@/components/repair-page";
 import BottomNav from "@/components/bottom-nav";
@@ -11,10 +11,21 @@ import RecycleBinPage from "@/app/recycle-bin/page";
 import { useAuth } from "@/context/auth-context";
 import { UserRole, ROUTES } from "@/lib/enums";
 
-export default function Home() {
+// 有效的顶级标签列表，用于校验 URL 中的 tab 参数
+const VALID_TABS = ["home", "repair", "profile", "recycle"] as const;
+type TabType = typeof VALID_TABS[number];
+
+function HomeContent() {
   const { user } = useAuth();
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<"home" | "repair" | "profile" | "recycle">("home");
+  const searchParams = useSearchParams();
+  // 优先使用 URL 中的 tab 参数（例如从工单详情页"返回"时会带上 ?tab=repair），
+  // 这样无论从哪个标签页进入详情页，返回后都能停留在原来的标签页，而不是被重置回首页
+  const tabFromUrl = searchParams.get("tab");
+  const initialTab: TabType = (VALID_TABS as readonly string[]).includes(tabFromUrl || "")
+    ? (tabFromUrl as TabType)
+    : "home";
+  const [activeTab, setActiveTab] = useState<TabType>(initialTab);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   // 批次上下文：记住用户来自哪个批次工单
@@ -41,12 +52,23 @@ export default function Home() {
       // 仓库管理员应该访问 /warehouse/dashboard 页面
       router.push(ROUTES.WAREHOUSE_DASHBOARD);
       return;
-    } else {
+    } else if (!tabFromUrl) {
+      // 只有在 URL 没有指定 tab 时才重置为首页，避免覆盖"返回"时携带的 tab 参数
       setActiveTab("home");
     }
     
     setIsLoading(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, router]);
+
+  // 切换标签时同步更新 URL（不产生新的历史记录），以便从详情页返回时能定位到正确的标签
+  const handleTabChange = (tab: TabType) => {
+    setActiveTab(tab);
+    if (tab === "repair") {
+      setSelectedTaskId(null);
+    }
+    router.replace(`/?tab=${tab}`, { scroll: false });
+  };
 
   const handleStartRepair = (taskId: string, batchCtx?: { batchId: string; devices: any[] }) => {
     // 如果是"all"，则只切换到维修页面，不设置特定任务ID
@@ -58,7 +80,7 @@ export default function Home() {
       // 保存批次上下文（如果有）
       setBatchContext(batchCtx || null);
     }
-    setActiveTab("repair");
+    handleTabChange("repair");
   }
 
   const handleBackToDashboard = () => {
@@ -66,11 +88,11 @@ export default function Home() {
     // 如果没有批次上下文，返回到首页
     if (batchContext) {
       setSelectedTaskId(null); // 清除选中的设备，但保持在维修工单页面
-      // 不设置 setActiveTab("home")，保持在 repair 标签
+      // 不设置 handleTabChange("home")，保持在 repair 标签
     } else {
-    setSelectedTaskId(null);
+      setSelectedTaskId(null);
       setBatchContext(null);
-    setActiveTab("home");
+      handleTabChange("home");
     }
   }
 
@@ -101,13 +123,7 @@ export default function Home() {
       {/* 侧边栏 */}
       <AppSidebar 
         activeTab={activeTab} 
-        onTabChange={(tab) => {
-          setActiveTab(tab);
-          // 当从侧边栏点击"维修工单"时，清除选中的工单ID
-          if (tab === "repair") {
-            setSelectedTaskId(null);
-          }
-        }} 
+        onTabChange={handleTabChange} 
         userType={user?.role}
       />
       
@@ -136,11 +152,19 @@ export default function Home() {
         <div className="md:hidden">
           <BottomNav 
             activeTab={activeTab} 
-            onTabChange={setActiveTab} 
+            onTabChange={handleTabChange} 
             userType={user?.role}
           />
         </div>
       </div>
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-screen">加载中...</div>}>
+      <HomeContent />
+    </Suspense>
   );
 }

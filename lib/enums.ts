@@ -15,7 +15,7 @@ export enum TicketStatus {
   WAREHOUSE_CONFIRMED = "Warehouse_Confirmed",    // 3. 仓库已确认（出厂日期已填写，待维修人员检查）
   IN_REPAIR = "In_Repair",               // 4. 维修检查中（维修人员检查并完成报告）
   PENDING_REPORTER_CONFIRM = "Pending_Reporter_Confirm", // 5. 待现场确认（等待现场签字）
-  TECHNICIAN_REPAIRING = "Technician_Repairing",  // 6. 维修进行中（收到签字，维修人员维修中）
+  TECHNICIAN_REPAIRING = "Technician_Repairing",  // 6. 维修作业中（收到签字，维修人员实际动手维修）
   BUSINESS_REVIEW = "Business_Review",    // 7. 商务审核（确认收款和开票）
   WAREHOUSE_SHIPPING = "Warehouse_Shipping",  // 8. 仓库发货（出库发回或入库）
   COMPLETED = "Completed",                // 9. 已完成
@@ -69,14 +69,14 @@ export const TICKET_STATUS_LABELS: Record<TicketStatus, string> = {
   [TicketStatus.WAREHOUSE_CONFIRMED]: "仓库已确认",
   [TicketStatus.IN_REPAIR]: "维修检查中",
   [TicketStatus.PENDING_REPORTER_CONFIRM]: "待现场确认",
-  [TicketStatus.TECHNICIAN_REPAIRING]: "维修进行中",
+  [TicketStatus.TECHNICIAN_REPAIRING]: "维修作业中",
   [TicketStatus.BUSINESS_REVIEW]: "待商务审核",
   [TicketStatus.WAREHOUSE_SHIPPING]: "待仓库发货",
   [TicketStatus.COMPLETED]: "已完成",
   
   // 兼容旧状态
   [TicketStatus.PENDING]: "待处理",
-  [TicketStatus.PROCESSING]: "维修中",
+  [TicketStatus.PROCESSING]: "维修检查中",
   [TicketStatus.WAREHOUSE_RECEIVED]: "仓库已收货",
   [TicketStatus.ADMIN_REVIEW]: "待商务处理",
   [TicketStatus.PENDING_SHIPMENT]: "待发货",
@@ -279,6 +279,7 @@ export enum TicketActionType {
   REPORTER_CONFIRMED = "ReporterConfirmed",           // 现场人员签字确认回传
   TECHNICIAN_COMPLETED = "TechnicianCompleted",       // 维修人员完成维修
   BUSINESS_REVIEWED = "BusinessReviewed",             // 商务审核完成
+  BUSINESS_REVIEW_SKIPPED = "BusinessReviewSkipped",  // 免费维修，系统自动跳过商务审核
   WAREHOUSE_SHIPPED = "WarehouseShipped",             // 仓库发货/入库完成
   // 其他动作
   DELAY = "Delay",                                    // 延期
@@ -347,6 +348,7 @@ export enum OperationLogType {
   REPORTER_CONFIRMED = "reporter_confirmed",     // 现场确认（签字回传）
   TECHNICIAN_COMPLETED = "technician_completed", // 维修完成
   BUSINESS_REVIEWED = "business_reviewed",       // 商务审核
+  BUSINESS_REVIEW_SKIPPED = "business_review_skipped", // 免费维修，系统自动跳过商务审核
   WAREHOUSE_SHIPPED = "warehouse_shipped",       // 仓库发货
 }
 
@@ -361,6 +363,7 @@ export const OPERATION_LOG_TYPE_LABELS: Record<OperationLogType, string> = {
   [OperationLogType.REPORTER_CONFIRMED]: "现场人员确认签字并回传",
   [OperationLogType.TECHNICIAN_COMPLETED]: "完成了维修并更新报告",
   [OperationLogType.BUSINESS_REVIEWED]: "完成了商务审核",
+  [OperationLogType.BUSINESS_REVIEW_SKIPPED]: "免费维修，系统自动跳过商务审核",
   [OperationLogType.WAREHOUSE_SHIPPED]: "完成了发货/入库操作",
 };
 
@@ -506,6 +509,19 @@ export const SPECIAL_VALUES = {
 export const DEFAULT_VALUES = {
   GENERIC_MODEL: "通用型号",     // 默认型号名称
 } as const;
+
+/**
+ * 判断序列号是否为"待验证/无序列号"占位值。
+ * ⚠️ 历史遗留问题：不同代码路径写入的占位值并不统一（"PENDING"、"PENDING_VERIFY"、"待验证"、
+ * 空字符串、null 均代表"暂无真实序列号"），如果只做精确字符串比较，会把"占位值 A → 占位值 B"
+ * 误判为"设备身份变更"，从而触发不必要的状态回退（如仓库确认后又被打回待确认）。
+ * 所有需要比较 SN 是否发生"实质变化"的地方，都应先用本函数判断，而不是直接 === 比较原始字符串。
+ */
+export function isPendingSNPlaceholder(sn: string | null | undefined): boolean {
+  if (!sn) return true;
+  const upper = sn.trim().toUpperCase();
+  return upper === "" || upper === "PENDING" || upper === "PENDING_VERIFY" || sn.trim() === SPECIAL_VALUES.PENDING_VERIFY;
+}
 
 // ==================== 工具函数 ====================
 /**

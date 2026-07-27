@@ -34,6 +34,7 @@ import {
 import { toast } from "sonner"
 import { format } from "date-fns"
 import { zhCN } from "date-fns/locale"
+import { toBeijingTime } from "@/lib/utils"
 
 interface User {
   id: string
@@ -357,7 +358,7 @@ export default function UserManagement() {
                         {user.phoneNumber || <span className="text-muted-foreground">未填写</span>}
                       </TableCell>
                       <TableCell className="text-sm text-muted-foreground">
-                        {user.createdAt ? format(new Date(user.createdAt), "yyyy-MM-dd HH:mm", { locale: zhCN }) : "-"}
+                        {user.createdAt ? format(toBeijingTime(user.createdAt), "yyyy-MM-dd HH:mm", { locale: zhCN }) : "-"}
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-2">

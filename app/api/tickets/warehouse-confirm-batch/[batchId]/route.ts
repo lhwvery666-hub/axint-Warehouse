@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, TicketStatus, UserRole, normalizeUserRole, TicketActionType } from "@/lib/enums"
+import { DB_FIELDS, TicketStatus, UserRole, normalizeUserRole, TicketActionType, normalizeTicketStatus } from "@/lib/enums"
 
 // POST /api/tickets/warehouse-confirm-batch/[batchId]
 // 仓库管理员确认批次设备并填写出厂日期
@@ -81,11 +81,18 @@ export async function POST(
       );
     }
 
-    // 验证所有设备都有出厂日期
-    const missingDates = devices.filter((d: any) => !d.manufactureDate);
-    if (missingDates.length > 0) {
+    // 验证所有设备都有出厂日期和到货日期
+    const missingManufacture = devices.filter((d: any) => !d.manufactureDate);
+    if (missingManufacture.length > 0) {
       return NextResponse.json(
-        { success: false, message: `有 ${missingDates.length} 个设备未填写出厂日期` },
+        { success: false, message: `有 ${missingManufacture.length} 个设备未填写出厂日期` },
+        { status: 400 }
+      );
+    }
+    const missingArrival = devices.filter((d: any) => !d.arrivalDate);
+    if (missingArrival.length > 0) {
+      return NextResponse.json(
+        { success: false, message: `有 ${missingArrival.length} 个设备未填写到货日期` },
         { status: 400 }
       );
     }
@@ -98,12 +105,21 @@ export async function POST(
     try {
       const operatorName = currentUser.RealName || currentUser.Username;
 
-      // 3.0 动态检测可选列是否存在（防止 WarehouseConfirmedAt 等列未迁移时整条 UPDATE 失败）
+      // 3.0 动态检测可选列是否存在（防止列未迁移时整条 UPDATE 失败）
+      // 同时自动迁移 ArrivalDate 列（到货日期）
+      await transaction.request().query(`
+        IF NOT EXISTS (
+          SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_NAME = 'Repair_Tickets' AND COLUMN_NAME = 'ArrivalDate'
+        )
+          ALTER TABLE Repair_Tickets ADD ArrivalDate DATETIME NULL;
+      `)
+
       const columnCheckResult = await transaction.request().query(`
         SELECT COLUMN_NAME
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_NAME = 'Repair_Tickets'
-          AND COLUMN_NAME IN ('WarehouseConfirmedAt', 'WarehouseConfirmedBy', 'UpdatedAt', 'ManufactureDate')
+          AND COLUMN_NAME IN ('WarehouseConfirmedAt', 'WarehouseConfirmedBy', 'UpdatedAt', 'ManufactureDate', 'ArrivalDate')
       `)
       const existingColumns = new Set<string>(
         columnCheckResult.recordset.map((r: { COLUMN_NAME: string }) => r.COLUMN_NAME)
@@ -112,24 +128,28 @@ export async function POST(
       const hasWarehouseConfirmedBy = existingColumns.has('WarehouseConfirmedBy')
       const hasUpdatedAt = existingColumns.has('UpdatedAt')
       const hasManufactureDate = existingColumns.has('ManufactureDate')
+      const hasArrivalDate = existingColumns.has('ArrivalDate')
       console.log('[Warehouse Confirm] 可选列检测结果:', {
         hasWarehouseConfirmedAt, hasWarehouseConfirmedBy, hasUpdatedAt, hasManufactureDate
       })
 
       // 3.1 更新批次中所有设备的出厂日期和工单状态
-      // ⚠️ 状态降级守卫：只确认处于 Created / Warehouse_Confirming 状态的设备，跳过已推进的设备
-      const CONFIRMABLE_STATUSES = new Set<string>([
+      // ⚠️ 状态降级守卫：只确认处于 Created / Warehouse_Confirming（含 Warehouse_Confirmed 中间态）状态的设备，跳过已推进的设备
+      // ⚠️ 曾经的 bug：这里用原始字符串精确比较（Set.has），一旦数据库里的状态大小写/格式与枚举字面量
+      // 不完全一致（如历史脏数据、其他代码路径写入的变体），就会被误判为"已超出可确认范围"而跳过，
+      // 导致该设备永远无法被仓库确认，状态卡死在 Warehouse_Confirming。
+      // 修复：统一用 normalizeTicketStatus 归一化后再比较，且补充 WAREHOUSE_CONFIRMED 中间态。
+      const CONFIRMABLE_STATUSES = new Set<TicketStatus>([
         TicketStatus.CREATED,
         TicketStatus.WAREHOUSE_CONFIRMING,
-        // 兼容旧状态
-        "Pending",
-        "Warehouse_Received",
+        TicketStatus.WAREHOUSE_CONFIRMED,
       ])
       // ⚠️ 修复：确认后直接流转到 IN_REPAIR，进入维修环节，而不是停留在 WAREHOUSE_CONFIRMED
       const newStatus = TicketStatus.IN_REPAIR
       let confirmedCount = 0
       let skippedCount = 0
       let isReconfirmation = false // 标记是否为重新确认（从 WAREHOUSE_CONFIRMING 确认）
+      const skippedDeviceStatuses: string[] = []
       console.log(`[Warehouse Confirm] 准备处理 ${devices.length} 个设备，只更新可确认状态的设备`)
       
       for (const device of devices) {
@@ -139,15 +159,17 @@ export async function POST(
           .query(`SELECT ${DB_FIELDS.STATUS} FROM Repair_Tickets WHERE ${DB_FIELDS.ID} = @ticketId`)
         
         const currentDeviceStatus = statusCheckResult.recordset[0]?.[DB_FIELDS.STATUS] as string | undefined
+        const normalizedDeviceStatus = normalizeTicketStatus(currentDeviceStatus)
         
-        if (!currentDeviceStatus || !CONFIRMABLE_STATUSES.has(currentDeviceStatus)) {
+        if (!normalizedDeviceStatus || !CONFIRMABLE_STATUSES.has(normalizedDeviceStatus)) {
           console.log(`[Warehouse Confirm] ⏭ 设备 ${device.id} 当前状态 "${currentDeviceStatus}" 已超出可确认范围，跳过以防止降级`)
           skippedCount++
+          skippedDeviceStatuses.push(currentDeviceStatus || "未知")
           continue
         }
 
-        // 判断是否为重新确认（从 WAREHOUSE_CONFIRMING 确认）
-        if (currentDeviceStatus === TicketStatus.WAREHOUSE_CONFIRMING) {
+        // 判断是否为重新确认（从 WAREHOUSE_CONFIRMING / WAREHOUSE_CONFIRMED 确认）
+        if (normalizedDeviceStatus === TicketStatus.WAREHOUSE_CONFIRMING || normalizedDeviceStatus === TicketStatus.WAREHOUSE_CONFIRMED) {
           isReconfirmation = true
         }
 
@@ -158,10 +180,16 @@ export async function POST(
         if (hasManufactureDate) {
           coreUpdateRequest.input("manufactureDate", new Date(device.manufactureDate))
         }
+        if (hasArrivalDate) {
+          // 时区处理：前端传入 ISO 字符串（含 UTC 偏移），直接用 new Date() 解析后传给 SQL Server
+          // SQL Server 存储 UTC 时间，前端读取时再格式化为东八区日期显示，保证无偏差
+          coreUpdateRequest.input("arrivalDate", new Date(device.arrivalDate))
+        }
 
         const coreSetClauses = [
           `${DB_FIELDS.STATUS} = @newStatus`,
           ...(hasManufactureDate ? [`ManufactureDate = @manufactureDate`] : []),
+          ...(hasArrivalDate ? [`ArrivalDate = @arrivalDate`] : []),
         ].join(', ')
 
         const coreUpdateResult = await coreUpdateRequest.query(`
@@ -277,6 +305,18 @@ export async function POST(
 
       // 3.3 提交事务
       await transaction.commit();
+
+    // ⚠️ 曾经的 bug：如果所有设备都被状态守卫跳过（confirmedCount === 0），
+    // 之前这里依然返回 success: true，前端会弹出"确认成功"的提示，但实际状态根本没有变化，
+    // 用户误以为已经推进，工单却仍然卡在原状态——这是一种"静默失败"。
+    // 修复：没有任何设备真正被确认时，明确返回失败，让前端提示真实原因。
+    if (confirmedCount === 0) {
+      return NextResponse.json({
+        success: false,
+        message: `未能确认任何设备：所选 ${devices.length} 台设备当前状态均已超出可确认范围（如：${Array.from(new Set(skippedDeviceStatuses)).join("、") || "未知"}），可能已被其他操作推进，请刷新页面后重试`,
+        data: { batchId, deviceCount: 0, skippedCount }
+      });
+    }
 
     return NextResponse.json({
       success: true,

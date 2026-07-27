@@ -200,6 +200,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
     modelSelected: string
     serialNumber: string
     isSnPendingVerify: boolean
+    deviceQuantity: number       // 同批同类型设备数量（无序列号场景，默认 1）
     // 序列号检索相关状态
     checkingSn: boolean
     snValid: boolean | null
@@ -218,6 +219,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       modelSelected: "",
       serialNumber: "",
       isSnPendingVerify: false,
+      deviceQuantity: 1,
       checkingSn: false,
       snValid: null,
       snError: null,
@@ -238,6 +240,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
         modelSelected: device.deviceModel || "",
         serialNumber: device.serialNumber || "",
         isSnPendingVerify: false,
+        deviceQuantity: 1,
         checkingSn: false,
         snValid: null,
         snError: null,
@@ -271,6 +274,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
         modelSelected: "",
         serialNumber: "",
         isSnPendingVerify: false,
+        deviceQuantity: 1,
         checkingSn: false,
         snValid: null,
         snError: null,
@@ -309,6 +313,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       modelSelected: lastDevice.modelSelected,
       serialNumber: "", // 序列号不复制，必须唯一
       isSnPendingVerify: false,
+      deviceQuantity: 1,
       checkingSn: false,
       snValid: null,
       snError: null,
@@ -660,14 +665,14 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
         device.subCategory?.toLowerCase().includes("开关")
       )
       
-      if (!device.isSnPendingVerify && !isNoSerialProduct) {
+      if (!device.isSnPendingVerify && !isNoSerialProduct && device.deviceQuantity <= 1) {
         if (!device.serialNumber || device.serialNumber.trim() === "") {
           errors[`device_${device.id}_serialNumber`] = `设备 ${index + 1}：${FORM_ERRORS.deviceSerialNumberRequired}`
         }
       }
 
-      // 验证故障描述 - 每个设备必填
-      if (!device.faultDescription || device.faultDescription.trim().length < 3) {
+      // 验证故障描述 - 每个设备必填（不限字数，不能为空）
+      if (!device.faultDescription || !device.faultDescription.trim()) {
         errors[`device_${device.id}_faultDescription`] = `设备 ${index + 1}：${FORM_ERRORS.faultDescriptionRequired}`
       }
 
@@ -730,7 +735,8 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
     }
     
     setFormErrors(errors)
-    return Object.keys(errors).length === 0
+    // 同时返回 errors 对象，供 handleSubmit 同步读取（state 更新是异步的，不能在提交时直接读 formErrors）
+    return errors
   }
 
   // 表单提交
@@ -740,12 +746,20 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       return
     }
     
-    if (!validateForm()) {
-      // 滚动到第一个错误
+    const validationErrors = validateForm()
+    if (Object.keys(validationErrors).length > 0) {
+      // 滚动到第一个错误字段
       const firstError = document.querySelector(".text-destructive")
       if (firstError) {
         firstError.scrollIntoView({ behavior: "smooth", block: "center" })
       }
+      // 弹窗列出所有未完成项（最多显示 6 条，防止 toast 过长）
+      const errorMessages = Object.values(validationErrors).filter(Boolean)
+      toast({
+        title: "⚠️ 请完成以下必填项",
+        description: errorMessages.slice(0, 6).join("；"),
+        variant: "destructive",
+      })
       return
     }
     
@@ -876,14 +890,18 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
 
       // 使用多设备输入数组创建工单
       // 优先使用 deviceInputs，如果没有则回退到旧的单个设备逻辑
+      // deviceQuantity > 1 时作为数量字段传给后端，不展开为多条记录
       const devicesToSubmit = deviceInputs.length > 0 
         ? deviceInputs.map(device => ({
-            serialNumber: device.isSnPendingVerify ? "待验证" : device.serialNumber,
+            serialNumber: (device.isSnPendingVerify || (device.deviceQuantity > 1 && !device.serialNumber.trim()))
+              ? "待验证"
+              : device.serialNumber,
             category: device.category,
             subCategory: device.subCategory,
             modelSelected: device.modelSelected,
             faultDescription: device.faultDescription,
             devicePhotoFiles: device.devicePhotoFiles,
+            deviceQuantity: device.deviceQuantity || 1,
           }))
         : quantity === 1 
           ? [{
@@ -909,22 +927,17 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
           address: senderAddress.trim(), // 寄件人地址
           project: projectLocation, // 项目名称
         },
-        items: devicesToSubmit.map((device, index) => {
-          const deviceInput = deviceInputs[index]
-          const snForSubmit = device.serialNumber
-          
-          return {
-            productModel: device.modelSelected || deviceModel || "",
-            deviceSn: snForSubmit,
-            faultDesc: deviceInput?.faultDescription || device.faultDescription || faultDescription,
-            category: device.category || "",
-            subCategory: device.subCategory || "",
-            quantity: quantity || 1, // 添加数量字段
-            courierInfo: trackingNumber || "",
-            courierCompany: expressCompany || "",
-            materialCode: materialCode || "",
-          }
-        })
+        items: devicesToSubmit.map((device) => ({
+          productModel: device.modelSelected || deviceModel || "",
+          deviceSn: device.serialNumber,
+          faultDesc: device.faultDescription || faultDescription,
+          category: device.category || "",
+          subCategory: device.subCategory || "",
+          quantity: device.deviceQuantity || quantity || 1,
+          courierInfo: trackingNumber || "",
+          courierCompany: expressCompany || "",
+          materialCode: materialCode || "",
+        }))
       }
 
       // 调用批量创建 API
@@ -996,6 +1009,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
               deviceName: device.snData?.deviceName || "",
               faultDescription: device.faultDescription,
               materialCode: device.snData?.materialCode || "",
+              quantity: device.deviceQuantity || 1,
               ...(deviceImages !== undefined && { deviceImages }),
             }
           })
@@ -1404,7 +1418,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
                     <div className="flex items-center justify-between gap-2">
                       <Label className="text-sm text-muted-foreground">
                         设备序列号（SN）
-                        {!device.isSnPendingVerify && <span className="text-destructive"> *</span>}
+                        {!device.isSnPendingVerify && device.deviceQuantity <= 1 && <span className="text-destructive"> *</span>}
                       </Label>
                       <div className="flex items-center gap-2">
                         <Checkbox
@@ -1431,9 +1445,29 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
                           htmlFor={`sn-pending-${device.id}`}
                           className="text-xs text-muted-foreground cursor-pointer select-none"
                         >
-                          标签磨损/无法辨识
+                          无序列号/标签磨损
                         </Label>
                       </div>
+                    </div>
+                    {/* 设备数量（始终显示，默认1，>1时序列号免填） */}
+                    <div className="flex items-center gap-2 rounded-md bg-amber-50 border border-amber-200 px-3 py-2">
+                      <Label className="text-xs text-amber-800 whitespace-nowrap shrink-0">
+                        设备数量
+                      </Label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={999}
+                        value={device.deviceQuantity}
+                        onChange={(e) => {
+                          const val = Math.max(1, Math.min(999, parseInt(e.target.value) || 1))
+                          setDeviceInputs(deviceInputs.map(d =>
+                            d.id === device.id ? { ...d, deviceQuantity: val } : d
+                          ))
+                        }}
+                        className="w-20 rounded border border-amber-300 bg-white px-2 py-1 text-sm text-center focus:outline-none focus:ring-1 focus:ring-amber-400"
+                      />
+                      <span className="text-xs text-amber-700">台{device.deviceQuantity > 1 ? "（数量>1时序列号可不填）" : "（同类多台可修改此数量）"}</span>
                     </div>
                     <Input
                       id={`serial-number-${device.id}`}

@@ -468,7 +468,7 @@ export async function PUT(
       const currentStatus = (ticket.Status || "").toString()
       if (currentStatus !== "In_Repair" && currentStatus !== "Processing") {
         return NextResponse.json(
-          { success: false, message: "只有\"维修中\"的工单才能申请延期" },
+          { success: false, message: "只有\"维修检查中\"的工单才能申请延期" },
           { status: 400 }
         )
       }
@@ -661,6 +661,19 @@ export async function PUT(
         if (cleanedTrackingNum && cleanedTrackingNum.trim()) {
           updateFields.push(`Status = @status`)
           updateRequest.input("status", "Completed")
+
+          // ⚠️ 统一完工时间写入：WarehouseShippedAt 是全系统统一的"完工时间"字段，
+          // 主流程（warehouse-shipping-batch / shipping-info）都会写入它，
+          // 但这条遗留的单设备路径此前遗漏了该字段，导致这类工单的完工时间不可追溯。
+          const warehouseShippedAtColumn = columnNames.find((c) => c.toLowerCase() === "warehouseshippedat")
+          const warehouseShippedByColumn = columnNames.find((c) => c.toLowerCase() === "warehouseshippedby")
+          if (warehouseShippedAtColumn) {
+            updateFields.push(`${warehouseShippedAtColumn} = GETUTCDATE()`)
+          }
+          if (warehouseShippedByColumn) {
+            updateFields.push(`${warehouseShippedByColumn} = @warehouseShippedBy`)
+            updateRequest.input("warehouseShippedBy", userRealName || userUsername || "仓库管理员")
+          }
         }
       }
 

@@ -12,6 +12,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Calendar as CalendarComponent } from "@/components/ui/calendar"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { RepairStatusTimeline } from "@/components/repair-status-timeline"
+import { WorkOrderListRow } from "@/components/work-order-list-row"
 import { format, isAfter, isBefore, parseISO, subDays, subMonths } from "date-fns"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/context/auth-context"
@@ -23,7 +24,9 @@ import {
   getAggregatedStatus, 
   countByAggregatedStatus,
   AGGREGATED_STATUS_CONFIG,
-  getBatchAggregatedStatus
+  getBatchAggregatedStatus,
+  resolveTimeFilterPool,
+  getTimeFilterTargetDate
 } from "@/lib/workflow-utils"
 
 export default function ReportPage() {
@@ -140,6 +143,11 @@ export default function ReportPage() {
                 customerName: ticket.customerName || "",
                 courierCompany: ticket.courierCompany || "",
                 trackingNumber: ticket.trackingNumber || "",
+                quantity: ticket.quantity || 1,
+                // ── 关键节点时间字段（供时间范围筛选按状态动态切换比较目标） ──
+                warehouseShippedAt: ticket.warehouseShippedAt || null,
+                businessReviewedAt: ticket.businessReviewedAt || null,
+                updatedAt: ticket.updatedAt || null,
               }
             })
           
@@ -196,18 +204,19 @@ export default function ReportPage() {
               const batchTaskId = batchId && batchId.trim() !== "" ? batchId : `batch-${Date.now()}-${Math.random()}`
               console.log('创建批次工单，ID:', batchTaskId)
               
+              const totalQuantity = batchTasks.reduce((sum, t) => sum + ((t as any).quantity || 1), 0)
               groupedTasks.push({
                 ...firstTask,
                 id: batchTaskId, // 使用 batchId 作为 key（已确保非空）
                 status: batchStatus, // ✅ 使用聚合后的最高状态，而不是第一个设备的状态
                 isBatch: true, // 标记为批次工单
-                deviceCount: batchTasks.length, // 设备数量
+                deviceCount: totalQuantity, // 设备数量（使用 Quantity 字段之和）
                 devices: batchTasks, // 批次中的所有设备
                 // 修改显示内容：显示客户信息而不是设备信息
                 projectName: firstTask.location, // 项目名称
                 contactPerson: contactPerson, // 联系人姓名
                 contactPhone: contactPhone, // 联系电话
-                deviceSerialNumber: `${batchTasks.length}个设备`, // 显示设备数量
+                deviceSerialNumber: `${totalQuantity}个设备`, // 显示设备数量
                 fault: firstTask.fault || "维修工单", // 使用第一个设备的故障描述
               })
             }
@@ -238,12 +247,12 @@ export default function ReportPage() {
   }, [view, user?.id]) // 当视图或用户ID变化时重新加载
 
   // 流程步骤定义（用于卡片底部的迷你流程指示器）
-  // 正确顺序：待接单 → 检测中（仓库填出厂日期） → 待签字 → 维修中 → 待审核 → 待发货 → 已完成
+  // 正确顺序：待接单 → 检测中（仓库填出厂日期） → 待签字 → 维修作业中 → 待审核 → 待发货 → 已完成
   const REPORTER_STEPS = [
     { status: AggregatedStatus.PENDING_RECEIVE,  label: "待接单" },
     { status: AggregatedStatus.INSPECTING,       label: "检测中" },
     { status: AggregatedStatus.PENDING_SIGNATURE,label: "待签字" },
-    { status: AggregatedStatus.IN_REPAIR,        label: "维修中" },
+    { status: AggregatedStatus.IN_REPAIR,        label: "维修作业中" },
     { status: AggregatedStatus.PENDING_REVIEW,   label: "待审核" },
     { status: AggregatedStatus.PENDING_SHIPPING, label: "待发货" },
     { status: AggregatedStatus.COMPLETED,        label: "已完成" },
@@ -297,14 +306,21 @@ export default function ReportPage() {
   }
 
   // 根据时间范围过滤任务
+  // ⚠️ 阶段2：时间比较的靶向字段跟随状态筛选（filterStatus，此处为 AggregatedStatus 聚合值）动态切换：
+  // filterStatus === AggregatedStatus.COMPLETED（已完成）→ warehouseShippedAt（缺失时降级 updatedAt）；
+  // filterStatus === AggregatedStatus.PENDING_SHIPPING（待发货）→ businessReviewedAt；
+  // 其余聚合状态 / "全部" → 保持原有的 reportedAt 基础逻辑。详见 lib/workflow-utils.ts。
   const filterTasksByTimeRange = (task: any) => {
     if (filterTimeRange === "all") return true;
     
     // 获取完整的reportedAt日期字符串，而不是只取时间部分
     const taskReportedAt = task?.reportedAt || "";
-    const fullReportDate = taskReportedAt && taskReportedAt.includes(" ") ? 
+    const baseReportDate = taskReportedAt && taskReportedAt.includes(" ") ? 
       taskReportedAt : 
       (repairs && Array.isArray(repairs) ? repairs.find(r => r && r.id === task?.id)?.reportedAt : null) || taskReportedAt || "";
+
+    const pool = resolveTimeFilterPool(filterStatus);
+    const fullReportDate = getTimeFilterTargetDate(pool, task, baseReportDate);
     
     if (!fullReportDate) return true;
     
@@ -354,9 +370,12 @@ export default function ReportPage() {
       if (searchQuery === "") return true;
       const query = searchQuery.toLowerCase();
       return (
+        (task.batchId || "").toLowerCase().includes(query) ||
         (task.workOrderNumber || "").toLowerCase().includes(query) || 
         (task.deviceSerialNumber || "").toLowerCase().includes(query) ||
-        (task.fault || "").toLowerCase().includes(query)
+        (task.fault || "").toLowerCase().includes(query) ||
+        (task.customerName || "").toLowerCase().includes(query) ||
+        (task.projectLocation || "").toLowerCase().includes(query)
       );
     })
 
@@ -422,7 +441,7 @@ export default function ReportPage() {
                   <option value={AggregatedStatus.PENDING_RECEIVE}>待接单</option>
                   <option value={AggregatedStatus.INSPECTING}>检测中</option>
                   <option value={AggregatedStatus.PENDING_SIGNATURE}>待签字</option>
-                  <option value={AggregatedStatus.IN_REPAIR}>维修中</option>
+                  <option value={AggregatedStatus.IN_REPAIR}>维修作业中</option>
                   <option value={AggregatedStatus.PENDING_REVIEW}>待审核</option>
                   <option value={AggregatedStatus.PENDING_SHIPPING}>待发货</option>
                   <option value={AggregatedStatus.COMPLETED}>已完成</option>
@@ -491,179 +510,101 @@ export default function ReportPage() {
               </div>
             </div>
 
-            {/* 任务列表 */}
-            <div className="space-y-4 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
+            {/* 任务列表 —— 紧凑列表模式 */}
+            <Card className="border-border/50 dark:border-border overflow-hidden">
               {filteredTasks.length > 0 ? (
-                filteredTasks.map((task, taskIndex) => {
-                  // 确保 key 永远不为空
-                  const taskKey = (task.id && typeof task.id === 'string' && task.id.trim() !== "") 
-                    ? task.id 
-                    : `task-${taskIndex}-${task.deviceSerialNumber || task.batchId || Date.now()}`
-                  
-                  // 计算当前聚合状态，用于决定卡片样式和按钮
-                  const aggStatus = getAggregatedStatus(task.status)
-                  const needsSignature = task.isBatch && aggStatus === AggregatedStatus.PENDING_SIGNATURE
+                <div className="flex flex-col">
+                  {filteredTasks.map((task, taskIndex) => {
+                    // 确保 key 永远不为空
+                    const taskKey = (task.id && typeof task.id === 'string' && task.id.trim() !== "")
+                      ? task.id
+                      : `task-${taskIndex}-${task.deviceSerialNumber || task.batchId || Date.now()}`
 
-                  return (
-                  <Card
-                    key={taskKey}
-                    className="border-border/50 dark:border-border hover:border-primary/50 dark:hover:border-primary/40 hover:shadow-lg transition-all cursor-pointer active:scale-[0.98] bg-card/50 dark:bg-card backdrop-blur-sm"
-                    onClick={() => {
-                      if (task.isBatch) {
-                        router.push(`/report/batch/${task.batchId}`)
-                      } else {
-                        router.push(`/report/detail/${task.id}`)
-                      }
-                    }}
-                  >
-                    <CardContent className="p-5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-2 flex-wrap">
-                          {getPriorityIndicator(task.priority)}
-                          <h3 className="font-semibold text-foreground truncate text-base">
-                            {task.isBatch ? `工单号：${task.batchId}` : `序列号：${task.deviceSerialNumber}`}
-                          </h3>
-                          {task.isBatch && (
-                            <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 text-xs">
-                              <CheckCircle className="w-3 h-3 mr-1" />
-                              多设备 ({task.deviceCount}台)
-                            </Badge>
-                          )}
-                          {task.inWarranty !== undefined && (
-                            task.inWarranty ? (
-                              <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 text-xs">
-                                <ShieldCheck className="w-3 h-3 mr-1" />
-                                保修内
-                              </Badge>
-                            ) : (
-                              <Badge variant="outline" className="bg-red-50 text-red-700 border-red-200 text-xs">
-                                <ShieldAlert className="w-3 h-3 mr-1" />
-                                过保修
-                              </Badge>
-                            )
-                          )}
-                        </div>
-                        {task.isBatch ? (
-                          <>
-                            <div className="space-y-2 mb-2">
-                              <p className="text-sm text-muted-foreground flex items-center gap-1">
-                                <span className="font-medium">项目名称:</span> {task.projectName || task.location || "未填写"}
-                              </p>
-                              <p className="text-sm text-muted-foreground flex items-center gap-1">
-                                <span className="font-medium">联系人:</span> {task.contactPerson || "未填写"}
-                                {task.contactPhone && <span className="text-xs">({task.contactPhone})</span>}
-                              </p>
-                              <p className="text-sm text-muted-foreground flex items-center gap-1">
-                                <span className="font-medium">设备数量:</span> 
-                                <Badge variant="secondary" className="text-xs">{task.deviceCount}个设备</Badge>
-                              </p>
-                            </div>
-                            {/* 按钮区：待签字时显示醒目的上传按钮，其他状态显示查看报告 */}
-                            <div className="mt-3 pt-3 border-t border-border/50 space-y-2">
-                              {needsSignature ? (
-                                <>
-                                  <Button
-                                    size="sm"
-                                    className="w-full bg-amber-500 hover:bg-amber-600 text-white font-semibold"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      router.push(`/report/batch/${task.batchId}`);
-                                    }}
-                                  >
-                                    <Upload className="w-4 h-4 mr-2" />
-                                    上传签字凭证
-                                  </Button>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="w-full text-xs"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      router.push(`/repairs/print/${task.batchId}`);
-                                    }}
-                                  >
-                                    <FileCheck className="w-3 h-3 mr-1" />
-                                    先查看维修报告
-                                  </Button>
-                                </>
-                              ) : (
+                    // 计算当前聚合状态，用于决定按钮
+                    const aggStatus = getAggregatedStatus(task.status)
+                    const needsSignature = task.isBatch && aggStatus === AggregatedStatus.PENDING_SIGNATURE
+                    const isTerminal = isTerminalStatus(task.status)
+                    const needsSupplement = !isTerminal && (
+                      !task.productSN ||
+                      task.productSN.trim() === "" ||
+                      task.productSN.toUpperCase() === "PENDING" ||
+                      task.deviceSerialNumber?.toUpperCase() === "PENDING"
+                    )
+
+                    return (
+                      <WorkOrderListRow
+                        key={taskKey}
+                        title={task.isBatch ? `工单号：${task.batchId}` : `序列号：${task.deviceSerialNumber}`}
+                        isBatch={task.isBatch}
+                        projectName={task.isBatch ? (task.projectName || task.location) : undefined}
+                        contactInfo={task.contactPerson}
+                        contactPhone={task.contactPhone}
+                        deviceCount={task.deviceCount}
+                        faultText={task.fault}
+                        inWarranty={task.inWarranty}
+                        priorityIndicator={getPriorityIndicator(task.priority)}
+                        reportedAt={task.reportedAt}
+                        delayedText={
+                          task.expectedCompletionDate && aggStatus === AggregatedStatus.ABNORMAL
+                            ? `延期至 ${format(new Date(task.expectedCompletionDate), "yyyy-MM-dd")}`
+                            : undefined
+                        }
+                        pendingSnText={needsSupplement ? "待补录 SN" : undefined}
+                        onClick={() => {
+                          if (task.isBatch) {
+                            router.push(`/report/batch/${task.batchId}`)
+                          } else {
+                            router.push(`/report/detail/${task.id}`)
+                          }
+                        }}
+                        actions={
+                          task.isBatch ? (
+                            needsSignature ? (
+                              <>
+                                <Button
+                                  size="sm"
+                                  className="bg-amber-500 hover:bg-amber-600 text-white text-xs h-7 px-2"
+                                  onClick={() => router.push(`/report/batch/${task.batchId}`)}
+                                >
+                                  <Upload className="w-3 h-3 mr-1" />
+                                  上传签字
+                                </Button>
                                 <Button
                                   size="sm"
                                   variant="outline"
-                                  className="w-full"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    router.push(`/repairs/print/${task.batchId}`);
-                                  }}
+                                  className="text-xs h-7 px-2"
+                                  onClick={() => router.push(`/repairs/print/${task.batchId}`)}
                                 >
-                                  查看维修报告
+                                  <FileCheck className="w-3 h-3" />
                                 </Button>
-                              )}
-                            </div>
-                          </>
-                        ) : (
-                          <p className="text-sm text-muted-foreground mb-2 truncate flex items-center gap-1">
-                            <span className="font-medium">序列号:</span> {task.deviceSerialNumber || "未知"}
-                          </p>
-                        )}
-                        {!task.isBatch && (
-                          <div className="flex items-start gap-2 text-sm bg-muted/30 dark:bg-muted/50 rounded-md p-2">
-                            <AlertCircle className="w-4 h-4 text-muted-foreground dark:text-muted-foreground mt-0.5 shrink-0" />
-                            <span className="text-muted-foreground dark:text-muted-foreground line-clamp-2">
-                              {task.fault}
-                            </span>
-                          </div>
-                        )}
-                        </div>
-                        <div className="flex flex-col items-end gap-2 shrink-0">
-                          <span className="text-xs text-muted-foreground whitespace-nowrap">{task.reportedAt}</span>
-                          {task.expectedCompletionDate && getAggregatedStatus(task.status) === AggregatedStatus.ABNORMAL && (
-                            <span className="text-[11px] text-amber-400 whitespace-nowrap">
-                              延期至 {format(new Date(task.expectedCompletionDate), "yyyy-MM-dd")}
-                            </span>
-                          )}
-                          {/* 待补录 SN 提示 - 最终维修状态下不显示 */}
-                          {(() => {
-                            // 特殊情况：最终维修状态下，序列号可以为空，不显示"待补录"
-                            const isTerminal = isTerminalStatus(task.status)
-                            const needsSupplement = !isTerminal && (
-                              !task.productSN || 
-                              task.productSN.trim() === "" || 
-                              task.productSN.toUpperCase() === "PENDING" ||
-                              task.deviceSerialNumber?.toUpperCase() === "PENDING"
+                              </>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="text-xs h-7 px-2"
+                                onClick={() => router.push(`/repairs/print/${task.batchId}`)}
+                              >
+                                查看报告
+                              </Button>
                             )
-                            return needsSupplement ? (
-                              <span className="text-[11px] text-warning whitespace-nowrap">
-                                待补录 SN
-                              </span>
-                            ) : null
-                          })()}
-                        </div>
-                      </div>
-                      {/* 迷你流程步骤指示器 */}
-                      {task.isBatch && (
-                        <div className="mt-3 pt-3 border-t border-border/50">
-                          {getMiniStepFlow(task.status)}
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
-                  )
-                }))
-              : (
-                <Card className="md:col-span-2 border-dashed border-border/50 bg-muted/20">
-                  <CardContent className="p-8 text-center">
-                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
-                      <AlertCircle className="h-8 w-8 text-muted-foreground" />
-                    </div>
-                    <p className="text-muted-foreground font-medium">暂无维修任务</p>
-                    <p className="text-xs text-muted-foreground mt-1">请点击"新建维修"按钮添加维修任务</p>
-                  </CardContent>
-                </Card>
+                          ) : undefined
+                        }
+                      />
+                    )
+                  })}
+                </div>
+              ) : (
+                <CardContent className="p-8 text-center">
+                  <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
+                    <AlertCircle className="h-8 w-8 text-muted-foreground" />
+                  </div>
+                  <p className="text-muted-foreground font-medium">暂无维修任务</p>
+                  <p className="text-xs text-muted-foreground mt-1">请点击"新建维修"按钮添加维修任务</p>
+                </CardContent>
               )}
+            </Card>
             </div>
-          </div>
           </>
           )}
         </div>

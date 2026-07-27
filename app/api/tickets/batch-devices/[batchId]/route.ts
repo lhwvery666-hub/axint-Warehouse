@@ -45,6 +45,9 @@ export async function GET(
     const hasRevisionRequestedBy = columnNames.some(c => c.toLowerCase() === 'revisionrequestedby')
     const hasRevisionRequestReason = columnNames.some(c => c.toLowerCase() === 'revisionrequestreason')
     const hasRevisionRequestDate = columnNames.some(c => c.toLowerCase() === 'revisionrequestdate')
+    const hasFactoryTrackingNum = columnNames.some(c => c.toLowerCase() === 'factorytrackingnum')
+    const hasFactoryShipDate = columnNames.some(c => c.toLowerCase() === 'factoryshipdate')
+    const hasArrivalDate = columnNames.some(c => c.toLowerCase() === 'arrivaldate')
 
     // 构建查询字段列表
     let selectFields = `
@@ -83,6 +86,9 @@ export async function GET(
     if (hasRevisionRequestedBy) selectFields += ', RevisionRequestedBy'
     if (hasRevisionRequestReason) selectFields += ', RevisionRequestReason'
     if (hasRevisionRequestDate) selectFields += ', RevisionRequestDate'
+    if (hasFactoryTrackingNum) selectFields += ', FactoryTrackingNum'
+    if (hasFactoryShipDate) selectFields += ', FactoryShipDate'
+    if (hasArrivalDate) selectFields += ', ArrivalDate'
 
     // 查询该批次下的所有设备
     const result = await pool
@@ -118,12 +124,14 @@ export async function GET(
       cancelRequestStatus: hasCancelRequestStatus ? (row.CancelRequestStatus || null) : null,
       cancelRequestReason: hasCancelRequestReason ? (row.CancelRequestReason || null) : null,
       manufactureDate: hasManufactureDate ? (row.ManufactureDate || null) : null,
+      arrivalDate: hasArrivalDate ? (row.ArrivalDate || null) : null,
       warrantyStatus: hasWarrantyStatus ? (row.WarrantyStatus || null) : null,
       warrantyStatusOverride: hasWarrantyStatusOverride ? (row.WarrantyStatusOverride || null) : null,
       // 兼容两列：创建时写入 DeviceImages，更新时写入 DevicePhotos，优先取有值的
       deviceImages: (hasDeviceImages ? (row.DeviceImages || null) : null)
         || (hasDevicePhotos ? (row.DevicePhotos || null) : null),
       repairAction: (row.RepairAction as string | null) || null,
+      quantity: typeof row.Quantity === "number" ? row.Quantity : (parseInt(row.Quantity as string) || 1),
       finalOutcome: (() => {
         try {
           const raw = row.RepairReportContent as string | null
@@ -152,7 +160,7 @@ export async function GET(
       quantity: result.recordset[0].Quantity || 0,
       category: result.recordset[0].Category || "",
       subCategory: result.recordset[0].SubCategory || "",
-      deviceCount: devices.length,
+      deviceCount: devices.reduce((sum, d) => sum + (d.quantity || 1), 0),
       signedReportPhoto: signedPhotoValue,
       status: result.recordset[0][DB_FIELDS.STATUS] || result.recordset[0].Status || "Created",
       senderAddress: result.recordset[0][DB_FIELDS.SENDER_ADDRESS] || result.recordset[0].SenderAddress || "",
@@ -161,6 +169,8 @@ export async function GET(
       revisionRequestedBy: hasRevisionRequestedBy ? (result.recordset[0].RevisionRequestedBy || null) : null,
       revisionRequestReason: hasRevisionRequestReason ? (result.recordset[0].RevisionRequestReason || null) : null,
       revisionRequestDate: hasRevisionRequestDate ? (result.recordset[0].RevisionRequestDate || null) : null,
+      factoryTrackingNum: hasFactoryTrackingNum ? (result.recordset[0].FactoryTrackingNum || null) : null,
+      factoryShipDate: hasFactoryShipDate ? (result.recordset[0].FactoryShipDate || null) : null,
     }
 
     console.log(`✅ 查询到 ${devices.length} 个设备`)

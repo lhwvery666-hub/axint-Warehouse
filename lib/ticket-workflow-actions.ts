@@ -19,7 +19,15 @@ export enum TicketAction {
   
   // 维修人员动作
   SEND_REPORT_FOR_SIGN = "send_report_for_sign", // 发送维修报告至现场确认
-  CONFIRM_SIGNATURE = "confirm_signature",       // 核对凭证并转交商务
+  /**
+   * @deprecated 遗留动作，未被任何前端组件触发。
+   * 该动作原本允许维修人员在"维修作业中"（Technician_Repairing）状态下
+   * 直接核对签字凭证并一步转交商务审核，会跳过"手动确认完工/选择处理结果"这一步，
+   * 与当前批次流程（complete-repair-batch 要求先填 finalOutcome 再手动提交）相冲突，
+   * 属于可能导致状态机被绕过（跳步）的技术债。保留枚举值仅为兼容历史操作日志中可能存在的记录，
+   * 对应的流转规则已从 WORKFLOW_TRANSITIONS 中移除，不应再被任何新代码使用。
+   */
+  CONFIRM_SIGNATURE = "confirm_signature",       // 核对凭证并转交商务（已废弃，勿使用）
   
   // 现场人员动作
   UPLOAD_SIGNATURE = "upload_signature",         // 上传签字凭证
@@ -91,14 +99,15 @@ export const WORKFLOW_TRANSITIONS: WorkflowTransition[] = [
     requiresValidation: false, // 上传操作本身就是验证
   },
   
-  // 5. 维修进行中（签字已上传）-> 商务审核
-  {
-    currentStatus: TicketStatus.TECHNICIAN_REPAIRING,
-    allowedRole: UserRole.TECHNICIAN,
-    action: TicketAction.CONFIRM_SIGNATURE,
-    nextStatus: TicketStatus.BUSINESS_REVIEW,
-    requiresValidation: false,
-  },
+  // 5. 维修作业中（签字已上传）-> 商务审核 / 仓库发货
+  // ⚠️ 技术债清理：这里原本有一条 CONFIRM_SIGNATURE 规则，允许维修人员在
+  // TECHNICIAN_REPAIRING 状态下"一步转交商务"，直接跳到 BUSINESS_REVIEW，
+  // 完全跳过"选择每台设备最终处理结果 + 手动点击提交完工"这两步，是可能导致
+  // 状态机被绕过（跳步）的死代码路径（未被任何前端组件实际触发）。
+  // 该状态下真正生效的流转规则是 POST /api/tickets/complete-repair-batch/[batchId]，
+  // 它会校验 finalOutcome 是否填写完整、当前状态是否确实为 TECHNICIAN_REPAIRING，
+  // 再决定流转到 BUSINESS_REVIEW 或（免费批次）WAREHOUSE_SHIPPING。
+  // 因此这里不再声明对应的 WORKFLOW_TRANSITIONS 规则，避免未来被误接到某个按钮上。
   
   // 6. 商务审核 -> 待仓库发货
   {

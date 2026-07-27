@@ -12,7 +12,7 @@ import { Search, Plus, AlertCircle, X, Download } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import CreateTicketForm from "@/components/create-ticket-form";
 import { cn } from "@/lib/utils";
-import { TicketStatus, normalizeTicketStatus } from "@/lib/enums";
+import { TicketStatus, normalizeTicketStatus, TICKET_STATUS_LABELS } from "@/lib/enums";
 
 interface RepairsPanelProps {
   isOpen: boolean;
@@ -60,18 +60,25 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
   });
 
   // 获取状态徽章
+  // ⚠️ 曾经的 bug：① CREATED 与 WAREHOUSE_CONFIRMING 被强行合并显示"待处理"；
+  // ② RETURN_UNREPAIRED 的分支代码写在 SCRAPPED 的 return 语句之后，是永远不会执行的死代码；
+  // ③ 缺少 TECHNICIAN_REPAIRING 分支。
+  // 修复：拆分独立展示，文案统一取自 TICKET_STATUS_LABELS 兜底。
   const getStatusBadge = (status: string) => {
     const normalizedStatus = normalizeTicketStatus(status)
     switch (normalizedStatus) {
       case TicketStatus.CREATED:
-      case TicketStatus.WAREHOUSE_CONFIRMING:
         return <Badge className="bg-yellow-100 text-yellow-800 border-yellow-300 text-xs">待处理</Badge>
+      case TicketStatus.WAREHOUSE_CONFIRMING:
+        return <Badge className="bg-orange-100 text-orange-800 border-orange-300 text-xs">待仓库确认</Badge>
       case TicketStatus.IN_REPAIR:
-        return <Badge className="bg-blue-100 text-blue-800 border-blue-300 text-xs">维修中</Badge>
+        return <Badge className="bg-blue-100 text-blue-800 border-blue-300 text-xs">维修检查中</Badge>
       case TicketStatus.WAREHOUSE_CONFIRMED:
         return <Badge className="bg-purple-100 text-purple-800 border-purple-300 text-xs">仓库已确认</Badge>
       case TicketStatus.PENDING_REPORTER_CONFIRM:
         return <Badge className="bg-orange-100 text-orange-800 border-orange-300 text-xs">待现场确认</Badge>
+      case TicketStatus.TECHNICIAN_REPAIRING:
+        return <Badge className="bg-indigo-100 text-indigo-800 border-indigo-300 text-xs">维修作业中</Badge>
       case TicketStatus.BUSINESS_REVIEW:
         return <Badge className="bg-cyan-100 text-cyan-800 border-cyan-300 text-xs">待商务处理</Badge>
       case TicketStatus.WAREHOUSE_SHIPPING:
@@ -86,9 +93,14 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
         return <Badge className="bg-gray-100 text-gray-800 border-gray-300 text-xs">已取消</Badge>
       case TicketStatus.SCRAPPED:
         return <Badge className="bg-red-100 text-red-800 border-red-300 text-xs">已报废</Badge>
-        return <Badge className="bg-orange-100 text-orange-800 border-orange-300 text-xs">拒修退回</Badge>;
+      case TicketStatus.RETURN_UNREPAIRED:
+        return <Badge className="bg-orange-100 text-orange-800 border-orange-300 text-xs">拒修退回</Badge>
       default:
-        return <Badge className="text-xs">{status}</Badge>;
+        return (
+          <Badge className="text-xs">
+            {normalizedStatus ? TICKET_STATUS_LABELS[normalizedStatus] : status}
+          </Badge>
+        );
     }
   };
 
@@ -171,7 +183,7 @@ export default function RepairsPanel({ isOpen, onClose }: RepairsPanelProps) {
               onClick={() => setStatusFilter("in_repair")}
               className="text-xs"
             >
-              维修中
+              维修检查中
             </Button>
             <Button
               variant={statusFilter === TicketStatus.COMPLETED.toLowerCase() ? "default" : "outline"}
