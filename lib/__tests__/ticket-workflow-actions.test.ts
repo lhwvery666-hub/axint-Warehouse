@@ -3,7 +3,8 @@
  * 测试状态流转规则、权限控制、动作执行逻辑
  */
 
-import { describe, it, expect } from "@jest/globals";
+import { describe, it } from "node:test";
+import { expect } from "./test-helpers";
 import { TicketStatus, UserRole } from "@/lib/enums";
 import {
   TicketAction,

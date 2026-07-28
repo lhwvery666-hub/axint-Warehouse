@@ -131,7 +131,7 @@ export default function BusinessLayout({
             {menuItems.map((item) => {
               const Icon = item.icon;
               const active = isActive(item.href);
-              const Component = item.onClick ? "button" : Link;
+              const Component: React.ElementType = item.onClick ? "button" : Link;
               const props = item.onClick
                 ? { onClick: item.onClick }
                 : { href: item.href };

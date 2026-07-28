@@ -86,6 +86,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
   // 保存当前选中的批次任务（用于批次设备选择）
   const [currentBatchTask, setCurrentBatchTask] = useState<RepairPageProps['batchContext']>(batchContext || null)
   const [operationLogs, setOperationLogs] = useState<OperationLog[]>([])
+  const activeBatchContext = currentBatchTask ?? batchContext
   
   // 当批次任务改变时，获取操作记录
   useEffect(() => {
@@ -650,7 +651,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
         </div>
       )}
 
-      {view === "batchSelect" && (currentBatchTask || batchContext) && (
+      {view === "batchSelect" && activeBatchContext && (
         <div className="p-4 md:p-6 space-y-6">
           <div className="flex items-center gap-3">
             <Button
@@ -669,17 +670,17 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                 选择要处理的设备
               </h1>
               <p className="text-sm text-muted-foreground mt-1">
-                工单号：{(currentBatchTask || batchContext)?.batchId}
+                工单号：{activeBatchContext.batchId}
               </p>
               <p className="text-xs text-muted-foreground mt-1">
-                共 {(currentBatchTask || batchContext)?.devices?.length || 0} 个设备
+                共 {activeBatchContext.devices.length} 个设备
               </p>
             </div>
           </div>
 
-          {(currentBatchTask || batchContext)?.devices && (currentBatchTask || batchContext)?.devices.length > 0 ? (
+          {activeBatchContext.devices.length > 0 ? (
             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-              {(currentBatchTask || batchContext).devices.map((device: any, idx: number) => {
+              {activeBatchContext.devices.map((device: BatchDevice, idx: number) => {
                 console.log(`🔍 批次设备 ${idx}:`, device);
                 return (
                   <Card
@@ -692,7 +693,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                         <Badge variant="outline" className="font-mono text-xs">
                           {device.deviceSerialNumber || device.productSN || "未填写"}
                         </Badge>
-                        {getStatusBadge(device.status)}
+                        {getStatusBadge(device.status || TicketStatus.CREATED)}
                       </div>
                       <div className="space-y-1">
                         {device.deviceName && (
@@ -733,7 +734,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
               </CardHeader>
               <CardContent>
                 <TicketChat 
-                  ticketId={(currentBatchTask || batchContext)?.batchId || ''}
+                  ticketId={activeBatchContext.batchId}
                   currentUser={{
                     name: user?.realName || user?.username || "未知用户",
                     role: (user?.role || "admin") as UserRole

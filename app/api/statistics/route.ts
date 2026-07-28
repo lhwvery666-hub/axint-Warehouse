@@ -1,9 +1,14 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { UserRole } from "@/lib/enums"
 
 // GET /api/statistics
 // 获取数据库统计信息
 export async function GET() {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.WAREHOUSE])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const pool = await getDbConnection()
 
@@ -78,13 +83,12 @@ export async function GET() {
         totalRepairs: totalRepairs.recordset[0]?.Total || 0,
       }
     })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("获取统计信息失败:", error)
     return NextResponse.json(
       {
         success: false,
         message: "获取统计信息时发生错误",
-        error: error?.message || "未知错误",
       },
       { status: 500 }
     )

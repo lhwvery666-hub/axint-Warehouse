@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { UserRole } from "@/lib/enums"
 const bcrypt = require('bcryptjs')
 
 // GET /api/users/[id]
@@ -8,6 +10,9 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> } | { params: { id: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
     const resolvedParams =
@@ -74,13 +79,12 @@ export async function GET(
         updatedAt: row.UpdatedAt ? new Date(row.UpdatedAt).toISOString() : null,
       },
     })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("获取用户信息失败:", error)
     return NextResponse.json(
       {
         success: false,
         message: "获取用户信息时发生错误",
-        error: error?.message || "未知错误",
       },
       { status: 500 }
     )
@@ -93,6 +97,9 @@ export async function PUT(
   request: Request,
   context: { params: Promise<{ id: string }> } | { params: { id: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
     const resolvedParams =
@@ -233,7 +240,7 @@ export async function PUT(
       `)
     
     if (hasUpdatedAt.recordset.length > 0) {
-      updates.push("UpdatedAt = GETDATE()")
+      updates.push("UpdatedAt = GETUTCDATE()")
     }
     
     dbRequest.input("userId", userId)
@@ -260,25 +267,12 @@ export async function PUT(
       success: true,
       message: "用户更新成功",
     })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("更新用户失败:", error)
-    console.error("错误详情:", {
-      message: error?.message,
-      code: error?.code,
-      number: error?.number,
-      originalError: error?.originalError,
-      stack: error?.stack
-    })
     return NextResponse.json(
       {
         success: false,
         message: "更新用户时发生错误",
-        error: error?.message || "未知错误",
-        details: process.env.NODE_ENV === "development" ? {
-          code: error?.code,
-          number: error?.number,
-          originalError: error?.originalError?.message
-        } : undefined
       },
       { status: 500 }
     )
@@ -291,6 +285,9 @@ export async function DELETE(
   request: Request,
   context: { params: Promise<{ id: string }> } | { params: { id: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
     const resolvedParams =
@@ -364,13 +361,12 @@ export async function DELETE(
       success: true,
       message: "用户已注销（软删除），历史工单仍可保留姓名与电话",
     })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("删除用户失败:", error)
     return NextResponse.json(
       {
         success: false,
         message: "删除用户时发生错误",
-        error: error?.message || "未知错误",
       },
       { status: 500 }
     )

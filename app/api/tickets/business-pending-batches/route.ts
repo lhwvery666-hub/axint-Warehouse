@@ -1,10 +1,14 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, TicketStatus } from "@/lib/enums"
+import { DB_FIELDS, TicketStatus, UserRole } from "@/lib/enums"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // GET /api/tickets/business-pending-batches
 // 获取所有待商务审核的批次工单
 export async function GET() {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.BUSINESS])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const pool = await getDbConnection()
 
@@ -37,12 +41,12 @@ export async function GET() {
       data: result.recordset
     })
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("查询待审核批次失败:", error)
     return NextResponse.json(
       { 
         success: false, 
-        message: error.message || "查询失败" 
+        message: "查询失败"
       },
       { status: 500 }
     )

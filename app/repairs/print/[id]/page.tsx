@@ -41,6 +41,7 @@ interface BatchReportData {
     batchId: string;
     workOrderNumber: string;
     projectName: string;
+    projectLocation?: string;
     contactInfo: string;
     customerName: string;
     customerAddress: string;
@@ -575,7 +576,7 @@ export default function RepairReportPrintPage() {
                       variant="outline"
                       onClick={() => {
                         const link = document.createElement('a');
-                        link.href = batchInfo.signedReportPhoto;
+                        link.href = batchInfo.signedReportPhoto!;
                         link.download = `签字报告-${batchInfo.batchId}.jpg`;
                         link.click();
                       }}

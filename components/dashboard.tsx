@@ -1,7 +1,7 @@
 "use client"
 
 import { ChevronRight, Clock, Wrench, AlertCircle, CheckCircle, Search, Calendar, FileText, Printer } from "lucide-react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -568,18 +568,18 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
       </div>
 
       {/* Quick Stats —— 点击可联动过滤下方工单列表，再点一次取消筛选 */}
-      <div className="grid grid-cols-2 gap-4 md:gap-6">
+      <div className="grid grid-cols-2 gap-3 md:gap-4">
         <Card
           onClick={() => setFilterStatus(prev => prev === "pending" ? "all" : "pending")}
           className={cn(
-            "border-border/50 dark:border-border shadow-md hover:shadow-lg transition-shadow bg-gradient-to-br from-primary/5 to-primary/10 dark:from-primary/20 dark:to-primary/15 bg-card dark:bg-card cursor-pointer select-none",
+            "gap-0 py-0 border-border/50 dark:border-border shadow-sm hover:shadow-md transition-shadow bg-gradient-to-br from-primary/5 to-primary/10 dark:from-primary/20 dark:to-primary/15 bg-card dark:bg-card cursor-pointer select-none",
             filterStatus === "pending" && "ring-2 ring-primary border-primary"
           )}
         >
-          <CardContent className="p-4 md:p-6 text-center">
-            <div className="flex items-center justify-center mb-2">
-              <Clock className="h-5 w-5 text-primary mr-2" />
-              <p className="text-3xl md:text-4xl font-bold text-primary">
+          <CardContent className="px-3 py-2.5 text-center">
+            <div className="flex items-center justify-center mb-0.5">
+              <Clock className="h-4 w-4 text-primary mr-2" />
+              <p className="text-2xl md:text-3xl font-bold text-primary leading-none">
                 {repairs.filter(r => r && (normalizeTicketStatus(r.status) === TicketStatus.CREATED || normalizeTicketStatus(r.status) === TicketStatus.WAREHOUSE_CONFIRMING)).length}
               </p>
             </div>
@@ -591,14 +591,14 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
         <Card
           onClick={() => setFilterStatus(prev => prev === "active" ? "all" : "active")}
           className={cn(
-            "border-border/50 dark:border-border shadow-md hover:shadow-lg transition-shadow bg-gradient-to-br from-warning/5 to-warning/10 dark:from-warning/20 dark:to-warning/15 bg-card dark:bg-card cursor-pointer select-none",
+            "gap-0 py-0 border-border/50 dark:border-border shadow-sm hover:shadow-md transition-shadow bg-gradient-to-br from-warning/5 to-warning/10 dark:from-warning/20 dark:to-warning/15 bg-card dark:bg-card cursor-pointer select-none",
             filterStatus === "active" && "ring-2 ring-warning border-warning"
           )}
         >
-          <CardContent className="p-4 md:p-6 text-center">
-            <div className="flex items-center justify-center mb-2">
-              <Wrench className="h-5 w-5 text-warning mr-2" />
-              <p className="text-3xl md:text-4xl font-bold text-warning">
+          <CardContent className="px-3 py-2.5 text-center">
+            <div className="flex items-center justify-center mb-0.5">
+              <Wrench className="h-4 w-4 text-warning mr-2" />
+              <p className="text-2xl md:text-3xl font-bold text-warning leading-none">
                 {repairs.filter(r => r && (r.status === "processing" || r.status === "in_repair" || r.status === "delayed")).length}
               </p>
             </div>
@@ -609,8 +609,8 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
         </Card>
       </div>
 
-      <div className="grid md:grid-cols-3 gap-6">
-        <div className="md:col-span-2 space-y-6">
+      <div className="space-y-4">
+        <div className="space-y-4">
           {/* Task List Header */}
           <div className="flex items-center justify-between pt-2">
             <h2 className="text-lg md:text-xl font-bold text-foreground">维修工单</h2>
@@ -620,9 +620,9 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
           </div>
 
           {/* Task List —— 紧凑列表模式 */}
-          <Card className="border-border/50 dark:border-border overflow-hidden">
+          <Card className="gap-0 border-0 bg-transparent py-0 shadow-none overflow-visible">
             {filteredTasks.length > 0 ? (
-              <div className="flex flex-col">
+              <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
                 {filteredTasks.map((task, taskIdx) => {
                   const unread = task.isBatch ? getUnreadCount(task.batchId, task.rawData?.messageCount || 0) : 0
                   const isTerminal = isTerminalStatus(task.status)
@@ -636,6 +636,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
                   return (
                     <WorkOrderListRow
                       key={task.id ? `task-db-${task.id}` : `task-fallback-${taskIdx}`}
+                      className="h-full rounded-xl border border-border/60 bg-card shadow-sm hover:border-primary/40 last:border-b"
                       title={task.isBatch ? `工单号：${task.batchId}` : `序列号：${task.deviceSerialNumber}`}
                       isBatch={task.isBatch}
                       projectName={task.isBatch ? task.projectName : undefined}
@@ -725,7 +726,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
                 })}
               </div>
             ) : (
-              <CardContent className="p-8 text-center">
+              <CardContent className="rounded-xl border border-border/50 bg-card p-8 text-center">
                 <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
                   <AlertCircle className="h-8 w-8 text-muted-foreground" />
                 </div>
@@ -740,48 +741,6 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
           </Card>
         </div>
 
-        <div className="space-y-6">
-          {/* Recent Activity */}
-          <Card className="border-border/50 shadow-md">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base font-semibold">近期活动</CardTitle>
-            </CardHeader>
-            <CardContent className="pt-0">
-              <div className="space-y-3">
-                {repairs && repairs.length > 0 ? (
-                  repairs
-                    .filter(repair => repair && repair.reportedAt)
-                    .sort((a, b) => {
-                      try {
-                        return new Date(b.reportedAt).getTime() - new Date(a.reportedAt).getTime()
-                      } catch {
-                        return 0
-                      }
-                    })
-                    .slice(0, 3)
-                    .map((repair, index) => (
-                      <div key={repair.id ? `activity-${repair.id}` : `activity-idx-${index}`} className="flex items-start gap-3 text-sm p-2 rounded-lg hover:bg-muted/50 transition-colors">
-                        <div className={`w-2.5 h-2.5 rounded-full mt-1.5 shrink-0 ${
-                          normalizeTicketStatus(repair.status) === TicketStatus.COMPLETED ? "bg-success" : 
-                          normalizeTicketStatus(repair.status) === TicketStatus.IN_REPAIR ? "bg-primary" : 
-                          normalizeTicketStatus(repair.status) === TicketStatus.CREATED ? "bg-warning" : "bg-muted-foreground"
-                        }`}></div>
-                      <p className="text-muted-foreground leading-relaxed">{
-                          normalizeTicketStatus(repair.status) === TicketStatus.COMPLETED ? `完成 ${repair.deviceName || repair.deviceModel || '设备'} 的维修` :
-                          normalizeTicketStatus(repair.status) === TicketStatus.IN_REPAIR ? `正在处理 ${repair.deviceName || repair.deviceModel || '设备'}` :
-                          `新工单: ${repair.deviceName || repair.deviceModel || '设备'}`
-                        }</p>
-                      </div>
-                    ))
-                ) : (
-                  <div className="text-center py-6">
-                    <p className="text-sm text-muted-foreground">暂无近期活动</p>
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
       </div>
 
       {/* 批次设备选择弹窗 - 已废弃，现在直接跳转到批次详情页 */}

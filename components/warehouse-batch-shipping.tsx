@@ -828,7 +828,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
               <AlertCircle className="h-4 w-4 text-amber-600" />
               <AlertDescription className="text-amber-800 text-sm">
                       <span className="font-semibold">发货信息暂不可编辑</span>：当前工单状态为"
-                <span className="font-medium">{TICKET_STATUS_LABELS[normalizeTicketStatus(batchInfo.status)] || batchInfo.status}</span>"，
+                <span className="font-medium">{TICKET_STATUS_LABELS[normalizeTicketStatus(batchInfo.status) ?? TicketStatus.WAREHOUSE_SHIPPING] || batchInfo.status}</span>"，
                 需要维修人员完成维修并选择最终处理结果（维修完成 / 报废 / 寄回）后，
                 工单流转至"待发货"状态，仓库才可填写发货信息。
               </AlertDescription>

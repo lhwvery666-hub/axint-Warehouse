@@ -160,9 +160,10 @@ export async function POST(
     const BUSINESS_REVIEW_SKIP_OPERATOR = "系统自动（免费维修跳过商务审核）"
 
     for (const device of deviceRows) {
+      const finalOutcome = device.finalOutcome as FinalOutcome
       const targetStatus = isFreeBatch
         ? TicketStatus.WAREHOUSE_SHIPPING
-        : (STATUS_MAP[device.finalOutcome!] ?? TicketStatus.BUSINESS_REVIEW)
+        : (STATUS_MAP[finalOutcome] ?? TicketStatus.BUSINESS_REVIEW)
 
       if (isFreeBatch) {
         // 免费批次：直接跳过商务审核，同时把收款/开票标记为"已满足"，
@@ -204,7 +205,7 @@ export async function POST(
             WHERE ${DB_FIELDS.ID} = @deviceId
           `)
       }
-      summaryParts.push(`${device.deviceSN || device.id}（${OUTCOME_LABELS[device.finalOutcome!] ?? device.finalOutcome}）`)
+      summaryParts.push(`${device.deviceSN || device.id}（${OUTCOME_LABELS[finalOutcome] ?? finalOutcome}）`)
     }
 
     // 写入操作记录（使用 FinalOutcome 枚举，禁止魔法字符串）

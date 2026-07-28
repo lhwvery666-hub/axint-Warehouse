@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, TicketActionType } from "@/lib/enums"
-import { cookies } from "next/headers"
+import {
+  DB_FIELDS,
+  FINAL_OUTCOME_LABELS,
+  FinalOutcome,
+  TicketActionType,
+  UserRole,
+} from "@/lib/enums"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 /**
  * GET /api/tickets/[id]/final-outcome
@@ -11,6 +17,9 @@ export async function GET(
   _request: Request,
   context: { params: Promise<{ id: string }> } | { params: { id: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.TECHNICIAN, UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const resolvedParams =
       "then" in (context as any).params
@@ -45,8 +54,8 @@ export async function GET(
 
     return NextResponse.json({ success: true, data: { finalOutcome } })
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : "查询失败"
-    return NextResponse.json({ success: false, message: msg }, { status: 500 })
+    console.error("查询最终处理结果失败:", error)
+    return NextResponse.json({ success: false, message: "查询失败" }, { status: 500 })
   }
 }
 
@@ -62,24 +71,24 @@ export async function PATCH(
   request: Request,
   context: { params: Promise<{ id: string }> } | { params: { id: string } }
 ) {
-  try {
-    const cookieStore = await cookies()
-    const userIdCookie = cookieStore.get("userId")?.value || null
-    if (!userIdCookie) {
-      return NextResponse.json({ success: false, message: "未登录" }, { status: 401 })
-    }
+  const authResult = await checkUserRole([UserRole.TECHNICIAN, UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
 
+  try {
     const resolvedParams =
       "then" in (context as any).params
         ? await (context as { params: Promise<{ id: string }> }).params
         : (context as { params: { id: string } }).params
     const deviceId = resolvedParams.id
 
-    const body = await request.json()
-    const { finalOutcome } = body as { finalOutcome: string | null }
+    const body = (await request.json()) as { finalOutcome?: unknown }
+    const finalOutcome = body.finalOutcome
+    const validOutcomes = Object.values(FinalOutcome)
 
-    const VALID_OUTCOMES = ["Completed", "Scrapped", "ReturnUnrepaired"]
-    if (finalOutcome !== null && !VALID_OUTCOMES.includes(finalOutcome)) {
+    if (
+      finalOutcome !== null &&
+      (typeof finalOutcome !== "string" || !validOutcomes.includes(finalOutcome as FinalOutcome))
+    ) {
       return NextResponse.json({ success: false, message: "无效的处理结果值" }, { status: 400 })
     }
 
@@ -125,21 +134,14 @@ export async function PATCH(
 
     // 写入操作日志
     try {
-      const userResult = await pool
-        .request()
-        .input("userId", userIdCookie)
-        .query(`SELECT TOP 1 RealName, Username FROM Users WHERE UserID = @userId`)
       const operatorName =
-        userResult.recordset[0]?.RealName ||
-        userResult.recordset[0]?.Username ||
+        authResult.realName ||
+        authResult.username ||
         "维修人员"
 
-      const OUTCOME_LABELS: Record<string, string> = {
-        Completed: "维修完成",
-        Scrapped: "无需维修，报废",
-        ReturnUnrepaired: "无需维修，寄回",
-      }
-      const outcomeLabel = finalOutcome ? (OUTCOME_LABELS[finalOutcome] ?? finalOutcome) : "清除"
+      const outcomeLabel = finalOutcome
+        ? FINAL_OUTCOME_LABELS[finalOutcome as FinalOutcome]
+        : "清除"
 
       await pool
         .request()
@@ -147,7 +149,7 @@ export async function PATCH(
         .input("actionType", TicketActionType.STATUS_CHANGE)
         .input("oldStatus", currentStatus)
         .input("newStatus", currentStatus) // 状态不变
-        .input("operatorId", Number(userIdCookie))
+        .input("operatorId", Number(authResult.userId))
         .input("operatorName", operatorName)
         .input(
           "description",
@@ -166,8 +168,7 @@ export async function PATCH(
 
     return NextResponse.json({ success: true, message: "处理结果已保存" })
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : "保存失败"
     console.error("保存最终处理结果失败:", error)
-    return NextResponse.json({ success: false, message: msg }, { status: 500 })
+    return NextResponse.json({ success: false, message: "保存失败" }, { status: 500 })
   }
 }

@@ -18,6 +18,7 @@ import {
   getBusinessConfig,
   getDefaultRoute
 } from '@/lib/system-config';
+import type { RoleConfig } from '@/lib/system-config';
 
 // ==================== 基础配置Hook ====================
 
@@ -225,7 +226,7 @@ export function useBusinessConfig() {
 // ==================== 用户角色Hook ====================
 
 export function useUserRole(user: any) {
-  const [roleConfig, setRoleConfig] = useState<any>(null);
+  const [roleConfig, setRoleConfig] = useState<RoleConfig | null>(null);
   const [defaultRoute, setDefaultRoute] = useState<string>('/');
   const [loading, setLoading] = useState(true);
 

@@ -10,10 +10,7 @@ export async function GET(
   context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
 ) {
   try {
-    const resolvedParams =
-      "then" in (context as {params: Promise<{batchId: string}>}).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
+    const resolvedParams = await Promise.resolve(context.params)
 
     const batchId = resolvedParams.batchId
 
@@ -81,7 +78,14 @@ export async function GET(
 
     if (resultWithShipping.recordset.length > 0) {
       // 找到了有发货信息的设备
-      data = resultWithShipping.recordset[0] as typeof data
+      data = resultWithShipping.recordset[0] as {
+        ShippingType?: string
+        ReturnDate?: Date
+        ReturnTrackingNum?: string
+        ReturnQuantity?: number
+        WarehouseShippedAt?: Date
+        WarehouseShippedBy?: string
+      }
     } else {
       // 验证批次是否存在
       const batchCheck = await pool
@@ -112,6 +116,13 @@ export async function GET(
           shippedBy: null
         }
       })
+    }
+
+    if (!data) {
+      return NextResponse.json(
+        { success: false, message: "未找到发货信息" },
+        { status: 404 }
+      )
     }
 
     return NextResponse.json({

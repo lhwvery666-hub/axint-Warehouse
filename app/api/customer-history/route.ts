@@ -60,15 +60,16 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // 使用 upsert：如果存在则更新，不存在则创建
-    const customerHistory = await prisma.customer_History.upsert({
-      where: {
-        userId_customerName: {
-          userId: parseInt(userId),
-          customerName: customerName,
-        },
-      },
-      update: {
+    const numericUserId = parseInt(userId)
+    const existing = await prisma.customer_History.findFirst({
+      where: { userId: numericUserId, customerName },
+      select: { id: true },
+    })
+
+    const customerHistory = existing
+      ? await prisma.customer_History.update({
+          where: { id: existing.id },
+          data: {
         contactPerson,
         contactPhone,
         address,
@@ -76,16 +77,18 @@ export async function POST(request: NextRequest) {
         useCount: {
           increment: 1,
         },
-      },
-      create: {
-        userId: parseInt(userId),
-        customerName,
-        contactPerson,
-        contactPhone,
-        address,
-        useCount: 1,
-      },
-    })
+          },
+        })
+      : await prisma.customer_History.create({
+          data: {
+            userId: numericUserId,
+            customerName,
+            contactPerson,
+            contactPhone,
+            address,
+            useCount: 1,
+          },
+        })
 
     return NextResponse.json({
       success: true,

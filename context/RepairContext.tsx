@@ -120,8 +120,8 @@ export function RepairProvider({ children }: { children: ReactNode }) {
       
       if (result.data && Array.isArray(result.data)) {
         // 转换为前端需要的格式
-        const formattedRepairs: RepairTicket[] = result.data
-          .map((ticket: any) => {
+        const formattedRepairs: RepairTicket[] = (result.data as unknown[])
+          .map((ticket: any): RepairTicket | null => {
             const dbStatus = (ticket.status || "Created").toLowerCase();
 
             // 已删除的工单（回收站）不出现在正常列表里
@@ -186,7 +186,7 @@ export function RepairProvider({ children }: { children: ReactNode }) {
               updatedAt: ticket.updatedAt || null,
             };
           })
-          .filter((item): item is RepairTicket => item !== null);
+          .filter((item: RepairTicket | null): item is RepairTicket => item !== null);
 
         setRepairs(formattedRepairs);
       } else {

@@ -34,6 +34,7 @@ import { zhCN } from "date-fns/locale"
 import { toBeijingTime } from "@/lib/utils"
 import { toast } from "sonner"
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 interface BatchWorkOrderDetailProps {
   batchId: string
@@ -43,6 +44,7 @@ interface BatchWorkOrderDetailProps {
 interface Device {
   id: string
   deviceSerialNumber: string
+  productSN?: string | null
   modelName: string
   deviceName: string
   status: string
@@ -56,6 +58,7 @@ interface Device {
   warrantyStatusOverride?: string | null
   deviceImages?: string | null
   repairAction?: string | null
+  quantity?: number | null
   /** 技师在 TECHNICIAN_REPAIRING 阶段填写的最终处理结果（Completed / Scrapped / ReturnUnrepaired） */
   finalOutcome?: string | null
 }
@@ -202,11 +205,18 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
     try {
       const formData = new FormData()
       formData.append("file", file)
+      formData.append("type", "stamp_attachment")
       const uploadRes = await fetch("/api/upload", { method: "POST", body: formData })
       const uploadResult = await uploadRes.json()
-      if (!uploadResult.success) throw new Error(uploadResult.message || "上传失败")
-      const filePath: string = uploadResult.url || uploadResult.path || uploadResult.filePath
-      await fetch(`/api/tickets/batch-attachments/${batchId}`, {
+      if (!uploadRes.ok || !uploadResult.success) {
+        throw new Error(uploadResult.message || "文件上传失败")
+      }
+
+      // /api/upload 的文件信息位于 data 中；旧代码读取顶层字段，导致 filePath 始终为空。
+      const filePath: string | undefined = uploadResult.data?.filePath
+      if (!filePath) throw new Error("上传成功，但未返回文件地址")
+
+      const attachmentRes = await fetch(`/api/tickets/batch-attachments/${batchId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -217,9 +227,15 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
           fileSize: file.size,
         }),
       })
+      const attachmentResult = await attachmentRes.json()
+      if (!attachmentRes.ok || !attachmentResult.success) {
+        throw new Error(attachmentResult.message || "附件记录保存失败")
+      }
+
       await fetchStampAttachments()
+      toast.success("盖章件附件上传成功")
     } catch (err) {
-      alert(err instanceof Error ? err.message : "上传失败")
+      toast.error(err instanceof Error ? err.message : "上传失败")
     } finally {
       setIsUploadingAttachment(false)
     }
@@ -476,7 +492,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
   // 特殊情况：最终维修状态下，序列号可以为空，不显示"未填写"
   const formatSerialNumber = (sn: string | null | undefined) => {
     const normalizedStatus = normalizeTicketStatus(batchInfo?.status || "")
-    const isTerminal = TERMINAL_STATUSES.includes(normalizedStatus)
+    const isTerminal = normalizedStatus !== null && TERMINAL_STATUSES.includes(normalizedStatus)
     
     if (!sn || sn.trim() === "" || sn.toUpperCase() === "PENDING_VERIFY" || sn === "待验证") {
       // 最终维修状态下，序列号可以为空，返回空字符串
@@ -607,8 +623,8 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                     </Button>
                   ) : batchInfo?.status === TicketStatus.TECHNICIAN_REPAIRING ? (
                     (() => {
-                      // 聚合守卫：统计尚未填写最终处理结果的设备数量
-                      const pendingCount = devices.filter(d => !d.finalOutcome).length
+                      // 一条明细可能代表多台设备，必须按 Quantity 汇总，而不是统计明细行数
+                      const pendingCount = sumDeviceQuantity(devices.filter(d => !d.finalOutcome))
                       const hasBlocked   = pendingCount > 0
                       return (
                         <div className="flex flex-col items-end gap-1">
@@ -1452,7 +1468,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
               确认删除批次工单
             </DialogTitle>
             <DialogDescription>
-              此操作将<span className="font-semibold text-destructive">永久删除</span>批次号 <span className="font-mono font-semibold">{batchId}</span> 下的所有 {devices.length} 台设备工单，数据无法恢复！
+              此操作将<span className="font-semibold text-destructive">永久删除</span>批次号 <span className="font-mono font-semibold">{batchId}</span> 下的所有 {sumDeviceQuantity(devices)} 台设备工单，数据无法恢复！
             </DialogDescription>
           </DialogHeader>
 

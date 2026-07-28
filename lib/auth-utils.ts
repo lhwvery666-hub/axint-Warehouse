@@ -2,75 +2,83 @@ import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { getDbConnection } from "@/lib/db-config"
 import { UserRole, normalizeUserRole } from "@/lib/enums"
+import { getUserQueryConfig } from "@/lib/field-checks"
 
-/**
- * 获取当前登录用户的角色
- * 如果 cookie 中没有 userRole，会从数据库查询并自动补充
- */
-export async function getCurrentUserRole(): Promise<{
+export interface AuthenticatedUser {
   userId: string
   userRole: string
+  normalizedRole: UserRole
+  username: string
+  realName: string
+}
+
+interface CurrentUser extends Omit<AuthenticatedUser, "normalizedRole"> {
   normalizedRole: UserRole | null
-} | null> {
+}
+
+interface UserRow {
+  UserID: number | string
+  Username: string | null
+  Role: string | null
+  RealName: string | null
+}
+
+/**
+ * 从服务端 Cookie 取得用户 ID，并始终从数据库读取真实用户与角色。
+ * 不信任客户端提交的 userRole Cookie，避免伪造角色或角色变更后权限未及时失效。
+ */
+export async function getCurrentUserRole(): Promise<CurrentUser | null> {
   try {
     const cookieStore = await cookies()
     const userIdCookie = cookieStore.get("userId")?.value
-    let userRole = cookieStore.get("userRole")?.value
 
-    if (!userIdCookie) {
+    if (!userIdCookie || !/^\d+$/.test(userIdCookie)) {
       return null
     }
 
-    // 🔧 降级逻辑：如果 userRole cookie 不存在或为 undefined，从数据库查询并补充
-    if (!userRole || userRole === "undefined") {
-      console.log(`[Auth Utils] ⚠️ userRole 缺失，从数据库查询用户信息 (userId: ${userIdCookie})`)
-      const pool = await getDbConnection()
-      const userResult = await pool
-        .request()
-        .input("userId", userIdCookie)
-        .query(`SELECT TOP 1 Role FROM Users WHERE UserID = @userId`)
-      
-      if (userResult.recordset.length > 0) {
-        userRole = userResult.recordset[0].Role
-        // 补充设置 userRole cookie
-        cookieStore.set("userRole", userRole || "", {
-          httpOnly: true,
-          secure: false,
-          sameSite: "lax",
-          maxAge: 60 * 60 * 24,
-          path: "/",
-        })
-        console.log(`[Auth Utils] ✅ 已从数据库补充 userRole: "${userRole}"`)
-      } else {
-        console.error(`[Auth Utils] ❌ 用户不存在: userId=${userIdCookie}`)
-        return null
-      }
+    const pool = await getDbConnection()
+    const queryConfig = await getUserQueryConfig([
+      "UserID",
+      "Username",
+      "Role",
+      "RealName",
+    ])
+    const userResult = await pool
+      .request()
+      .input("userId", Number(userIdCookie))
+      .query(`
+        SELECT TOP 1 ${queryConfig.fields}
+        FROM Users
+        WHERE UserID = @userId
+        ${queryConfig.conditions}
+      `)
+
+    if (userResult.recordset.length === 0) {
+      return null
     }
 
-    const normalizedRole = normalizeUserRole(userRole || "")
-    
+    const user = userResult.recordset[0] as UserRow
+    const userRole = user.Role || ""
+
     return {
-      userId: userIdCookie,
-      userRole: userRole || "",
-      normalizedRole,
+      userId: String(user.UserID),
+      userRole,
+      normalizedRole: normalizeUserRole(userRole),
+      username: user.Username || "",
+      realName: user.RealName || "",
     }
-  } catch (error) {
-    console.error("[Auth Utils] 获取用户角色失败:", error)
+  } catch (error: unknown) {
+    console.error("[Auth Utils] 获取当前用户失败:", error)
     return null
   }
 }
 
 /**
- * 检查用户是否有指定的角色权限
- * @param allowedRoles 允许的角色列表
- * @returns 如果有权限返回用户信息，否则返回 NextResponse 错误响应
+ * 验证当前用户是否具备指定角色。
  */
 export async function checkUserRole(
   allowedRoles: UserRole[]
-): Promise<
-  | { userId: string; userRole: string; normalizedRole: UserRole }
-  | NextResponse
-> {
+): Promise<AuthenticatedUser | NextResponse> {
   const userInfo = await getCurrentUserRole()
 
   if (!userInfo) {
@@ -82,7 +90,7 @@ export async function checkUserRole(
 
   if (!userInfo.normalizedRole || !allowedRoles.includes(userInfo.normalizedRole)) {
     console.error(
-      `[Auth Utils] 权限验证失败！原始角色="${userInfo.userRole}", 标准化角色="${userInfo.normalizedRole}", 允许的角色="${allowedRoles.join(", ")}"`
+      `[Auth Utils] 权限不足：实际角色="${userInfo.userRole}"，允许角色="${allowedRoles.join(", ")}"`
     )
     return NextResponse.json(
       { success: false, message: "权限不足" },
@@ -94,14 +102,11 @@ export async function checkUserRole(
     userId: userInfo.userId,
     userRole: userInfo.userRole,
     normalizedRole: userInfo.normalizedRole,
+    username: userInfo.username,
+    realName: userInfo.realName,
   }
 }
 
-/**
- * 判断是否是 NextResponse（错误响应）
- */
-export function isErrorResponse(
-  result: unknown
-): result is NextResponse {
+export function isErrorResponse(result: unknown): result is NextResponse {
   return result instanceof NextResponse
 }

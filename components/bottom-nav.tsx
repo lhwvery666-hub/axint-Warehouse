@@ -4,11 +4,12 @@ import { Home, Wrench, User, LogOut } from "lucide-react"
 import { useAuth } from "@/context/auth-context"
 import { useState, useEffect } from "react"
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar"
+import { UserRole } from "@/lib/enums"
 
 interface BottomNavProps {
-  activeTab: "home" | "repair" | "profile"
+  activeTab: "home" | "repair" | "profile" | "recycle"
   onTabChange: (tab: "home" | "repair" | "profile") => void
-  userType?: "technician" | "reporter"
+  userType?: UserRole | "technician" | "reporter" | "admin" | "warehouse" | "business" | null
 }
 
 export default function BottomNav({ activeTab, onTabChange, userType }: BottomNavProps) {

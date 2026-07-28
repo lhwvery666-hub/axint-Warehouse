@@ -2,6 +2,15 @@ import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import { DB_FIELDS, UserRole, normalizeUserRole, REPAIR_ACTION_LABELS, RepairAction, TicketActionType, TERMINAL_STATUSES, normalizeTicketStatus } from "@/lib/enums"
 import { cookies } from "next/headers"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+
+const REPAIR_REPORT_READ_ROLES: UserRole[] = [
+  UserRole.ADMIN,
+  UserRole.TECHNICIAN,
+  UserRole.WAREHOUSE,
+  UserRole.REPORTER,
+  UserRole.BUSINESS,
+]
 
 /**
  * GET /api/tickets/batch-repair-report/[batchId]
@@ -11,6 +20,9 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
 ) {
+  const authResult = await checkUserRole(REPAIR_REPORT_READ_ROLES)
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const resolvedParams =
       "then" in (context as any).params
@@ -178,10 +190,10 @@ export async function GET(
       success: true,
       data: reportData,
     })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("获取批次维修报告失败:", error)
     return NextResponse.json(
-      { success: false, message: error.message || "获取失败" },
+      { success: false, message: "获取失败" },
       { status: 500 }
     )
   }

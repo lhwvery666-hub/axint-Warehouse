@@ -196,6 +196,7 @@ export default function CreateTicketForm({ onSuccess, onCancel, initialData }: C
       interface ApiResponse {
         success: boolean
         message?: string
+        error?: string
         data?: {
           batchId: string
         }

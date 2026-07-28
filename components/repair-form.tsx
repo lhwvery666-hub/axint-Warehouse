@@ -81,7 +81,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
   // 项目名称状态
   const [projectLocation, setProjectLocation] = useState(initialData?.projectLocation || "")
   const [isProjectDropdownOpen, setIsProjectDropdownOpen] = useState(false)
-  const [filteredLocations, setFilteredLocations] = useState([])
+  const [filteredLocations, setFilteredLocations] = useState<typeof LOCATIONS>([])
 
   // 快递信息状态
   const [trackingNumber, setTrackingNumber] = useState(initialData?.trackingNumber || "")
@@ -156,7 +156,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       try {
         const response = await fetch('/api/customer-history', {
           headers: {
-            'x-user-id': user?.userId?.toString() || '',
+            'x-user-id': user?.id || '',
           },
         })
         const data = await response.json()
@@ -170,10 +170,10 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       }
     }
 
-    if (user?.userId) {
+    if (user?.id) {
       fetchCustomerHistory()
     }
-  }, [user?.userId])
+  }, [user?.id])
 
   // 选择历史客户后自动填充
   const handleSelectCustomerHistory = (customer: CustomerHistoryItem) => {
@@ -909,12 +909,18 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
               category: deviceCategory,
               subCategory: deviceSubCategory,
               modelSelected: deviceModelSelected,
+              faultDescription,
+              devicePhotoFiles: [],
+              deviceQuantity: 1,
             }]
           : batchSerialNumbers.map(sn => ({
               serialNumber: sn,
               category: deviceCategory,
               subCategory: deviceSubCategory,
               modelSelected: deviceModelSelected,
+              faultDescription,
+              devicePhotoFiles: [],
+              deviceQuantity: 1,
             }))
 
       // 使用批量创建 API，将同一批次的设备关联到同一个 Batch

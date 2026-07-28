@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
-import { cookies } from "next/headers"
+import { getCurrentUserRole } from "@/lib/auth-utils"
+import { UserRole } from "@/lib/enums"
 
 async function ensureTable(pool: Awaited<ReturnType<typeof getDbConnection>>) {
   await pool.request().query(`
@@ -24,20 +25,13 @@ async function ensureTable(pool: Awaited<ReturnType<typeof getDbConnection>>) {
   `)
 }
 
-async function getCurrentUser() {
-  const cookieStore = await cookies()
-  const userCookie = cookieStore.get("user")
-  if (!userCookie?.value) return null
-  try { return JSON.parse(userCookie.value) } catch { return null }
-}
-
 // GET /api/tickets/batch-attachments/[batchId]
 export async function GET(
   _request: Request,
   context: { params: Promise<{ batchId: string }> | { batchId: string } }
 ) {
-  const cookieStore = await cookies()
-  if (!cookieStore.get("session")) {
+  const user = await getCurrentUserRole()
+  if (!user) {
     return NextResponse.json({ success: false, message: "未登录" }, { status: 401 })
   }
   const { batchId } = await Promise.resolve(context.params)
@@ -73,11 +67,10 @@ export async function POST(
   request: Request,
   context: { params: Promise<{ batchId: string }> | { batchId: string } }
 ) {
-  const cookieStore = await cookies()
-  if (!cookieStore.get("session")) {
+  const user = await getCurrentUserRole()
+  if (!user) {
     return NextResponse.json({ success: false, message: "未登录" }, { status: 401 })
   }
-  const user = await getCurrentUser()
   const { batchId } = await Promise.resolve(context.params)
   const body = await request.json()
   const { fileName, originalName, filePath, mimeType, fileSize } = body
@@ -93,9 +86,9 @@ export async function POST(
     .input("filePath", filePath)
     .input("mimeType", mimeType || "application/octet-stream")
     .input("fileSize", fileSize || 0)
-    .input("uploadedById", user?.id ?? null)
-    .input("uploadedByName", user?.realName || user?.username || null)
-    .input("uploadedByRole", user?.role || null)
+    .input("uploadedById", Number(user.userId))
+    .input("uploadedByName", user.realName || user.username)
+    .input("uploadedByRole", user.userRole)
     .query(`
       INSERT INTO Batch_Stamp_Attachments
         (BatchId, FileName, OriginalName, FilePath, MimeType, FileSize, UploadedById, UploadedByName, UploadedByRole)
@@ -111,11 +104,10 @@ export async function DELETE(
   request: Request,
   context: { params: Promise<{ batchId: string }> | { batchId: string } }
 ) {
-  const cookieStore = await cookies()
-  if (!cookieStore.get("session")) {
+  const user = await getCurrentUserRole()
+  if (!user) {
     return NextResponse.json({ success: false, message: "未登录" }, { status: 401 })
   }
-  const user = await getCurrentUser()
   const { batchId } = await Promise.resolve(context.params)
   const { searchParams } = new URL(request.url)
   const id = searchParams.get("id")
@@ -129,7 +121,7 @@ export async function DELETE(
     return NextResponse.json({ success: false, message: "附件不存在" }, { status: 404 })
   }
   const ownerId = check.recordset[0].UploadedById
-  if (user?.role !== "admin" && String(ownerId) !== String(user?.id)) {
+  if (user.normalizedRole !== UserRole.ADMIN && String(ownerId) !== user.userId) {
     return NextResponse.json({ success: false, message: "无权删除" }, { status: 403 })
   }
   await pool.request().input("id", Number(id)).query(`DELETE FROM Batch_Stamp_Attachments WHERE Id=@id`)

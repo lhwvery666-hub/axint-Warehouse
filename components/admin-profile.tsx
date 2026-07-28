@@ -18,6 +18,7 @@ import { useRouter } from "next/navigation"
 import { useTheme } from "next-themes"
 import { useRepairContext } from "@/context/RepairContext"
 import { cn } from "@/lib/utils"
+import { UserRole } from "@/lib/enums"
 
 const menuItems = [
   { icon: FileText, label: "我的报告", badge: "" },

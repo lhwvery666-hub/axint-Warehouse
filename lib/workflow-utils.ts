@@ -201,7 +201,7 @@ export const WORKFLOW_STEPS: WorkflowStep[] = [
 ];
 
 // 状态流转规则（使用枚举键值）
-export const STATUS_TRANSITIONS: Record<TicketStatus, TicketStatus> = {
+export const STATUS_TRANSITIONS: Partial<Record<TicketStatus, TicketStatus>> = {
   [TicketStatus.CREATED]: TicketStatus.IN_REPAIR, // 维修人员开始处理
   [TicketStatus.IN_REPAIR]: TicketStatus.ADMIN_REVIEW, // 维修人员填写完成
   [TicketStatus.ADMIN_REVIEW]: TicketStatus.PENDING_SHIPMENT, // 管理员填写完成
@@ -327,6 +327,7 @@ export function getPendingStatusesForRole(role: string): TicketStatus[] {
     // ⚠️ 必须包含 WAREHOUSE_CONFIRMING，否则仪表盘"待处理"卡片计数（Created + Warehouse_Confirming）
     // 与点击卡片后联动过滤出的列表会不一致（部分工单被误过滤掉）
     [UserRole.TECHNICIAN]: [TicketStatus.CREATED, TicketStatus.WAREHOUSE_CONFIRMING, TicketStatus.IN_REPAIR, TicketStatus.PROCESSING, TicketStatus.DELAYED],
+    [UserRole.REPORTER]: [TicketStatus.PENDING_REPORTER_CONFIRM],
     [UserRole.ADMIN]: [TicketStatus.ADMIN_REVIEW],
     [UserRole.BUSINESS]: [TicketStatus.ADMIN_REVIEW],
     [UserRole.WAREHOUSE]: [TicketStatus.WAREHOUSE_CONFIRMING, TicketStatus.WAREHOUSE_SHIPPING, TicketStatus.PENDING_SHIPMENT, TicketStatus.RETURN_UNREPAIRED],

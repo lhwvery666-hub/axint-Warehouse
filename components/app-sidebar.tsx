@@ -4,6 +4,7 @@ import { Home, Wrench, User, LogOut, Database, Trash2 } from "lucide-react"
 import { useAuth } from "@/context/auth-context"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { UserRole } from "@/lib/enums"
 
 interface NavItem {
   id: "home" | "repair" | "profile"
@@ -14,18 +15,14 @@ interface NavItem {
 interface AppSidebarProps {
   activeTab: "home" | "repair" | "profile" | "recycle"
   onTabChange: (tab: "home" | "repair" | "profile" | "recycle") => void
-  userType?: "technician" | "reporter" | "admin" | "warehouse"
+  userType?: UserRole | "technician" | "reporter" | "admin" | "warehouse" | "business" | null
 }
 
 export default function AppSidebar({ activeTab, onTabChange, userType }: AppSidebarProps) {
   const { user, logout } = useAuth()
   
   // 根据传入的用户类型或者认证上下文中的角色显示不同的导航项
-  const effectiveUserType = (userType || user?.role || "technician") as
-    | "technician"
-    | "reporter"
-    | "admin"
-    | "warehouse"
+  const effectiveUserType = userType || user?.role || UserRole.TECHNICIAN
   
   // 根据用户角色显示不同的导航项
   const navItems: NavItem[] = effectiveUserType === "reporter" 

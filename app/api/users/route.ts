@@ -1,10 +1,15 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { UserRole } from "@/lib/enums"
 const bcrypt = require('bcryptjs')
 
 // GET /api/users
 // 获取所有用户列表（仅管理员可访问）
 export async function GET(request: Request) {
+  const authResult = await checkUserRole([UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const url = new URL(request.url)
     const includeDeleted = url.searchParams.get("includeDeleted") === "true"
@@ -62,13 +67,12 @@ export async function GET(request: Request) {
       success: true,
       data: users,
     })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("获取用户列表失败:", error)
     return NextResponse.json(
       {
         success: false,
         message: "获取用户列表时发生错误",
-        error: error?.message || "未知错误",
       },
       { status: 500 }
     )
@@ -78,6 +82,9 @@ export async function GET(request: Request) {
 // POST /api/users
 // 创建新用户（仅管理员可访问）
 export async function POST(request: Request) {
+  const authResult = await checkUserRole([UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const body = await request.json()
     const { username, password, realName, role, phoneNumber } = body ?? {}
@@ -174,7 +181,7 @@ export async function POST(request: Request) {
     
     if (hasCreatedAt && hasUpdatedAt) {
       insertColumns += ", CreatedAt, UpdatedAt"
-      insertValues += ", GETDATE(), GETDATE()"
+      insertValues += ", GETUTCDATE(), GETUTCDATE()"
     }
     
     await requestBuilder.query(`
@@ -186,13 +193,12 @@ export async function POST(request: Request) {
       success: true,
       message: "用户创建成功",
     })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("创建用户失败:", error)
     return NextResponse.json(
       {
         success: false,
         message: "创建用户时发生错误",
-        error: error?.message || "未知错误",
       },
       { status: 500 }
     )

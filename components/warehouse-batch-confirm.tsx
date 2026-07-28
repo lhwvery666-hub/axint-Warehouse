@@ -27,6 +27,7 @@ import { toast } from "sonner"
 import { TicketStatus, UserRole, OperationLogType, OPERATION_LOG_TYPE_LABELS, TICKET_STATUS_LABELS, normalizeTicketStatus } from "@/lib/enums"
 import { TicketChat } from "@/components/TicketChat"
 import { useAuth } from "@/context/auth-context"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 interface Device {
   id: string
@@ -162,12 +163,12 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
     // 验证需要确认的设备都有出厂日期和到货日期
     const missingManufacture = devicesToConfirm.filter(device => !manufactureDates[device.id])
     if (missingManufacture.length > 0) {
-      toast.error(`请为所有待确认设备填写出厂日期（还有 ${missingManufacture.length} 个设备未填写）`)
+      toast.error(`请为所有待确认设备填写出厂日期（还有 ${sumDeviceQuantity(missingManufacture)} 台设备未填写）`)
       return
     }
     const missingArrival = devicesToConfirm.filter(device => !arrivalDates[device.id])
     if (missingArrival.length > 0) {
-      toast.error(`请为所有待确认设备填写到货日期（还有 ${missingArrival.length} 个设备未填写）`)
+      toast.error(`请为所有待确认设备填写到货日期（还有 ${sumDeviceQuantity(missingArrival)} 台设备未填写）`)
       return
     }
 
@@ -181,6 +182,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
         body: JSON.stringify({
           devices: devicesToConfirm.map(device => ({
             id: device.id,
+            quantity: device.quantity,
             manufactureDate: manufactureDates[device.id]?.toISOString(),
             // 时区：发送本地时间对应的 UTC ISO 字符串，服务端存 UTC，前端读取后 format 为东八区日期
             arrivalDate: arrivalDates[device.id]?.toISOString()
@@ -190,7 +192,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
 
       const result = await response.json()
       if (result.success) {
-        toast.success(result.message || `批次设备已确认，共 ${devicesToConfirm.length} 台设备，状态已更新为"维修检查中"`)
+        toast.success(result.message || `批次设备已确认，共 ${sumDeviceQuantity(devicesToConfirm)} 台设备，状态已更新为"维修检查中"`)
         fetchBatchDevices()
         fetchOperationLogs()
         onConfirmed?.()
@@ -241,7 +243,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
           <div>
             <h1 className="text-2xl font-bold">仓库确认批次设备</h1>
             <p className="text-sm text-muted-foreground">
-              批次号：{batchId} | 共 {devices.length} 台设备
+              批次号：{batchId} | 共 {batchInfo.deviceCount} 台设备
             </p>
           </div>
         </div>
@@ -306,7 +308,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
             </div>
             <div>
               <p className="text-sm text-muted-foreground">设备数量</p>
-              <p className="font-medium text-lg text-primary">{devices.length} 台</p>
+              <p className="font-medium text-lg text-primary">{batchInfo.deviceCount} 台</p>
             </div>
           </div>
         </CardContent>
@@ -319,10 +321,11 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
             <CardTitle>设备清单及出厂日期</CardTitle>
             {(() => {
               const needConfirm = devices.filter(d => CONFIRMABLE_STATUSES.has(d.status || ""))
-              const filled = needConfirm.filter(d => manufactureDates[d.id]).length
+              const filled = sumDeviceQuantity(needConfirm.filter(d => manufactureDates[d.id]))
+              const needConfirmCount = sumDeviceQuantity(needConfirm)
               return (
-                <Badge variant={filled === needConfirm.length && needConfirm.length > 0 ? "default" : "secondary"}>
-                  {filled} / {needConfirm.length} 待确认已填写
+                <Badge variant={filled === needConfirmCount && needConfirmCount > 0 ? "default" : "secondary"}>
+                  {filled} / {needConfirmCount} 待确认已填写
                 </Badge>
               )
             })()}
@@ -340,6 +343,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                   <TableHead>设备序列号</TableHead>
                   <TableHead>产品型号</TableHead>
                   <TableHead>物料名称</TableHead>
+                  <TableHead>数量</TableHead>
                   <TableHead>故障描述</TableHead>
                   <TableHead>当前状态</TableHead>
                   <TableHead>到货日期 *</TableHead>
@@ -358,6 +362,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                       <TableCell className="font-mono text-sm">{device.deviceSerialNumber}</TableCell>
                       <TableCell>{device.modelName || "-"}</TableCell>
                       <TableCell>{device.deviceName || "-"}</TableCell>
+                      <TableCell>{device.quantity || 1} 台</TableCell>
                       <TableCell className="max-w-xs truncate" title={device.faultDescription}>
                         {device.faultDescription || "-"}
                       </TableCell>
@@ -598,6 +603,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
       {/* 确认按钮 */}
       {(() => {
         const devicesToConfirm = devices.filter(d => CONFIRMABLE_STATUSES.has(d.status || ""))
+        const devicesToConfirmCount = sumDeviceQuantity(devicesToConfirm)
         const allFilled = devicesToConfirm.length > 0 && 
           devicesToConfirm.every(d => manufactureDates[d.id]) &&
           devicesToConfirm.every(d => arrivalDates[d.id])
@@ -609,7 +615,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                 <div className="flex items-start gap-3">
                   <CheckCircle className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
                   <div>
-                    <p className="font-semibold">准备确认 {devicesToConfirm.length} 台待确认设备</p>
+                    <p className="font-semibold">准备确认 {devicesToConfirmCount} 台待确认设备</p>
                     <p className="text-sm text-muted-foreground mt-1">
                       确认后，这批设备状态将变更为"仓库已确认"，维修人员即可开始处理
                     </p>
@@ -629,7 +635,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                   ) : (
                     <span className="flex items-center gap-2">
                       <CheckCircle className="w-4 h-4" />
-                      确认 {devicesToConfirm.length} 台待确认设备
+                      确认 {devicesToConfirmCount} 台待确认设备
                     </span>
                   )}
                 </Button>

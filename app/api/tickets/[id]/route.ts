@@ -78,10 +78,7 @@ export async function GET(
 ) {
   try {
     // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
-    const resolvedParams =
-      "then" in (context as Record<string, unknown>).params
-        ? await (context as { params: Promise<{ id: string }> }).params
-        : (context as { params: { id: string } }).params
+    const resolvedParams = await Promise.resolve(context.params)
 
     const ticketId = resolvedParams.id
 
@@ -392,10 +389,7 @@ export async function PUT(
     const body = await request.json().catch(() => ({}))
     
     // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
-    const resolvedParams =
-      "then" in (context as Record<string, unknown>).params
-        ? await (context as { params: Promise<{ id: string }> }).params
-        : (context as { params: { id: string } }).params
+    const resolvedParams = await Promise.resolve(context.params)
 
     const ticketId = resolvedParams.id
 
@@ -817,10 +811,7 @@ export async function DELETE(
   context: { params: Promise<{ id: string }> } | { params: { id: string } }
 ) {
   try {
-    const resolvedParams =
-      "then" in (context as Record<string, unknown>).params
-        ? await (context as { params: Promise<{ id: string }> }).params
-        : (context as { params: { id: string } }).params
+    const resolvedParams = await Promise.resolve(context.params)
 
     const ticketId = resolvedParams.id
 

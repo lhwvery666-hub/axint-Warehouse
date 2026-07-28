@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { getDbConnection } from "@/lib/db-config"
 import { DB_FIELDS, TicketStatus, UserRole, normalizeUserRole, TicketActionType, normalizeTicketStatus } from "@/lib/enums"
+import { getDeviceQuantity, sumDeviceQuantity } from "@/lib/device-quantity"
 
 // POST /api/tickets/warehouse-confirm-batch/[batchId]
 // 仓库管理员确认批次设备并填写出厂日期
@@ -85,14 +86,14 @@ export async function POST(
     const missingManufacture = devices.filter((d: any) => !d.manufactureDate);
     if (missingManufacture.length > 0) {
       return NextResponse.json(
-        { success: false, message: `有 ${missingManufacture.length} 个设备未填写出厂日期` },
+        { success: false, message: `有 ${sumDeviceQuantity(missingManufacture)} 台设备未填写出厂日期` },
         { status: 400 }
       );
     }
     const missingArrival = devices.filter((d: any) => !d.arrivalDate);
     if (missingArrival.length > 0) {
       return NextResponse.json(
-        { success: false, message: `有 ${missingArrival.length} 个设备未填写到货日期` },
+        { success: false, message: `有 ${sumDeviceQuantity(missingArrival)} 台设备未填写到货日期` },
         { status: 400 }
       );
     }
@@ -150,20 +151,21 @@ export async function POST(
       let skippedCount = 0
       let isReconfirmation = false // 标记是否为重新确认（从 WAREHOUSE_CONFIRMING 确认）
       const skippedDeviceStatuses: string[] = []
-      console.log(`[Warehouse Confirm] 准备处理 ${devices.length} 个设备，只更新可确认状态的设备`)
+      console.log(`[Warehouse Confirm] 准备处理 ${devices.length} 条设备明细，只更新可确认状态的设备`)
       
       for (const device of devices) {
         // ---- 前置：查询设备当前状态，防止状态降级 ----
         const statusCheckResult = await transaction.request()
           .input("ticketId", Number(device.id))
-          .query(`SELECT ${DB_FIELDS.STATUS} FROM Repair_Tickets WHERE ${DB_FIELDS.ID} = @ticketId`)
+          .query(`SELECT ${DB_FIELDS.STATUS}, Quantity FROM Repair_Tickets WHERE ${DB_FIELDS.ID} = @ticketId`)
         
         const currentDeviceStatus = statusCheckResult.recordset[0]?.[DB_FIELDS.STATUS] as string | undefined
+        const deviceQuantity = getDeviceQuantity({ quantity: statusCheckResult.recordset[0]?.Quantity })
         const normalizedDeviceStatus = normalizeTicketStatus(currentDeviceStatus)
         
         if (!normalizedDeviceStatus || !CONFIRMABLE_STATUSES.has(normalizedDeviceStatus)) {
           console.log(`[Warehouse Confirm] ⏭ 设备 ${device.id} 当前状态 "${currentDeviceStatus}" 已超出可确认范围，跳过以防止降级`)
-          skippedCount++
+          skippedCount += deviceQuantity
           skippedDeviceStatuses.push(currentDeviceStatus || "未知")
           continue
         }
@@ -249,7 +251,7 @@ export async function POST(
           throw new Error(`设备 ID=${device.id} 状态验证失败！数据库实际状态: "${actualStatus}"，期望: "${newStatus}"`)
         }
 
-        confirmedCount++
+        confirmedCount += deviceQuantity
       }
 
       // 3.2 记录批次级别操作历史（使用新列名：BatchId, OperatorId, OperatorName, Description）
@@ -313,7 +315,7 @@ export async function POST(
     if (confirmedCount === 0) {
       return NextResponse.json({
         success: false,
-        message: `未能确认任何设备：所选 ${devices.length} 台设备当前状态均已超出可确认范围（如：${Array.from(new Set(skippedDeviceStatuses)).join("、") || "未知"}），可能已被其他操作推进，请刷新页面后重试`,
+        message: `未能确认任何设备：所选 ${skippedCount} 台设备当前状态均已超出可确认范围（如：${Array.from(new Set(skippedDeviceStatuses)).join("、") || "未知"}），可能已被其他操作推进，请刷新页面后重试`,
         data: { batchId, deviceCount: 0, skippedCount }
       });
     }

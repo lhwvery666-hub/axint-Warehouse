@@ -3,7 +3,8 @@
  * 确保状态聚合逻辑的正确性
  */
 
-import { describe, it, expect } from '@jest/globals';
+import { describe, it } from 'node:test';
+import { expect } from './test-helpers';
 import {
   AggregatedStatus,
   getAggregatedStatus,

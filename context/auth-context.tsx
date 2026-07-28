@@ -8,6 +8,7 @@ type AuthStatus = "authenticated" | "unauthenticated" | "loading"
 
 interface User {
   id: string
+  username: string
   realName: string
   role: UserRole | null
   avatar?: string
@@ -64,6 +65,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (mappedRole) {
             const authUser: User = {
               id: backendUser.id,
+              username: backendUser.username,
               realName: backendUser.realName,
               role: mappedRole,
               avatar: "/placeholder-user.jpg",
@@ -210,6 +212,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const authUser: User = {
         id: backendUser.id,
+        username: backendUser.username,
         realName: backendUser.realName,
         role: mappedRole,
         avatar: "/placeholder-user.jpg",

@@ -149,10 +149,10 @@ export class LocalStorageAdapter implements StorageAdapter {
       uploadData = Buffer.concat(chunks);
     } else if (data instanceof ArrayBuffer) {
       uploadData = Buffer.from(data);
-    } else if (data instanceof Uint8Array) {
-      uploadData = Buffer.from(data);
     } else if (data instanceof Buffer) {
       uploadData = data;
+    } else if (data instanceof Uint8Array) {
+      uploadData = Buffer.from(data);
     } else {
       throw new Error(`不支持的数据类型: ${typeof data}`);
     }
