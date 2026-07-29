@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { getDbConnection } from "@/lib/db-config";
 import { UPLOAD_DIR } from "@/app/api/config";
-import { TicketStatus, SPECIAL_VALUES } from "@/lib/enums"; // ✅ Rule 4 — 消除 Magic String
+import { TicketStatus, SPECIAL_VALUES, UserRole } from "@/lib/enums"; // ✅ Rule 4 — 消除 Magic String
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils";
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
@@ -9,6 +10,9 @@ import { generateSequentialBatchId } from "@/lib/batch-number";
 // POST /api/tickets/create
 // 现场人员提交报修：创建新的维修工单
 export async function POST(request: Request) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER]);
+  if (isErrorResponse(authResult)) return authResult;
+
   try {
     const formData = await request.formData()
 
@@ -17,7 +21,7 @@ export async function POST(request: Request) {
     const faultDesc = (formData.get("faultDesc") || "").toString().trim()
     const courierInfo = (formData.get("courierInfo") || "").toString().trim() || null
     const courierCompany = (formData.get("courierCompany") || "").toString().trim() || null
-    const userIdRaw = (formData.get("userId") || "").toString().trim()
+    const userIdRaw = authResult.userId
     const projectLocation = (formData.get("projectLocation") || "").toString().trim()
     const materialCode = (formData.get("materialCode") || "").toString().trim() || null
 
@@ -167,7 +171,7 @@ export async function POST(request: Request) {
     const hasReturnTrackingNum = availableColumns.some((col: string) => col.toLowerCase() === "returntrackingnum")
     
     // 其他字段
-    const hasDeviceImages = availableColumns.some((col: string) => col.toLowerCase() === "deviceimages")
+    const hasDevicePhotos = availableColumns.some((col: string) => col.toLowerCase() === "devicephotos")
     const hasDamageImages = availableColumns.some((col: string) => col.toLowerCase() === "damageimages")
     const hasWarehouse = availableColumns.some((col: string) => col.toLowerCase() === "warehouse")
     const hasWorkOrderNumber = availableColumns.some((col: string) => col.toLowerCase() === "workordernumber")
@@ -261,10 +265,10 @@ export async function POST(request: Request) {
       if (hasRepairCost) { insertPending += `, RepairCost`; valuesPending += `, @repairCost`; requestPending.input("repairCost", repairCost) }
 
       // 图片处理
-      if (hasDeviceImages) {
+      if (hasDevicePhotos) {
         const savedDeviceImages = await saveUploadedFiles(deviceImageFiles)
         if (savedDeviceImages.length > 0) {
-          insertPending += `, DeviceImages`; valuesPending += `, @deviceImages`
+          insertPending += `, DevicePhotos`; valuesPending += `, @deviceImages`
           requestPending.input("deviceImages", JSON.stringify(savedDeviceImages))
         }
       }
@@ -403,10 +407,10 @@ export async function POST(request: Request) {
     if (hasRepairCost) { insertQuery += `, RepairCost`; valuesQuery += `, @repairCost`; requestNormal.input("repairCost", repairCost) }
 
     // 图片处理 (正常流程)
-    if (hasDeviceImages) {
+    if (hasDevicePhotos) {
         const savedDeviceImages = await saveUploadedFiles(deviceImageFiles)
         if (savedDeviceImages.length > 0) {
-            insertQuery += `, DeviceImages`; valuesQuery += `, @deviceImages`
+            insertQuery += `, DevicePhotos`; valuesQuery += `, @deviceImages`
             requestNormal.input("deviceImages", JSON.stringify(savedDeviceImages))
         }
     }

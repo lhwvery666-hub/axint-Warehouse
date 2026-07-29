@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import * as XLSX from "xlsx"
 import { TICKET_STATUS_LABELS, normalizeTicketStatus, DB_FIELDS } from "@/lib/enums"
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 /** 将 UTC Date 转为北京时间 (UTC+8)，格式 YYYY-MM-DD HH:mm */
 function formatDateBJ(date: Date): string {
@@ -12,6 +13,9 @@ function formatDateBJ(date: Date): string {
 // GET /api/tickets/export
 // 导出所有工单数据为Excel文件
 export async function GET(request: Request) {
+  const authResult = await checkUserRole(ALL_USER_ROLES)
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const { searchParams } = new URL(request.url)
     const statusFilter = searchParams.get("status") // 可选：按状态过滤
@@ -83,7 +87,7 @@ export async function GET(request: Request) {
       Quantity: "数量",
       ProductSN: "产品序列号",
       FaultDescription: "故障描述",
-      DeviceImages: "设备照片",
+      DevicePhotos: "设备照片",
       
       // 维修人员填写区
       MaterialCode: "物料代码",

@@ -2,17 +2,17 @@
 
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
-import { Clock, Wrench, AlertCircle, ChevronRight, Filter, Search, Plus, ArrowLeft, ShieldCheck, ShieldAlert, Calendar, CheckCircle, FileCheck, Upload } from "lucide-react"
+import { Clock, Wrench, AlertCircle, ChevronRight, Plus, ArrowLeft, ShieldCheck, ShieldAlert, Calendar, CheckCircle, FileCheck, Upload } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Calendar as CalendarComponent } from "@/components/ui/calendar"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { RepairStatusTimeline } from "@/components/repair-status-timeline"
 import { WorkOrderListRow } from "@/components/work-order-list-row"
+import { WorkOrderFilterBar } from "@/components/work-order-filter-bar"
 import { format, isAfter, isBefore, parseISO, subDays, subMonths } from "date-fns"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/context/auth-context"
@@ -28,6 +28,18 @@ import {
   resolveTimeFilterPool,
   getTimeFilterTargetDate
 } from "@/lib/workflow-utils"
+import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters } from "@/lib/repair-list-filters"
+
+const REPORT_STATUS_FILTER_OPTIONS = [
+  { value: AggregatedStatus.PENDING_RECEIVE, label: "待接单" },
+  { value: AggregatedStatus.INSPECTING, label: "检测中" },
+  { value: AggregatedStatus.PENDING_SIGNATURE, label: "待签字" },
+  { value: AggregatedStatus.IN_REPAIR, label: "维修作业中" },
+  { value: AggregatedStatus.PENDING_REVIEW, label: "待审核" },
+  { value: AggregatedStatus.PENDING_SHIPPING, label: "待发货" },
+  { value: AggregatedStatus.COMPLETED, label: "已完成" },
+  { value: AggregatedStatus.ABNORMAL, label: "异常" },
+] as const
 
 export default function ReportPage() {
   const { user } = useAuth()
@@ -51,8 +63,10 @@ export default function ReportPage() {
   useEffect(() => {
     setView("tasks")
   }, [])
-  const [searchQuery, setSearchQuery] = useState("")
-  const [filterStatus, setFilterStatus] = useState<string>("all")
+  const [workOrderQuery, setWorkOrderQuery] = useState("")
+  const [customerQuery, setCustomerQuery] = useState("")
+  const [deviceQuery, setDeviceQuery] = useState("")
+  const [filterStatus, setFilterStatus] = useState<string>(ALL_REPAIR_STATUS_FILTER)
   const [filterTimeRange, setFilterTimeRange] = useState<string>("all")
   const [dateRange, setDateRange] = useState<{
     from: Date | undefined;
@@ -126,9 +140,11 @@ export default function ReportPage() {
                 workOrderNumber: ticket.workOrderNumber || "",
                 deviceId: ticket.deviceSerialNumber || "",
                 deviceName: ticket.deviceName || ticket.deviceModel || "未知设备",
+                deviceModel: ticket.deviceModel || "",
                 deviceSerialNumber: ticket.deviceSerialNumber || "",
                 productSN: ticket.productSN || ticket.deviceSerialNumber || "",
                 location: ticket.projectLocation || "",
+                projectLocation: ticket.projectLocation || "",
                 fault: ticket.problem || "",
                 status: ticket.status || "Pending",  // ← 保留原始 DB 状态
                 priority: "medium" as const,
@@ -136,6 +152,8 @@ export default function ReportPage() {
                 inWarranty: undefined,
                 warrantyEnd: undefined,
                 reportedBy: ticket.reportedBy || "",
+                reportedByUsername: ticket.reportedByUsername || "",
+                reportedByUserId: ticket.reportedByUserId || "",
                 expectedCompletionDate: ticket.expectedCompletionDate || null,
                 delayReason: ticket.delayReason || null,
                 contactInfo: ticket.contactInfo || "",
@@ -160,7 +178,7 @@ export default function ReportPage() {
           formattedTasks.forEach((task: any, taskIdx: number) => {
             // 确保每个 task 都有有效的 id
             if (!task.id || task.id.trim() === "") {
-              task.id = `task-fallback-${taskIdx}-${task.deviceSerialNumber || Date.now()}`
+              task.id = task.workOrderNumber || task.deviceSerialNumber || `task-fallback-${taskIdx}`
               console.warn('工单缺少有效ID，使用后备ID:', task.id, task)
             }
             
@@ -201,7 +219,7 @@ export default function ReportPage() {
               const contactPerson = contactParts[0] || ""
               const contactPhone = contactParts[1] || ""
               
-              const batchTaskId = batchId && batchId.trim() !== "" ? batchId : `batch-${Date.now()}-${Math.random()}`
+              const batchTaskId = batchId
               console.log('创建批次工单，ID:', batchTaskId)
               
               const totalQuantity = batchTasks.reduce((sum, t) => sum + ((t as any).quantity || 1), 0)
@@ -244,7 +262,7 @@ export default function ReportPage() {
     if (view === "tasks") {
       loadTickets()
     }
-  }, [view, user?.id]) // 当视图或用户ID变化时重新加载
+  }, [view, user?.id, user?.role]) // 当视图或用户身份变化时重新加载
 
   // 流程步骤定义（用于卡片底部的迷你流程指示器）
   // 正确顺序：待接单 → 检测中（仓库填出厂日期） → 待签字 → 维修作业中 → 待审核 → 待发货 → 已完成
@@ -355,29 +373,22 @@ export default function ReportPage() {
   // 计算聚合状态统计
   const statusCounts = countByAggregatedStatus(tasks);
   
-  // 先按状态筛选，再按时间筛选，最后按搜索关键词筛选
+  // 先按聚合状态和时间筛选，再应用三个文本条件（AND）
   const filteredTasks = (Array.isArray(tasks) ? tasks : [])
     .filter(task => {
       if (!task) return false;
-      if (filterStatus === "all") return true;
+      if (filterStatus === ALL_REPAIR_STATUS_FILTER) return true;
       // 使用聚合状态进行筛选
       const taskAggregatedStatus = getAggregatedStatus(task.status);
       return taskAggregatedStatus === filterStatus;
     })
     .filter(filterTasksByTimeRange)
-    .filter(task => {
-      if (!task) return false;
-      if (searchQuery === "") return true;
-      const query = searchQuery.toLowerCase();
-      return (
-        (task.batchId || "").toLowerCase().includes(query) ||
-        (task.workOrderNumber || "").toLowerCase().includes(query) || 
-        (task.deviceSerialNumber || "").toLowerCase().includes(query) ||
-        (task.fault || "").toLowerCase().includes(query) ||
-        (task.customerName || "").toLowerCase().includes(query) ||
-        (task.projectLocation || "").toLowerCase().includes(query)
-      );
-    })
+    .filter(task => task && matchesRepairListFilters(task, {
+      workOrderQuery,
+      customerQuery,
+      deviceQuery,
+      status: ALL_REPAIR_STATUS_FILTER,
+    }))
 
   return (
     <>
@@ -407,50 +418,21 @@ export default function ReportPage() {
 
           <div className="space-y-6">
             {/* 搜索和筛选 */}
-            <div className="flex flex-col md:flex-row gap-4">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input 
-                  placeholder="搜索维修工单..." 
-                  className="pl-10"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-              </div>
-              
-              {/* 如果有筛选，显示清除按钮 */}
-              {filterStatus !== "all" && (
-                <Button 
-                  variant="outline" 
-                  onClick={() => setFilterStatus("all")}
-                  className="shrink-0"
-                >
-                  <Filter className="w-4 h-4 mr-2" />
-                  查看全部
-                </Button>
-              )}
-              
-              {/* 状态筛选 */}
-              <div className="flex gap-2">
-                <select 
-                  className="px-3 py-2 rounded-md border border-border bg-background text-sm"
-                  value={filterStatus}
-                  onChange={(e) => setFilterStatus(e.target.value)}
-                >
-                  <option value="all">全部状态</option>
-                  <option value={AggregatedStatus.PENDING_RECEIVE}>待接单</option>
-                  <option value={AggregatedStatus.INSPECTING}>检测中</option>
-                  <option value={AggregatedStatus.PENDING_SIGNATURE}>待签字</option>
-                  <option value={AggregatedStatus.IN_REPAIR}>维修作业中</option>
-                  <option value={AggregatedStatus.PENDING_REVIEW}>待审核</option>
-                  <option value={AggregatedStatus.PENDING_SHIPPING}>待发货</option>
-                  <option value={AggregatedStatus.COMPLETED}>已完成</option>
-                  <option value={AggregatedStatus.ABNORMAL}>异常</option>
-                </select>
-                
-                {/* 时间筛选 */}
+            <WorkOrderFilterBar
+              workOrderQuery={workOrderQuery}
+              customerQuery={customerQuery}
+              deviceQuery={deviceQuery}
+              status={filterStatus}
+              statusOptions={REPORT_STATUS_FILTER_OPTIONS}
+              onWorkOrderQueryChange={setWorkOrderQuery}
+              onCustomerQueryChange={setCustomerQuery}
+              onDeviceQueryChange={setDeviceQuery}
+              onStatusChange={setFilterStatus}
+              trailing={(
+                <>
                 <select
-                  className="px-3 py-2 rounded-md border border-border bg-background text-sm"
+                  aria-label="筛选时间范围"
+                  className="h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm"
                   value={filterTimeRange}
                   onChange={(e) => setFilterTimeRange(e.target.value)}
                 >
@@ -507,8 +489,9 @@ export default function ReportPage() {
                     </PopoverContent>
                   </Popover>
                 )}
-              </div>
-            </div>
+                </>
+              )}
+            />
 
             {/* 任务列表 —— 紧凑列表模式 */}
             <Card className="border-border/50 dark:border-border overflow-hidden">
@@ -516,9 +499,11 @@ export default function ReportPage() {
                 <div className="flex flex-col">
                   {filteredTasks.map((task, taskIndex) => {
                     // 确保 key 永远不为空
-                    const taskKey = (task.id && typeof task.id === 'string' && task.id.trim() !== "")
-                      ? task.id
-                      : `task-${taskIndex}-${task.deviceSerialNumber || task.batchId || Date.now()}`
+                    const taskKey = task.id
+                      || task.workOrderNumber
+                      || task.batchId
+                      || task.deviceSerialNumber
+                      || `task-fallback-${taskIndex}`
 
                     // 计算当前聚合状态，用于决定按钮
                     const aggStatus = getAggregatedStatus(task.status)
@@ -534,15 +519,27 @@ export default function ReportPage() {
                     return (
                       <WorkOrderListRow
                         key={taskKey}
-                        title={task.isBatch ? `工单号：${task.batchId}` : `序列号：${task.deviceSerialNumber}`}
+                        title={task.isBatch ? `工单号：${task.batchId}` : `工单号：${task.workOrderNumber || task.id}`}
                         isBatch={task.isBatch}
                         projectName={task.isBatch ? (task.projectName || task.location) : undefined}
+                        customerName={task.customerName || task.projectName || task.location}
+                        reportedBy={task.reportedBy || task.contactPerson}
+                        reportedByUsername={task.reportedByUsername}
                         contactInfo={task.contactPerson}
                         contactPhone={task.contactPhone}
                         deviceCount={task.deviceCount}
+                        deviceSerials={task.isBatch && task.devices ? task.devices.map((device: any) => device.deviceSerialNumber) : undefined}
+                        deviceSerialNumber={task.deviceSerialNumber}
+                        deviceModel={task.deviceModel}
+                        deviceModels={task.isBatch && task.devices ? task.devices.map((device: any) => device.deviceModel) : undefined}
                         faultText={task.fault}
                         inWarranty={task.inWarranty}
                         priorityIndicator={getPriorityIndicator(task.priority)}
+                        statusNode={(
+                          <Badge variant="outline" className="text-xs">
+                            {AGGREGATED_STATUS_CONFIG[aggStatus].label}
+                          </Badge>
+                        )}
                         reportedAt={task.reportedAt}
                         delayedText={
                           task.expectedCompletionDate && aggStatus === AggregatedStatus.ABNORMAL

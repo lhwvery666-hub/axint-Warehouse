@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
-import { DB_FIELDS, TicketStatus, TicketActionType, normalizeTicketStatus, TICKET_STATUS_LABELS } from "@/lib/enums"
-import { TICKET_QUERY_MESSAGES, API_ERROR_MESSAGES } from "@/lib/api-messages"
+import { DB_FIELDS, TicketStatus, TicketActionType, normalizeTicketStatus, TICKET_STATUS_LABELS, UserRole } from "@/lib/enums"
+import { TICKET_QUERY_MESSAGES } from "@/lib/api-messages"
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // 禁用该路由的缓存，确保详情页每次请求都命中数据库
 export const dynamic = "force-dynamic"
@@ -27,7 +28,6 @@ interface TicketRecord extends Record<string, unknown> {
   DeviceName?: string
   MaterialCode?: string
   Warehouse?: string
-  DeviceImages?: string
   DevicePhotos?: string
   DamageImages?: string
   SubmitDate?: Date
@@ -76,6 +76,9 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> } | { params: { id: string } }
 ) {
+  const authResult = await checkUserRole(ALL_USER_ROLES)
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
     const resolvedParams = await Promise.resolve(context.params)
@@ -290,8 +293,8 @@ export async function GET(
       return false
     }
 
-    // 照片字段：优先使用 DeviceImages，如果没有则使用 DevicePhotos（兼容旧数据）
-    const deviceImages = (ticket.DeviceImages as string) || (ticket.DevicePhotos as string) || ""
+    // API 继续返回 deviceImages，数据库统一读取当前真实列 DevicePhotos
+    const deviceImages = (ticket.DevicePhotos as string) || ""
     const damageImages = (ticket.DamageImages as string) || ""
     const signedReportPhoto = (ticket.SignedReportPhoto as string) || null
 
@@ -366,13 +369,11 @@ export async function GET(
       data: responseData,
     })
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : "获取工单详情失败"
     console.error(TICKET_QUERY_MESSAGES.getFailed, error)
     return NextResponse.json(
       {
         success: false,
         message: TICKET_QUERY_MESSAGES.getError,
-        error: errorMessage || API_ERROR_MESSAGES.unknownError,
       },
       { status: 500 }
     )
@@ -385,6 +386,9 @@ export async function PUT(
   request: Request,
   context: { params: Promise<{ id: string }> } | { params: { id: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.TECHNICIAN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const body = await request.json().catch(() => ({}))
     
@@ -479,7 +483,7 @@ export async function PUT(
       returnTrackingNum: "ReturnTrackingNum",
       status: "Status",
       // 照片字段
-      deviceImages: "DeviceImages",
+      deviceImages: "DevicePhotos",
       damageImages: "DamageImages",
       // 3W1H 新字段（维修工作台）
       warrantyStatusOverride: "WarrantyStatusOverride",
@@ -791,13 +795,11 @@ export async function PUT(
       },
     })
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : "更新工单失败"
     console.error(TICKET_QUERY_MESSAGES.updateFailed, error)
     return NextResponse.json(
       {
         success: false,
         message: TICKET_QUERY_MESSAGES.updateError,
-        error: errorMessage || API_ERROR_MESSAGES.unknownError,
       },
       { status: 500 }
     )
@@ -810,6 +812,9 @@ export async function DELETE(
   request: Request,
   context: { params: Promise<{ id: string }> } | { params: { id: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const resolvedParams = await Promise.resolve(context.params)
 
@@ -847,13 +852,11 @@ export async function DELETE(
       message: TICKET_QUERY_MESSAGES.deleteSuccess,
     })
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : "删除工单失败"
     console.error(TICKET_QUERY_MESSAGES.deleteFailed, error)
     return NextResponse.json(
       {
         success: false,
         message: TICKET_QUERY_MESSAGES.deleteError,
-        error: errorMessage || API_ERROR_MESSAGES.unknownError,
       },
       { status: 500 }
     )

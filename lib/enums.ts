@@ -453,7 +453,7 @@ export const DB_FIELDS = {
   // 其他字段
   COURIER_COMPANY: "CourierCompany",
   COURIER_NUMBER: "CourierNumber",
-  DEVICE_IMAGES: "DeviceImages",
+  DEVICE_PHOTOS: "DevicePhotos",
   DAMAGE_IMAGES: "DamageImages",
   WAREHOUSE: "Warehouse",
   WORK_ORDER_NUMBER: "WorkOrderNumber",

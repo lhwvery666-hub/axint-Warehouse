@@ -1,20 +1,22 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Package, CheckCircle, Clock, Loader2, AlertCircle, ChevronRight, Database, Truck, Download, CheckCircle2, RefreshCw, Search } from "lucide-react";
-import { Input } from "@/components/ui/input";
+import { Package, CheckCircle, Clock, Loader2, AlertCircle, ChevronRight, Database, Truck, Download, CheckCircle2, RefreshCw } from "lucide-react";
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { toBeijingTime } from "@/lib/utils";
 import DatabaseManager from "@/components/admin/database-manager";
 import WarehouseBatchConfirm from "@/components/warehouse-batch-confirm";
 import WarehouseBatchShipping from "@/components/warehouse-batch-shipping";
+import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
 import { TicketStatus } from "@/lib/enums";
+import { WorkOrderFilterBar } from "@/components/work-order-filter-bar";
+import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
 
 interface PendingBatch {
   batchId: string;
@@ -22,6 +24,14 @@ interface PendingBatch {
   projectLocation: string;
   deviceCount: number;
   category: string;
+  clientName?: string | null;
+  customerName?: string;
+  reportedBy?: string;
+  reportedByUsername?: string;
+  reportedByUserId?: string;
+  deviceSerials?: string;
+  deviceModels?: string;
+  statuses?: string;
   createdAt: string;
   status: string;
 }
@@ -36,21 +46,12 @@ export default function WarehouseDashboard() {
   const [loading, setLoading] = useState(true);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [selectedMode, setSelectedMode] = useState<"confirm" | "shipping" | "view">("confirm");
-  const [searchQuery, setSearchQuery] = useState("");
+  const [workOrderQuery, setWorkOrderQuery] = useState("");
+  const [customerQuery, setCustomerQuery] = useState("");
+  const [deviceQuery, setDeviceQuery] = useState("");
+  const [filterStatus, setFilterStatus] = useState(ALL_REPAIR_STATUS_FILTER);
 
-  useEffect(() => {
-    if (activeTab === "pending") {
-      loadPendingBatches();
-    } else if (activeTab === "shipping") {
-      loadShippingBatches();
-    } else if (activeTab === "completed") {
-      loadCompletedBatches();
-    } else if (activeTab === "all") {
-      loadAllBatches();
-    }
-  }, [activeTab]);
-
-  const loadPendingBatches = async () => {
+  const loadPendingBatches = useCallback(async () => {
     setLoading(true);
     try {
       const response = await fetch("/api/tickets/warehouse-pending-batches");
@@ -64,9 +65,9 @@ export default function WarehouseDashboard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const loadShippingBatches = async () => {
+  const loadShippingBatches = useCallback(async () => {
     setLoading(true);
     try {
       const response = await fetch("/api/tickets/warehouse-shipping-batches");
@@ -80,9 +81,9 @@ export default function WarehouseDashboard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const loadCompletedBatches = async () => {
+  const loadCompletedBatches = useCallback(async () => {
     setLoading(true);
     try {
       const response = await fetch("/api/tickets/warehouse-completed-batches");
@@ -96,9 +97,9 @@ export default function WarehouseDashboard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const loadAllBatches = async () => {
+  const loadAllBatches = useCallback(async () => {
     setLoading(true);
     try {
       const response = await fetch("/api/tickets/all-batches");
@@ -112,7 +113,38 @@ export default function WarehouseDashboard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "pending") {
+      void loadPendingBatches();
+    } else if (activeTab === "shipping") {
+      void loadShippingBatches();
+    } else if (activeTab === "completed") {
+      void loadCompletedBatches();
+    } else if (activeTab === "all") {
+      void loadAllBatches();
+    }
+  }, [activeTab, loadAllBatches, loadCompletedBatches, loadPendingBatches, loadShippingBatches]);
+
+  const filterWarehouseBatches = (batches: PendingBatch[]) => batches.filter((batch) =>
+    matchesRepairListFilters(batch, {
+      workOrderQuery,
+      customerQuery,
+      deviceQuery,
+      status: filterStatus,
+    }),
+  );
+  const filteredPendingBatches = filterWarehouseBatches(pendingBatches);
+  const filteredShippingBatches = filterWarehouseBatches(shippingBatches);
+  const filteredCompletedBatches = filterWarehouseBatches(completedBatches);
+  const filteredAllBatches = filterWarehouseBatches(allBatches);
+  const hasActiveFilters = Boolean(
+    workOrderQuery.trim() ||
+    customerQuery.trim() ||
+    deviceQuery.trim() ||
+    filterStatus !== ALL_REPAIR_STATUS_FILTER,
+  );
 
   // 如果选择了批次，显示对应的界面
   if (selectedBatchId) {
@@ -183,16 +215,18 @@ export default function WarehouseDashboard() {
         </Button>
       </div>
 
-      {/* 搜索框 */}
-      <div className="relative mb-4">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
-        <Input
-          className="pl-10 h-11 text-base"
-          placeholder="搜索批次号、项目名称或设备类别..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-        />
-      </div>
+      <WorkOrderFilterBar
+        className="mb-4"
+        workOrderQuery={workOrderQuery}
+        customerQuery={customerQuery}
+        deviceQuery={deviceQuery}
+        status={filterStatus}
+        statusOptions={REPAIR_STATUS_FILTER_OPTIONS}
+        onWorkOrderQueryChange={setWorkOrderQuery}
+        onCustomerQueryChange={setCustomerQuery}
+        onDeviceQueryChange={setDeviceQuery}
+        onStatusChange={setFilterStatus}
+      />
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
         <TabsList className="grid w-full md:w-auto grid-cols-5 md:grid-cols-5">
@@ -250,14 +284,16 @@ export default function WarehouseDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <span className="ml-2 text-muted-foreground">加载中...</span>
                 </div>
-              ) : pendingBatches.length === 0 ? (
+              ) : filteredPendingBatches.length === 0 ? (
                 <div className="text-center py-12">
                   <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />
-                  <p className="text-muted-foreground">暂无待确认的批次工单</p>
+                  <p className="text-muted-foreground">
+                    {hasActiveFilters ? "未找到匹配的待确认批次" : "暂无待确认的批次工单"}
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {pendingBatches.filter(b => !searchQuery.trim() || [b.batchId, b.projectName, b.projectLocation, b.category].some(v => v?.toLowerCase().includes(searchQuery.toLowerCase()))).map((batch, index) => {
+                  {filteredPendingBatches.map((batch, index) => {
                     // 调试：打印batch信息
                     if (index === 0) {
                       console.log('[Warehouse Dashboard] 第一个批次数据:', batch)
@@ -270,39 +306,25 @@ export default function WarehouseDashboard() {
                         setSelectedBatchId(batch.batchId);
                         setSelectedMode("confirm");
                       }}>
-                        <CardContent className="p-4">
-                          <div className="flex items-center justify-between">
-                            <div className="flex-1 space-y-2">
-                              <div className="flex items-center gap-3">
-                                <h3 className="font-semibold text-lg">{batch.batchId}</h3>
-                                <Badge variant="outline" className="bg-orange-50 border-orange-300 text-orange-800">
-                                  <Clock className="w-3 h-3 mr-1" />
-                                  待确认
-                                </Badge>
-                                <Badge variant="secondary">
-                                  {batch.deviceCount} 台设备
-                                </Badge>
-                              </div>
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm text-muted-foreground">
-                                <div>
-                                  <span className="font-medium">项目：</span>
-                                  {batch.projectName || batch.projectLocation}
-                                </div>
-                                <div>
-                                  <span className="font-medium">类别：</span>
-                                  {batch.category}
-                                </div>
-                                <div>
-                                  <span className="font-medium">创建时间：</span>
-                                  {format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
-                                </div>
-                              </div>
-                            </div>
-                            <Button variant="ghost" size="icon">
-                              <ChevronRight className="h-5 w-5" />
-                            </Button>
-                          </div>
-                        </CardContent>
+                        <BatchWorkOrderCardContent
+                          batchId={batch.batchId}
+                          deviceCount={batch.deviceCount}
+                          customerName={batch.customerName || batch.clientName}
+                          projectName={batch.projectName}
+                          projectLocation={batch.projectLocation}
+                          reportedBy={batch.reportedBy}
+                          reportedByUsername={batch.reportedByUsername}
+                          deviceSerials={batch.deviceSerials}
+                          deviceModels={batch.deviceModels}
+                          category={batch.category}
+                          statusNode={(
+                            <Badge variant="outline" className="bg-orange-50 border-orange-300 text-orange-800">
+                              <Clock className="w-3 h-3 mr-1" />待确认
+                            </Badge>
+                          )}
+                          createdAt={`创建时间：${format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}`}
+                          trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
+                        />
                       </Card>
                     )
                   })}
@@ -330,14 +352,16 @@ export default function WarehouseDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <span className="ml-2 text-muted-foreground">加载中...</span>
                 </div>
-              ) : shippingBatches.length === 0 ? (
+              ) : filteredShippingBatches.length === 0 ? (
                 <div className="text-center py-12">
                   <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />
-                  <p className="text-muted-foreground">暂无待发货的批次工单</p>
+                  <p className="text-muted-foreground">
+                    {hasActiveFilters ? "未找到匹配的待发货批次" : "暂无待发货的批次工单"}
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {shippingBatches.filter(b => !searchQuery.trim() || [b.batchId, b.projectName, b.projectLocation, b.category].some(v => v?.toLowerCase().includes(searchQuery.toLowerCase()))).map((batch, index) => {
+                  {filteredShippingBatches.map((batch, index) => {
                     const uniqueKey = `shipping-${batch.batchId}-${batch.createdAt}-${index}`
                     const isRmaBatch = batch.status === TicketStatus.PENDING_FACTORY
                       || batch.status === "pending_factory"
@@ -346,46 +370,29 @@ export default function WarehouseDashboard() {
                         setSelectedBatchId(batch.batchId);
                         setSelectedMode("shipping");
                       }}>
-                        <CardContent className="p-4">
-                          <div className="flex items-center justify-between">
-                            <div className="flex-1 space-y-2">
-                              <div className="flex items-center gap-3">
-                                <h3 className="font-semibold text-lg">{batch.batchId}</h3>
-                                {isRmaBatch ? (
-                                  <Badge variant="outline" className="bg-blue-50 border-blue-300 text-blue-800">
-                                    <Truck className="w-3 h-3 mr-1" />
-                                    返厂处理
-                                  </Badge>
-                                ) : (
-                                <Badge variant="outline" className="bg-green-50 border-green-300 text-green-800">
-                                  <Truck className="w-3 h-3 mr-1" />
-                                  待发货
-                                </Badge>
-                                )}
-                                <Badge variant="secondary">
-                                  {batch.deviceCount} 台设备
-                                </Badge>
-                              </div>
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm text-muted-foreground">
-                                <div>
-                                  <span className="font-medium">项目：</span>
-                                  {batch.projectName || batch.projectLocation}
-                                </div>
-                                <div>
-                                  <span className="font-medium">类别：</span>
-                                  {batch.category}
-                                </div>
-                                <div>
-                                  <span className="font-medium">创建时间：</span>
-                                  {format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
-                                </div>
-                              </div>
-                            </div>
-                            <Button variant="ghost" size="icon">
-                              <ChevronRight className="h-5 w-5" />
-                            </Button>
-                          </div>
-                        </CardContent>
+                        <BatchWorkOrderCardContent
+                          batchId={batch.batchId}
+                          deviceCount={batch.deviceCount}
+                          customerName={batch.customerName || batch.clientName}
+                          projectName={batch.projectName}
+                          projectLocation={batch.projectLocation}
+                          reportedBy={batch.reportedBy}
+                          reportedByUsername={batch.reportedByUsername}
+                          deviceSerials={batch.deviceSerials}
+                          deviceModels={batch.deviceModels}
+                          category={batch.category}
+                          statusNode={isRmaBatch ? (
+                            <Badge variant="outline" className="bg-blue-50 border-blue-300 text-blue-800">
+                              <Truck className="w-3 h-3 mr-1" />返厂处理
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="bg-green-50 border-green-300 text-green-800">
+                              <Truck className="w-3 h-3 mr-1" />待发货
+                            </Badge>
+                          )}
+                          createdAt={`创建时间：${format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}`}
+                          trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
+                        />
                       </Card>
                     )
                   })}
@@ -413,53 +420,41 @@ export default function WarehouseDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <span className="ml-2 text-muted-foreground">加载中...</span>
                 </div>
-              ) : completedBatches.length === 0 ? (
+              ) : filteredCompletedBatches.length === 0 ? (
                 <div className="text-center py-12">
                   <Package className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-                  <p className="text-muted-foreground">暂无已完成的批次工单</p>
+                  <p className="text-muted-foreground">
+                    {hasActiveFilters ? "未找到匹配的已完成批次" : "暂无已完成的批次工单"}
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {completedBatches.filter(b => !searchQuery.trim() || [b.batchId, b.projectName, b.projectLocation, b.category].some(v => v?.toLowerCase().includes(searchQuery.toLowerCase()))).map((batch, index) => {
+                  {filteredCompletedBatches.map((batch, index) => {
                     const uniqueKey = `completed-${batch.batchId}-${batch.createdAt}-${index}`
                     return (
                       <Card key={uniqueKey} className="hover:border-primary/50 transition-colors cursor-pointer" onClick={() => {
                         setSelectedBatchId(batch.batchId);
                         setSelectedMode("view");
                       }}>
-                        <CardContent className="p-4">
-                          <div className="flex items-center justify-between">
-                            <div className="flex-1 space-y-2">
-                              <div className="flex items-center gap-3">
-                                <h3 className="font-semibold text-lg">{batch.batchId}</h3>
-                                <Badge variant="outline" className="bg-blue-50 border-blue-300 text-blue-800">
-                                  <CheckCircle2 className="w-3 h-3 mr-1" />
-                                  已完成
-                                </Badge>
-                                <Badge variant="secondary">
-                                  {batch.deviceCount} 台设备
-                                </Badge>
-                              </div>
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm text-muted-foreground">
-                                <div>
-                                  <span className="font-medium">项目：</span>
-                                  {batch.projectName || batch.projectLocation}
-                                </div>
-                                <div>
-                                  <span className="font-medium">类别：</span>
-                                  {batch.category}
-                                </div>
-                                <div>
-                                  <span className="font-medium">创建时间：</span>
-                                  {format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
-                                </div>
-                              </div>
-                            </div>
-                            <Button variant="ghost" size="icon">
-                              <ChevronRight className="h-5 w-5" />
-                            </Button>
-                          </div>
-                        </CardContent>
+                        <BatchWorkOrderCardContent
+                          batchId={batch.batchId}
+                          deviceCount={batch.deviceCount}
+                          customerName={batch.customerName || batch.clientName}
+                          projectName={batch.projectName}
+                          projectLocation={batch.projectLocation}
+                          reportedBy={batch.reportedBy}
+                          reportedByUsername={batch.reportedByUsername}
+                          deviceSerials={batch.deviceSerials}
+                          deviceModels={batch.deviceModels}
+                          category={batch.category}
+                          statusNode={(
+                            <Badge variant="outline" className="bg-blue-50 border-blue-300 text-blue-800">
+                              <CheckCircle2 className="w-3 h-3 mr-1" />已完成
+                            </Badge>
+                          )}
+                          createdAt={`创建时间：${format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}`}
+                          trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
+                        />
                       </Card>
                     )
                   })}
@@ -487,14 +482,16 @@ export default function WarehouseDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <span className="ml-2 text-muted-foreground">加载中...</span>
                 </div>
-              ) : allBatches.length === 0 ? (
+              ) : filteredAllBatches.length === 0 ? (
                 <div className="text-center py-12">
                   <Package className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-                  <p className="text-muted-foreground">暂无批次工单</p>
+                  <p className="text-muted-foreground">
+                    {hasActiveFilters ? "未找到匹配的批次工单" : "暂无批次工单"}
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {allBatches.filter(b => !searchQuery.trim() || [b.batchId, b.projectName, b.projectLocation, b.category].some(v => v?.toLowerCase().includes(searchQuery.toLowerCase()))).map((batch, index) => {
+                  {filteredAllBatches.map((batch, index) => {
                     const uniqueKey = `all-${batch.batchId}-${batch.createdAt}-${index}`
                     // 根据状态确定查看模式和Badge
                     const getStatusInfo = (status: string) => {
@@ -516,39 +513,25 @@ export default function WarehouseDashboard() {
                         setSelectedBatchId(batch.batchId);
                         setSelectedMode(statusInfo.mode);
                       }}>
-                        <CardContent className="p-4">
-                          <div className="flex items-center justify-between">
-                            <div className="flex-1 space-y-2">
-                              <div className="flex items-center gap-3">
-                                <h3 className="font-semibold text-lg">{batch.batchId}</h3>
-                                <Badge variant="outline" className={statusInfo.className}>
-                                  <StatusIcon className="w-3 h-3 mr-1" />
-                                  {statusInfo.badge}
-                                </Badge>
-                                <Badge variant="secondary">
-                                  {batch.deviceCount} 台设备
-                                </Badge>
-                              </div>
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm text-muted-foreground">
-                                <div>
-                                  <span className="font-medium">项目：</span>
-                                  {batch.projectName || batch.projectLocation}
-                                </div>
-                                <div>
-                                  <span className="font-medium">类别：</span>
-                                  {batch.category}
-                                </div>
-                                <div>
-                                  <span className="font-medium">创建时间：</span>
-                                  {format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
-                                </div>
-                              </div>
-                            </div>
-                            <Button variant="ghost" size="icon">
-                              <ChevronRight className="h-5 w-5" />
-                            </Button>
-                          </div>
-                        </CardContent>
+                        <BatchWorkOrderCardContent
+                          batchId={batch.batchId}
+                          deviceCount={batch.deviceCount}
+                          customerName={batch.customerName || batch.clientName}
+                          projectName={batch.projectName}
+                          projectLocation={batch.projectLocation}
+                          reportedBy={batch.reportedBy}
+                          reportedByUsername={batch.reportedByUsername}
+                          deviceSerials={batch.deviceSerials}
+                          deviceModels={batch.deviceModels}
+                          category={batch.category}
+                          statusNode={(
+                            <Badge variant="outline" className={statusInfo.className}>
+                              <StatusIcon className="w-3 h-3 mr-1" />{statusInfo.badge}
+                            </Badge>
+                          )}
+                          createdAt={`创建时间：${format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}`}
+                          trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
+                        />
                       </Card>
                     )
                   })}

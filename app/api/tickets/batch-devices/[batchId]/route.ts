@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import { DB_FIELDS, TicketStatus, UserRole } from "@/lib/enums"
-import { cookies } from "next/headers"
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // GET /api/tickets/batch-devices/[batchId]
 // 获取指定批次下的所有设备列表
@@ -9,6 +9,9 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ batchId: string }> | { batchId: string } }
 ) {
+  const authResult = await checkUserRole(ALL_USER_ROLES)
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     // Promise.resolve 兼容 Next.js 新旧两种 params 形态（同步对象 或 异步 Promise）
     const resolvedParams = await Promise.resolve(context.params)
@@ -37,8 +40,7 @@ export async function GET(
     const hasManufactureDate = columnNames.some(c => c.toLowerCase() === 'manufacturedate')
     const hasWarrantyStatus = columnNames.some(c => c.toLowerCase() === 'warrantystatus')
     const hasWarrantyStatusOverride = columnNames.some(c => c.toLowerCase() === 'warrantystatusoverride')
-    // 照片字段有两个历史列名：创建时写入 DeviceImages，更新时写入 DevicePhotos
-    const hasDeviceImages = columnNames.some(c => c.toLowerCase() === 'deviceimages')
+    // 运行数据库与 schema.prisma 统一使用 DevicePhotos
     const hasDevicePhotos = columnNames.some(c => c.toLowerCase() === 'devicephotos')
     const hasCancelRequestStatus = columnNames.some(c => c.toLowerCase() === 'cancelrequeststatus')
     const hasCancelRequestReason = columnNames.some(c => c.toLowerCase() === 'cancelrequestreason')
@@ -81,7 +83,6 @@ export async function GET(
     if (hasManufactureDate) selectFields += ', ManufactureDate'
     if (hasWarrantyStatus) selectFields += ', WarrantyStatus'
     if (hasWarrantyStatusOverride) selectFields += ', WarrantyStatusOverride'
-    if (hasDeviceImages) selectFields += ', DeviceImages'
     if (hasDevicePhotos) selectFields += ', DevicePhotos'
     if (hasRevisionRequestedBy) selectFields += ', RevisionRequestedBy'
     if (hasRevisionRequestReason) selectFields += ', RevisionRequestReason'
@@ -127,9 +128,8 @@ export async function GET(
       arrivalDate: hasArrivalDate ? (row.ArrivalDate || null) : null,
       warrantyStatus: hasWarrantyStatus ? (row.WarrantyStatus || null) : null,
       warrantyStatusOverride: hasWarrantyStatusOverride ? (row.WarrantyStatusOverride || null) : null,
-      // 兼容两列：创建时写入 DeviceImages，更新时写入 DevicePhotos，优先取有值的
-      deviceImages: (hasDeviceImages ? (row.DeviceImages || null) : null)
-        || (hasDevicePhotos ? (row.DevicePhotos || null) : null),
+      // 保持 API 的 deviceImages 属性不变，底层只读取真实数据库列 DevicePhotos
+      deviceImages: hasDevicePhotos ? (row.DevicePhotos || null) : null,
       repairAction: (row.RepairAction as string | null) || null,
       quantity: typeof row.Quantity === "number" ? row.Quantity : (parseInt(row.Quantity as string) || 1),
       finalOutcome: (() => {
@@ -198,6 +198,9 @@ export async function POST(
   request: Request,
   context: { params: Promise<{ batchId: string }> | { batchId: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const resolvedParams = await Promise.resolve(context.params)
 
@@ -209,26 +212,6 @@ export async function POST(
       return NextResponse.json(
         { success: false, message: "批次ID和设备列表不能为空" },
         { status: 400 }
-      )
-    }
-
-    // 获取当前用户
-    const cookieStore = await cookies()
-    const userIdCookie = cookieStore.get("userId")?.value
-    const userRoleCookie = cookieStore.get("userRole")?.value
-
-    if (!userIdCookie) {
-      return NextResponse.json(
-        { success: false, message: "未登录" },
-        { status: 401 }
-      )
-    }
-
-    // 权限检查：只有现场人员和管理员可以添加设备
-    if (userRoleCookie !== UserRole.REPORTER && userRoleCookie !== UserRole.ADMIN) {
-      return NextResponse.json(
-        { success: false, message: "无权限添加设备，仅现场人员和管理员可操作" },
-        { status: 403 }
       )
     }
 
@@ -334,7 +317,7 @@ export async function POST(
         if (hasReportByUserId) {
           insertCols += `, ${DB_FIELDS.REPORT_BY_USER_ID}`
           insertVals += `, @reportByUserID`
-          insertRequest.input("reportByUserID", Number(userIdCookie))
+          insertRequest.input("reportByUserID", Number(authResult.userId))
         }
         if (hasReportTime) {
           insertCols += `, ${DB_FIELDS.REPORT_TIME}`
@@ -408,6 +391,9 @@ export async function PUT(
   request: Request,
   context: { params: Promise<{ batchId: string }> | { batchId: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const resolvedParams = await Promise.resolve(context.params)
 
@@ -419,18 +405,6 @@ export async function PUT(
       return NextResponse.json(
         { success: false, message: "批次ID、设备ID和更新数据不能为空" },
         { status: 400 }
-      )
-    }
-
-    // 获取当前用户并检查权限
-    const cookieStore = await cookies()
-    const userRoleCookie = cookieStore.get("userRole")?.value
-
-    // 权限检查：只有现场人员和管理员可以编辑设备
-    if (userRoleCookie !== UserRole.REPORTER && userRoleCookie !== UserRole.ADMIN) {
-      return NextResponse.json(
-        { success: false, message: "无权限编辑设备，仅现场人员和管理员可操作" },
-        { status: 403 }
       )
     }
 
@@ -531,6 +505,9 @@ export async function DELETE(
   request: Request,
   context: { params: Promise<{ batchId: string }> | { batchId: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const resolvedParams = await Promise.resolve(context.params)
 
@@ -542,18 +519,6 @@ export async function DELETE(
       return NextResponse.json(
         { success: false, message: "批次ID和设备ID不能为空" },
         { status: 400 }
-      )
-    }
-
-    // 获取当前用户并检查权限
-    const cookieStore = await cookies()
-    const userRoleCookie = cookieStore.get("userRole")?.value
-
-    // 权限检查：只有现场人员和管理员可以删除设备
-    if (userRoleCookie !== UserRole.REPORTER && userRoleCookie !== UserRole.ADMIN) {
-      return NextResponse.json(
-        { success: false, message: "无权限删除设备，仅现场人员和管理员可操作" },
-        { status: 403 }
       )
     }
 

@@ -1,16 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { UserRole, TicketStatus, normalizeTicketStatus, TICKET_STATUS_LABELS } from "@/lib/enums";
 import { 
   ArrowLeft,
-  Search,
   Loader2,
   ChevronRight,
   Package,
@@ -23,6 +21,9 @@ import {
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import BusinessBatchReview from "@/components/business-batch-review";
+import { WorkOrderFilterBar } from "@/components/work-order-filter-bar";
+import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
+import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
 
 interface BatchTicket {
   batchId: string;
@@ -30,6 +31,14 @@ interface BatchTicket {
   projectLocation: string;
   deviceCount: number;
   category: string;
+  clientName?: string | null;
+  customerName?: string;
+  reportedBy?: string;
+  reportedByUsername?: string;
+  reportedByUserId?: string;
+  deviceSerials?: string;
+  deviceModels?: string;
+  statuses?: string;
   createdAt: string;
   status: string;
 }
@@ -40,8 +49,27 @@ export default function BusinessRepairsPage() {
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [batches, setBatches] = useState<BatchTicket[]>([]);
   const [loadingBatches, setLoadingBatches] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [workOrderQuery, setWorkOrderQuery] = useState("");
+  const [customerQuery, setCustomerQuery] = useState("");
+  const [deviceQuery, setDeviceQuery] = useState("");
+  const [filterStatus, setFilterStatus] = useState(ALL_REPAIR_STATUS_FILTER);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+
+  const loadBatches = useCallback(async () => {
+    setLoadingBatches(true);
+    try {
+      const response = await fetch("/api/tickets/all-batches");
+      const result = await response.json();
+
+      if (result.success) {
+        setBatches(result.data || []);
+      }
+    } catch (error) {
+      console.error("加载批次工单失败:", error);
+    } finally {
+      setLoadingBatches(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (authStatus === "loading") return;
@@ -56,35 +84,16 @@ export default function BusinessRepairsPage() {
 
   useEffect(() => {
     if (isAuthorized) {
-      loadBatches();
+      void loadBatches();
     }
-  }, [isAuthorized]);
+  }, [isAuthorized, loadBatches]);
 
-  const loadBatches = async () => {
-    setLoadingBatches(true);
-    try {
-      const response = await fetch("/api/tickets/all-batches");
-      const result = await response.json();
-      
-      if (result.success) {
-        setBatches(result.data || []);
-      }
-    } catch (error) {
-      console.error("加载批次工单失败:", error);
-    } finally {
-      setLoadingBatches(false);
-    }
-  };
-
-  const filteredBatches = batches.filter(batch => {
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      batch.batchId.toLowerCase().includes(q) ||
-      (batch.projectName || "").toLowerCase().includes(q) ||
-      (batch.projectLocation || "").toLowerCase().includes(q)
-    );
-  });
+  const filteredBatches = batches.filter((batch) => matchesRepairListFilters(batch, {
+    workOrderQuery,
+    customerQuery,
+    deviceQuery,
+    status: filterStatus,
+  }));
 
   // ⚠️ 曾经的 bug：直接用原始字符串 status 与 TicketStatus 枚举做 switch 比较，一旦大小写/格式不完全
   // 一致就全部落到 default 分支。修复：先用 normalizeTicketStatus 归一化后再匹配，并补充仓库已确认状态。
@@ -217,18 +226,17 @@ export default function BusinessRepairsPage() {
           </Button>
         </div>
 
-        {/* 搜索栏 */}
-        <div className="flex items-center gap-4">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="搜索工单号、批次号、序列号或故障描述..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-10"
-            />
-          </div>
-        </div>
+        <WorkOrderFilterBar
+          workOrderQuery={workOrderQuery}
+          customerQuery={customerQuery}
+          deviceQuery={deviceQuery}
+          status={filterStatus}
+          statusOptions={REPAIR_STATUS_FILTER_OPTIONS}
+          onWorkOrderQueryChange={setWorkOrderQuery}
+          onCustomerQueryChange={setCustomerQuery}
+          onDeviceQueryChange={setDeviceQuery}
+          onStatusChange={setFilterStatus}
+        />
 
         {/* 批次工单列表 */}
         {loadingBatches ? (
@@ -240,7 +248,7 @@ export default function BusinessRepairsPage() {
           <div className="text-center py-12">
             <Package className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
             <p className="text-muted-foreground">
-              {searchQuery ? "未找到匹配的工单" : "暂无批次工单"}
+              {(workOrderQuery || customerQuery || deviceQuery || filterStatus !== ALL_REPAIR_STATUS_FILTER) ? "未找到匹配的工单" : "暂无批次工单"}
             </p>
           </div>
         ) : (
@@ -251,36 +259,21 @@ export default function BusinessRepairsPage() {
                 className="hover:border-primary/50 transition-colors cursor-pointer" 
                 onClick={() => setSelectedBatchId(batch.batchId)}
               >
-                <CardContent className="p-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1 space-y-2">
-                      <div className="flex items-center gap-3">
-                        <h3 className="font-semibold text-lg">{batch.batchId}</h3>
-                        {getStatusBadge(batch.status)}
-                        <Badge variant="secondary">
-                          {batch.deviceCount} 台设备
-                        </Badge>
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm text-muted-foreground">
-                        <div>
-                          <span className="font-medium">项目：</span>
-                          {batch.projectName || batch.projectLocation}
-                        </div>
-                        <div>
-                          <span className="font-medium">类别：</span>
-                          {batch.category}
-                        </div>
-                        <div>
-                          <span className="font-medium">创建时间：</span>
-                          {format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}
-                        </div>
-                      </div>
-                    </div>
-                    <Button variant="ghost" size="icon">
-                      <ChevronRight className="h-5 w-5" />
-                    </Button>
-                  </div>
-                </CardContent>
+                <BatchWorkOrderCardContent
+                  batchId={batch.batchId}
+                  deviceCount={batch.deviceCount}
+                  customerName={batch.customerName || batch.clientName}
+                  projectName={batch.projectName}
+                  projectLocation={batch.projectLocation}
+                  reportedBy={batch.reportedBy}
+                  reportedByUsername={batch.reportedByUsername}
+                  deviceSerials={batch.deviceSerials}
+                  deviceModels={batch.deviceModels}
+                  category={batch.category}
+                  statusNode={getStatusBadge(batch.status)}
+                  createdAt={`创建时间：${format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}`}
+                  trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
+                />
               </Card>
             ))}
           </div>
