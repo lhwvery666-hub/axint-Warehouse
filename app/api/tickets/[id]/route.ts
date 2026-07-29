@@ -73,15 +73,14 @@ interface HistoryRecord {
 // GET /api/tickets/[id]
 // 获取单个维修工单详情
 export async function GET(
-  request: Request,
-  context: { params: Promise<{ id: string }> } | { params: { id: string } }
+  _request: Request,
+  context: { params: Promise<{ id: string }> }
 ) {
   const authResult = await checkUserRole(ALL_USER_ROLES)
   if (isErrorResponse(authResult)) return authResult
 
   try {
-    // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
-    const resolvedParams = await Promise.resolve(context.params)
+    const resolvedParams = await context.params
 
     const ticketId = resolvedParams.id
 
@@ -99,26 +98,37 @@ export async function GET(
       : TICKET_QUERY_MESSAGES.queryBySnLog(ticketId)
     )
 
-    // 查询工单信息（使用 Prisma $queryRaw 以支持动态字段）
-    let ticket: TicketRecord | null = null
-
-    if (isNumericId) {
-      // 通过 ID 查询
-      const result = await prisma.$queryRaw<TicketRecord[]>(Prisma.sql`
-        SELECT TOP 1 *
-        FROM Repair_Tickets
-        WHERE Id = ${parseInt(ticketId, 10)}
-      `)
-      ticket = result[0] || null
-    } else {
-      // 通过 DeviceSN 查询
-      const result = await prisma.$queryRaw<TicketRecord[]>(Prisma.sql`
-        SELECT TOP 1 *
-        FROM Repair_Tickets
-        WHERE DeviceSN = ${ticketId}
-      `)
-      ticket = result[0] || null
+    const reporterUserId = Number(authResult.userId)
+    if (authResult.normalizedRole === UserRole.REPORTER && !Number.isSafeInteger(reporterUserId)) {
+      return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
     }
+    const identifierFilter = isNumericId
+      ? Prisma.sql`[Id] = ${parseInt(ticketId, 10)}`
+      : Prisma.sql`[DeviceSN] = ${ticketId}`
+    const ownershipFilter = authResult.normalizedRole === UserRole.REPORTER
+      ? Prisma.sql`AND [ReportByUserID] = ${reporterUserId}`
+      : Prisma.empty
+
+    const result = await prisma.$queryRaw<TicketRecord[]>(Prisma.sql`
+      SELECT TOP (1)
+        [Id], [BatchId], [DeviceSN], [ModelName], [ProjectLocation], [Problem],
+        [ReportByUserID], [ExpressCompany], [CourierCompany], [TrackingNumber],
+        [CourierNumber], [Status], [CreatedAt], [DeviceName], [MaterialCode],
+        [DevicePhotos], [DamageImages], [SubmitDate], [TrackingNumber_In],
+        [SenderAddress], [ContactInfo], [ProjectName], [Category], [Quantity],
+        [FullSpec], [FaultPoint], [IsChargeable], [IsOutsourced],
+        [FactoryRepairDate], [FactoryTrackingNum], [SupplierName], [RepairCost],
+        [ClientName], [IsInvoiced], [FactoryReceivedDate], [ReceivedDate],
+        [FactoryShipDate], [ReturnDate], [ReturnQuantity], [ReturnTrackingNum],
+        [CancelRequestStatus], [CancelRequestReason], [CancelRequestDate],
+        [CancelApprovedBy], [CancelApprovedDate], [SignedReportPhoto],
+        [WarrantyStatus], [WarrantyStatusOverride], [FaultCategory], [RepairAction],
+        [RepairNotes]
+      FROM [dbo].[Repair_Tickets]
+      WHERE ${identifierFilter} ${ownershipFilter}
+      ORDER BY [Id] DESC
+    `)
+    const ticket: TicketRecord | null = result[0] || null
 
     if (!ticket) {
       return NextResponse.json(
@@ -809,14 +819,14 @@ export async function PUT(
 // DELETE /api/tickets/[id]
 // 彻底删除单个维修工单
 export async function DELETE(
-  request: Request,
-  context: { params: Promise<{ id: string }> } | { params: { id: string } }
+  _request: Request,
+  context: { params: Promise<{ id: string }> }
 ) {
   const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER])
   if (isErrorResponse(authResult)) return authResult
 
   try {
-    const resolvedParams = await Promise.resolve(context.params)
+    const resolvedParams = await context.params
 
     const ticketId = resolvedParams.id
 
@@ -827,24 +837,62 @@ export async function DELETE(
       )
     }
 
-    // 判断 ticketId 是数字还是字符串
-    const isNumericId = /^\d+$/.test(ticketId)
-    console.log(`🔍 [DELETE] ` + (isNumericId 
-      ? TICKET_QUERY_MESSAGES.queryByIdLog(ticketId) 
-      : TICKET_QUERY_MESSAGES.queryBySnLog(ticketId)
-    ))
+    if (!/^\d+$/.test(ticketId)) {
+      return NextResponse.json(
+        { success: false, message: "删除操作必须使用数字工单ID" },
+        { status: 400 }
+      )
+    }
 
-    // 执行物理删除（使用 Prisma $executeRaw）
-    if (isNumericId) {
-      await prisma.$executeRaw(Prisma.sql`
-        DELETE FROM Repair_Tickets
-        WHERE Id = ${parseInt(ticketId, 10)}
+    const numericTicketId = Number(ticketId)
+    const operatorId = Number(authResult.userId)
+    if (!Number.isSafeInteger(numericTicketId) || !Number.isSafeInteger(operatorId)) {
+      return NextResponse.json(
+        { success: false, message: "身份或工单参数无效" },
+        { status: 400 }
+      )
+    }
+
+    interface DeletedTicketRow {
+      Id: number
+      TicketId: string | null
+      BatchId: string | null
+      Status: string
+    }
+
+    const ownershipFilter = authResult.normalizedRole === UserRole.REPORTER
+      ? Prisma.sql`AND [ReportByUserID] = ${operatorId}`
+      : Prisma.empty
+
+    const deleted = await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<DeletedTicketRow[]>(Prisma.sql`
+        DELETE FROM [dbo].[Repair_Tickets]
+        OUTPUT deleted.[Id], deleted.[TicketId], deleted.[BatchId], deleted.[Status]
+        WHERE [Id] = ${numericTicketId} ${ownershipFilter};
       `)
-    } else {
-      await prisma.$executeRaw(Prisma.sql`
-        DELETE FROM Repair_Tickets
-        WHERE DeviceSN = ${ticketId}
-      `)
+      const row = rows[0]
+      if (!row) return null
+
+      await tx.repair_Ticket_History.create({
+        data: {
+          ticketId: row.TicketId ?? String(row.Id),
+          batchId: row.BatchId,
+          actionType: TicketActionType.STATUS_CHANGE,
+          oldStatus: row.Status,
+          newStatus: TicketStatus.DELETED,
+          operatorId,
+          operatorName: authResult.realName || authResult.username,
+          description: "物理删除工单",
+        },
+      })
+      return row
+    })
+
+    if (!deleted) {
+      return NextResponse.json(
+        { success: false, message: "工单不存在或您无权删除" },
+        { status: 404 }
+      )
     }
 
     return NextResponse.json({

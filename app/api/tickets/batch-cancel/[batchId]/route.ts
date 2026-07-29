@@ -1,149 +1,122 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS } from "@/lib/enums"
+import { TicketActionType, UserRole } from "@/lib/enums"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
-// POST /api/tickets/batch-cancel/[batchId]
-// 申请取消批次工单（取消批次中的所有设备）
+const requestSchema = z.object({
+  reason: z.string().trim().min(1).max(2000),
+  userId: z.unknown().optional(),
+}).strict()
+const batchIdSchema = z.string().trim().min(1).max(100)
+
+interface CancelGuardRow {
+  Id: number
+  Status: string
+  ReportByUserID: number | null
+  CancelRequestStatus: string | null
+}
+
 export async function POST(
   request: Request,
-  context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
+  context: { params: Promise<{ batchId: string }> }
 ) {
+  const authResult = await checkUserRole([UserRole.REPORTER, UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
+  let transaction: sql.Transaction | null = null
   try {
-    const body = await request.json()
-    const { reason, userId } = body
-
-    // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
-
-    const batchId = resolvedParams.batchId
-
-    if (!batchId) {
-      return NextResponse.json(
-        { success: false, message: "批次号不能为空" },
-        { status: 400 }
-      )
+    const parsedBody = requestSchema.safeParse(await request.json().catch(() => null))
+    const parsedBatchId = batchIdSchema.safeParse((await context.params).batchId)
+    if (!parsedBody.success || !parsedBatchId.success) {
+      return NextResponse.json({ success: false, message: "请求参数无效" }, { status: 400 })
     }
-
-    if (!reason || !reason.trim()) {
-      return NextResponse.json(
-        { success: false, message: "取消原因不能为空" },
-        { status: 400 }
-      )
-    }
-
-    // 验证用户权限（只有现场人员可以申请取消）
-    const cookieStore = await cookies()
-    const userIdCookie = cookieStore.get("userId")?.value || null
-    if (!userIdCookie) {
-      return NextResponse.json(
-        { success: false, message: "未登录，无法申请取消" },
-        { status: 401 }
-      )
+    const batchId = parsedBatchId.data
+    const operatorId = Number(authResult.userId)
+    if (!Number.isSafeInteger(operatorId)) {
+      return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
     }
 
     const pool = await getDbConnection()
-
-    // 验证用户角色
-    const userResult = await pool
-      .request()
-      .input("userId", userIdCookie)
-      .query(`
-        SELECT TOP 1 Role, RealName, Username
-        FROM Users
-        WHERE UserID = @userId
+    transaction = new sql.Transaction(pool)
+    await transaction.begin()
+    const guard = await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .query<CancelGuardRow>(`
+        SELECT [Id], [Status], [ReportByUserID], [CancelRequestStatus]
+        FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [BatchId] = @batchId;
       `)
-
-    if (userResult.recordset.length === 0) {
+    if (guard.recordset.length === 0) {
+      await transaction.rollback()
+      transaction = null
+      return NextResponse.json({ success: false, message: "批次工单不存在" }, { status: 404 })
+    }
+    if (
+      authResult.normalizedRole === UserRole.REPORTER &&
+      guard.recordset.some((row) => row.ReportByUserID !== operatorId)
+    ) {
+      await transaction.rollback()
+      transaction = null
+      return NextResponse.json({ success: false, message: "您无权取消该批次" }, { status: 403 })
+    }
+    if (guard.recordset.some((row) =>
+      ["Completed", "Cancelled", "Scrapped", "Deleted"].includes(row.Status) ||
+      row.CancelRequestStatus === "Pending"
+    )) {
+      await transaction.rollback()
+      transaction = null
       return NextResponse.json(
-        { success: false, message: "用户不存在" },
-        { status: 403 }
+        { success: false, message: "批次状态已变化或已有待审批取消申请" },
+        { status: 409 }
       )
     }
 
-    const userRole = userResult.recordset[0].Role || ""
-    const isReporter = userRole.toLowerCase().includes("reporter") || userRole === "现场人员"
-
-    if (!isReporter) {
-      return NextResponse.json(
-        { success: false, message: "只有现场人员可以申请取消批次工单" },
-        { status: 403 }
-      )
-    }
-
-    // 查询批次中的所有设备
-    const devicesResult = await pool
-      .request()
-      .input("batchId", batchId)
+    const updateResult = await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .input("reason", sql.NVarChar(sql.MAX), parsedBody.data.reason)
       .query(`
-        SELECT ${DB_FIELDS.ID}, ${DB_FIELDS.STATUS}
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
+        UPDATE [dbo].[Repair_Tickets]
+        SET [CancelRequestStatus] = 'Pending',
+            [CancelRequestReason] = @reason,
+            [CancelRequestDate] = GETUTCDATE(),
+            [UpdatedAt] = GETUTCDATE()
+        WHERE [BatchId] = @batchId
+          AND [Status] NOT IN ('Completed', 'Cancelled', 'Scrapped', 'Deleted')
+          AND ISNULL([CancelRequestStatus], '') <> 'Pending';
       `)
-
-    if (devicesResult.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "批次工单不存在或已被删除" },
-        { status: 404 }
-      )
+    if (updateResult.rowsAffected[0] !== guard.recordset.length) {
+      throw new Error("BATCH_CONFLICT")
     }
 
-    const devices = devicesResult.recordset
-
-    // 检查批次状态（如果已完成或已取消，不允许取消）
-    const hasCompletedOrCancelled = devices.some((d: any) => {
-      const status = (d[DB_FIELDS.STATUS] || d.Status || "").toLowerCase()
-      return status === "completed" || status === "cancelled"
-    })
-
-    if (hasCompletedOrCancelled) {
-      return NextResponse.json(
-        { success: false, message: "批次中部分设备已完成或已取消，无法申请取消整个批次" },
-        { status: 400 }
-      )
-    }
-
-    // 为批次中的所有设备添加取消申请
-    const updatePromises = devices.map((device: any) => {
-      const deviceId = device[DB_FIELDS.ID] || device.ID
-      return pool
-        .request()
-        .input("ticketId", deviceId)
-        .input("cancelRequestReason", reason.trim())
-        .input("cancelRequestDate", new Date())
-        .query(`
-          UPDATE Repair_Tickets
-          SET 
-            CancelRequestStatus = 'Pending',
-            CancelRequestReason = @cancelRequestReason,
-            CancelRequestDate = @cancelRequestDate,
-            ${DB_FIELDS.UPDATED_AT} = GETUTCDATE()
-          WHERE ${DB_FIELDS.ID} = @ticketId
-        `)
-    })
-
-    await Promise.all(updatePromises)
-
+    await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .input("actionType", sql.NVarChar(50), TicketActionType.CANCEL_REQUEST)
+      .input("operatorId", sql.Int, operatorId)
+      .input("operatorName", sql.NVarChar(100), authResult.realName || authResult.username)
+      .input("description", sql.NVarChar(sql.MAX), `申请取消批次：${parsedBody.data.reason}`)
+      .query(`
+        INSERT INTO [dbo].[Repair_Ticket_History] (
+          [BatchId], [ActionType], [OperatorId], [OperatorName], [Description], [CreatedAt]
+        ) VALUES (@batchId, @actionType, @operatorId, @operatorName, @description, GETUTCDATE());
+      `)
+    await transaction.commit()
+    transaction = null
     return NextResponse.json({
       success: true,
-      message: `批次工单取消申请已提交，共 ${devices.length} 台设备等待审批`,
-      data: {
-        batchId,
-        deviceCount: devices.length
-      }
+      message: `批次工单取消申请已提交，共 ${guard.recordset.length} 台设备等待审批`,
+      data: { batchId, deviceCount: guard.recordset.length },
     })
-
-  } catch (error: any) {
-    console.error("申请取消批次工单失败:", error)
-    return NextResponse.json(
-      { 
-        success: false, 
-        message: error.message || "申请取消批次工单失败" 
-      },
-      { status: 500 }
-    )
+  } catch (error: unknown) {
+    console.error("[Batch Cancel API] 申请失败:", error)
+    if (transaction) {
+      try { await transaction.rollback() } catch (rollbackError) {
+        console.error("[Batch Cancel API] 事务回滚失败:", rollbackError)
+      } finally { transaction = null }
+    }
+    const status = error instanceof Error && error.message === "BATCH_CONFLICT" ? 409 : 500
+    const message = status === 409 ? "批次状态已变化，请刷新后重试" : "申请取消批次失败"
+    return NextResponse.json({ success: false, message }, { status })
   }
 }

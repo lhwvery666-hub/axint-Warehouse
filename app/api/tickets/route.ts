@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
-import { cookies } from "next/headers"
-import { TicketStatus, normalizeTicketStatus } from "@/lib/enums"
+import * as sql from "mssql"
+import { TicketStatus, UserRole, normalizeTicketStatus } from "@/lib/enums"
 import { prisma } from "@/lib/prisma"
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // ==================== 类型定义 ====================
 
@@ -66,6 +67,7 @@ interface MappedTicket {
   problem: string
   status: TicketStatus
   reportedBy: string
+  reportedByUsername: string
   reportedByUserId: string
   reportedAt: string
   courierCompany: string
@@ -88,13 +90,15 @@ interface MappedTicket {
 // GET /api/tickets
 // 获取所有维修工单
 export async function GET() {
+  const authResult = await checkUserRole(ALL_USER_ROLES)
+  if (isErrorResponse(authResult)) return authResult
+
   try {
-    // ✅ Rule 5 — 路由保护：必须登录才能访问全量工单列表
-    const cookieStore = await cookies()
-    const authUserId = cookieStore.get("userId")?.value ?? null
-    if (!authUserId) {
-      return NextResponse.json({ success: false, message: "未登录，请先登录" }, { status: 401 })
+    const authUserId = Number(authResult.userId)
+    if (!Number.isSafeInteger(authUserId)) {
+      return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
     }
+    const reporterOnly = authResult.normalizedRole === UserRole.REPORTER
 
     const pool = await getDbConnection()
 
@@ -110,7 +114,9 @@ export async function GET() {
         ORDER BY ORDINAL_POSITION
       `)
 
-      actualColumns = columnInfo.recordset.map((row: { COLUMN_NAME: string }) => row.COLUMN_NAME)
+      actualColumns = columnInfo.recordset
+        .map((row: { COLUMN_NAME: string }) => row.COLUMN_NAME)
+        .filter((columnName: string) => /^[A-Za-z0-9_]+$/.test(columnName))
       console.log('Repair_Tickets 表的实际列名:', actualColumns)
 
       // 构建查询，使用实际的列名（显式列出，避免 SELECT *）
@@ -119,9 +125,14 @@ export async function GET() {
         (col: string) => col.toLowerCase().includes('time') || col.toLowerCase().includes('report')
       ) ?? actualColumns[actualColumns.length - 1]
 
-      const rawResult = await pool.request().query(`
+      const ticketRequest = pool.request()
+      if (reporterOnly) {
+        ticketRequest.input("authUserId", sql.Int, authUserId)
+      }
+      const rawResult = await ticketRequest.query(`
         SELECT ${selectColumns}
-        FROM Repair_Tickets
+        FROM [dbo].[Repair_Tickets]
+        ${reporterOnly ? "WHERE [ReportByUserID] = @authUserId" : ""}
         ORDER BY [${orderByCol}] DESC
       `)
 
@@ -179,7 +190,12 @@ export async function GET() {
             mapped.SenderAddress = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'problem') {
             mapped.Problem = (row[actualCol] as string | null) ?? null
-          } else if (lowerCol === 'customername' || lowerCol === 'customer_name') {
+          } else if (
+            lowerCol === 'customername' ||
+            lowerCol === 'customer_name' ||
+            lowerCol === 'projectname' ||
+            lowerCol === 'project_name'
+          ) {
             mapped.CustomerName = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'signedreportphoto' || lowerCol === 'signed_report_photo') {
             mapped.SignedReportPhoto = (row[actualCol] as string | null) ?? null
@@ -208,7 +224,6 @@ export async function GET() {
         {
           success: false,
           message: "查询维修工单失败",
-          error: queryError instanceof Error ? queryError.message : "数据库查询错误",
         },
         { status: 500 }
       )
@@ -270,7 +285,7 @@ export async function GET() {
       .filter((id): id is number | string => id != null && id !== '')
       .filter((id, index, self) => self.indexOf(id) === index) // 去重
 
-    const userInfoMap = new Map<string | number, string>()
+    const userInfoMap = new Map<string, { displayName: string; username: string }>()
 
     if (userIds.length > 0) {
       try {
@@ -286,7 +301,10 @@ export async function GET() {
           `)
 
           userResult.recordset.forEach((user: UserInfoRow) => {
-            userInfoMap.set(user.UserID, user.RealName ?? user.Username ?? String(user.UserID))
+            userInfoMap.set(String(user.UserID), {
+              displayName: user.RealName ?? user.Username ?? String(user.UserID),
+              username: user.Username ?? "",
+            })
           })
         }
       } catch (userError: unknown) {
@@ -298,7 +316,10 @@ export async function GET() {
             `)
             if (r.recordset.length > 0) {
               const u = r.recordset[0] as UserInfoRow
-              userInfoMap.set(u.UserID, u.RealName ?? u.Username ?? String(u.UserID))
+              userInfoMap.set(String(u.UserID), {
+                displayName: u.RealName ?? u.Username ?? String(u.UserID),
+                username: u.Username ?? "",
+              })
             }
           } catch (singleErr: unknown) {
             console.error(`查询用户 ${userId} 失败:`, singleErr instanceof Error ? singleErr.message : singleErr)
@@ -310,12 +331,21 @@ export async function GET() {
     // ── 批量查询延期信息 ──────────────────────────────────────────
     const delayInfoMap: Record<string, { delayTo: string | null; delayReason: string | null; createdAtMs: number }> = {}
     try {
-      const historyResult = await pool.request().query(`
+      const historyRequest = pool.request()
+      if (reporterOnly) {
+        historyRequest.input("authUserId", sql.Int, authUserId)
+      }
+      const historyResult = await historyRequest.query(`
         IF OBJECT_ID('dbo.Repair_Ticket_History', 'U') IS NOT NULL
         BEGIN
-          SELECT TicketID, DelayTo, DelayReason, CreatedAt
-          FROM [dbo].[Repair_Ticket_History]
-          WHERE ActionType = 'Delay'
+          SELECT h.TicketID, h.DelayTo, h.DelayReason, h.CreatedAt
+          FROM [dbo].[Repair_Ticket_History] h
+          WHERE h.ActionType = 'Delay'
+            ${reporterOnly ? `AND EXISTS (
+              SELECT 1 FROM [dbo].[Repair_Tickets] t
+              WHERE t.[ReportByUserID] = @authUserId
+                AND (t.[TicketId] = h.[TicketID] OR CONVERT(NVARCHAR(50), t.[Id]) = h.[TicketID])
+            )` : ""}
         END
         ELSE
         BEGIN
@@ -348,9 +378,10 @@ export async function GET() {
     // ── 组装最终 Ticket 列表 ──────────────────────────────────────
     const tickets: MappedTicket[] = mappedRecords.map((row, rowIndex): MappedTicket => {
       const deviceInfo = deviceInfoMap.get(row.DeviceSN ?? "") ?? { deviceName: "", modelName: "" }
-      const reporterName = row.ReportByUserID != null
-        ? (userInfoMap.get(row.ReportByUserID) ?? String(row.ReportByUserID))
-        : ""
+      const reporterInfo = row.ReportByUserID != null
+        ? userInfoMap.get(String(row.ReportByUserID))
+        : undefined
+      const reporterName = reporterInfo?.displayName ?? (row.ReportByUserID != null ? String(row.ReportByUserID) : "")
 
       console.log(`🔍 映射工单 #${rowIndex}: row.Id = ${row.Id}, type = ${typeof row.Id}, DeviceSN = ${row.DeviceSN}`)
 
@@ -382,6 +413,7 @@ export async function GET() {
         problem: row.FaultDescription ?? row.Problem ?? "",
         status: mappedStatus,
         reportedBy: reporterName,
+        reportedByUsername: reporterInfo?.username ?? "",
         reportedByUserId: row.ReportByUserID != null ? String(row.ReportByUserID) : "",
         reportedAt: row.ReportTime ? new Date(row.ReportTime as string).toISOString() : new Date().toISOString(),
         courierCompany: row.CourierCompany ?? "",
@@ -433,8 +465,6 @@ export async function GET() {
       {
         success: false,
         message: "获取维修工单时发生错误",
-        error: error instanceof Error ? error.message : "未知错误",
-        stack: process.env.NODE_ENV === "development" && error instanceof Error ? error.stack : undefined,
       },
       { status: 500 }
     )

@@ -1,96 +1,123 @@
 import { NextResponse } from "next/server"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, UserRole, TicketStatus } from "@/lib/enums"
+import { TicketActionType, TicketStatus, UserRole } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
+const batchIdSchema = z.string().trim().min(1).max(100)
+
+interface DeletedBatchRow {
+  Id: number
+  TicketId: string | null
+  Status: string
+}
+
 // DELETE /api/tickets/batch-delete/[batchId]
-// 现场人员硬删除已取消的批次工单
+// 现场人员只能硬删除自己创建且整批均已取消的工单；管理员可删除任意已取消批次。
 export async function DELETE(
-  request: Request,
-  context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
+  _request: Request,
+  context: { params: Promise<{ batchId: string }> }
 ) {
+  const authResult = await checkUserRole([UserRole.REPORTER, UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
+  let transaction: sql.Transaction | null = null
   try {
-    // 1. 权限验证（第一行，遵守 cursorrules）
-    const authCheck = await checkUserRole([UserRole.REPORTER, UserRole.ADMIN])
-    if (isErrorResponse(authCheck)) {
-      console.error("❌ [删除工单] 权限验证失败")
-      return authCheck
-    }
-
-    // 2. 解析参数
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
-
-    const batchId = resolvedParams.batchId
-
-    if (!batchId) {
+    const parsedBatchId = batchIdSchema.safeParse((await context.params).batchId)
+    if (!parsedBatchId.success) {
       return NextResponse.json(
-        { success: false, message: "批次号不能为空" },
+        { success: false, message: "批次号无效" },
         { status: 400 }
       )
     }
 
-    console.log("🗑️ [删除工单] 开始删除", { batchId, userId: authCheck.userId })
+    const batchId = parsedBatchId.data
+    const operatorId = Number(authResult.userId)
+    if (!Number.isSafeInteger(operatorId)) {
+      return NextResponse.json(
+        { success: false, message: "登录身份无效" },
+        { status: 401 }
+      )
+    }
 
     const pool = await getDbConnection()
+    transaction = new sql.Transaction(pool)
+    await transaction.begin()
 
-    // 3. 验证批次状态（只能删除已取消的工单）
-    const statusResult = await pool
-      .request()
-      .input("batchId", batchId)
-      .query(`
-        SELECT TOP 1 ${DB_FIELDS.STATUS}
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
+    const reporterOwnershipFailure = authResult.normalizedRole === UserRole.REPORTER
+      ? "OR [guard].[ReportByUserID] <> @operatorId OR [guard].[ReportByUserID] IS NULL"
+      : ""
+
+    const deleteResult = await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .input("operatorId", sql.Int, operatorId)
+      .input("cancelledStatus", sql.NVarChar(50), TicketStatus.CANCELLED)
+      .query<DeletedBatchRow>(`
+        DELETE [target]
+        OUTPUT deleted.[Id], deleted.[TicketId], deleted.[Status]
+        FROM [dbo].[Repair_Tickets] AS [target]
+        WHERE [target].[BatchId] = @batchId
+          AND NOT EXISTS (
+            SELECT 1
+            FROM [dbo].[Repair_Tickets] AS [guard] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [guard].[BatchId] = @batchId
+              AND (
+                [guard].[Status] <> @cancelledStatus
+                ${reporterOwnershipFailure}
+              )
+          );
       `)
 
-    if (statusResult.recordset.length === 0) {
+    if (deleteResult.recordset.length === 0) {
+      await transaction.rollback()
+      transaction = null
       return NextResponse.json(
-        { success: false, message: "批次工单不存在" },
-        { status: 404 }
+        { success: false, message: "批次不存在、状态并非全部已取消，或您无权删除" },
+        { status: 409 }
       )
     }
 
-    const currentStatus = statusResult.recordset[0][DB_FIELDS.STATUS]
-    if (currentStatus !== TicketStatus.CANCELLED && currentStatus !== "Cancelled") {
-      return NextResponse.json(
-        { success: false, message: "只能删除已取消的工单" },
-        { status: 400 }
-      )
-    }
-
-    // 4. 硬删除（不保留数据）
-    const deleteResult = await pool
-      .request()
-      .input("batchId", batchId)
+    await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .input("actionType", sql.NVarChar(50), TicketActionType.STATUS_CHANGE)
+      .input("oldStatus", sql.NVarChar(50), TicketStatus.CANCELLED)
+      .input("newStatus", sql.NVarChar(50), TicketStatus.DELETED)
+      .input("operatorId", sql.Int, operatorId)
+      .input("operatorName", sql.NVarChar(100), authResult.realName || authResult.username)
+      .input("description", sql.NVarChar(sql.MAX), `物理删除已取消批次，共 ${deleteResult.recordset.length} 台设备`)
       .query(`
-        DELETE FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
+        INSERT INTO [dbo].[Repair_Ticket_History] (
+          [BatchId], [ActionType], [OldStatus], [NewStatus],
+          [OperatorId], [OperatorName], [Description], [CreatedAt]
+        )
+        VALUES (
+          @batchId, @actionType, @oldStatus, @newStatus,
+          @operatorId, @operatorName, @description, GETUTCDATE()
+        );
       `)
 
-    const deletedCount = deleteResult.rowsAffected[0] || 0
-
-    console.log(`✅ [删除工单] 成功删除 ${deletedCount} 台设备`)
+    await transaction.commit()
+    transaction = null
 
     return NextResponse.json({
       success: true,
-      message: `批次工单已删除，共删除 ${deletedCount} 台设备`,
-      data: {
-        batchId,
-        deletedCount
-      }
+      message: `批次工单已删除，共删除 ${deleteResult.recordset.length} 台设备`,
+      data: { batchId, deletedCount: deleteResult.recordset.length },
     })
-
   } catch (error: unknown) {
-    console.error("❌ [删除工单] 失败:", error)
-    const errorMessage = error instanceof Error ? error.message : "删除工单失败"
+    console.error("[Batch Delete API] 删除失败:", error)
+    if (transaction) {
+      try {
+        await transaction.rollback()
+      } catch (rollbackError) {
+        console.error("[Batch Delete API] 事务回滚失败:", rollbackError)
+      } finally {
+        transaction = null
+      }
+    }
     return NextResponse.json(
-      { 
-        success: false, 
-        message: errorMessage
-      },
+      { success: false, message: "删除批次失败，请稍后重试" },
       { status: 500 }
     )
   }

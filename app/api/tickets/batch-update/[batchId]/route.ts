@@ -3,6 +3,41 @@ import { DB_FIELDS, UserRole, TicketActionType, TicketStatus, SPECIAL_VALUES, DE
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
+import { z } from "zod"
+
+const imageFieldSchema = z.union([
+  z.array(z.string().trim().min(1).max(2048)).max(20),
+  z.string().max(50000),
+  z.null(),
+])
+
+const batchDeviceSchema = z.object({
+  serialNumber: z.string().trim().max(100).optional(),
+  modelName: z.string().trim().max(200).optional(),
+  deviceName: z.string().trim().max(200).optional(),
+  faultDescription: z.string().trim().max(10000).optional(),
+  materialCode: z.string().trim().max(100).optional(),
+  repairCost: z.union([z.number().finite().nonnegative(), z.string().trim().max(50), z.null()]).optional(),
+  quantity: z.number().int().min(1).max(100000).optional(),
+  deviceImages: imageFieldSchema.optional(),
+  damageImages: imageFieldSchema.optional(),
+}).strict()
+
+const batchUpdateSchema = z.object({
+  senderAddress: z.string().trim().max(500).optional(),
+  projectName: z.string().trim().max(500).optional(),
+  contactInfo: z.string().trim().max(200).optional(),
+  projectLocation: z.string().trim().max(200).optional(),
+  trackingNumber: z.string().trim().max(200).optional(),
+  expressCompany: z.string().trim().max(100).optional(),
+  category: z.string().trim().max(200).optional(),
+  subCategory: z.string().trim().max(200).optional(),
+  warrantyStatusOverride: z.string().trim().max(50).nullable().optional(),
+  faultCategory: z.string().trim().max(50).nullable().optional(),
+  repairAction: z.string().trim().max(50).nullable().optional(),
+  repairNotes: z.string().trim().max(10000).nullable().optional(),
+  devices: z.array(batchDeviceSchema).min(1).max(500),
+}).strict()
 
 // ─── 状态机回退规则集合（模块级常量，避免在事务内重复构造）────────────────────────
 
@@ -262,40 +297,46 @@ function buildDeviceUpdateFields(
  */
 export async function PUT(
   request: Request,
-  context: { params: Promise<{ batchId: string }> | { batchId: string } }
+  context: { params: Promise<{ batchId: string }> }
 ) {
+  const authResult = await checkUserRole([
+    UserRole.REPORTER,
+    UserRole.WAREHOUSE,
+    UserRole.TECHNICIAN,
+    UserRole.BUSINESS,
+    UserRole.ADMIN,
+  ])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
-    const resolvedParams = await Promise.resolve(context.params)
+    const resolvedParams = await context.params
     const batchId = resolvedParams.batchId
 
     if (!batchId) {
       return NextResponse.json({ success: false, message: "批次ID不能为空" }, { status: 400 })
     }
 
-    const authResult = await checkUserRole([
-      UserRole.REPORTER,
-      UserRole.WAREHOUSE,
-      UserRole.TECHNICIAN,
-      UserRole.BUSINESS,
-      UserRole.ADMIN,
-    ])
-    if (isErrorResponse(authResult)) return authResult
-
     const { userId, normalizedRole } = authResult
 
-    const userInfo = await prisma.users.findUnique({
-      where: { userId: parseInt(userId, 10) },
-      select: { Username: true, realName: true }
-    })
+    const numericUserId = Number(userId)
+    if (!Number.isSafeInteger(numericUserId)) {
+      return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
+    }
 
     const user = {
-      id:       parseInt(userId, 10),
-      username: userInfo?.Username || userId,
-      realName: userInfo?.realName || userId,
+      id:       numericUserId,
+      username: authResult.username,
+      realName: authResult.realName || authResult.username,
       role:     normalizedRole,
     }
 
-    const body = await request.json() as Record<string, unknown>
+    const parsedBody = batchUpdateSchema.safeParse(
+      await request.json().catch(() => null)
+    )
+    if (!parsedBody.success) {
+      return NextResponse.json({ success: false, message: "请求参数无效" }, { status: 400 })
+    }
+    const body: Record<string, unknown> = parsedBody.data
     const {
       senderAddress,
       projectName,
@@ -318,10 +359,6 @@ export async function PUT(
       devices: Record<string, unknown>[]
     }
 
-    if (!devices || !Array.isArray(devices) || devices.length === 0) {
-      return NextResponse.json({ success: false, message: "设备列表不能为空" }, { status: 400 })
-    }
-
     // 事务前：检测可选列是否存在
     const optColCheck = await prisma.$queryRaw<{ COLUMN_NAME: string }[]>(
       Prisma.sql`SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -337,9 +374,10 @@ export async function PUT(
 
       // 1. 验证批次存在，同时查出批次级别旧值（供 Diff 对比）
       const batchCheckResult = await tx.$queryRaw(Prisma.sql`
-        SELECT TOP 1
+        SELECT
           ${Prisma.raw(DB_FIELDS.ID)},
           ${Prisma.raw(DB_FIELDS.STATUS)},
+          ${Prisma.raw(DB_FIELDS.REPORT_BY_USER_ID)},
           ${Prisma.raw(DB_FIELDS.SENDER_ADDRESS)},
           ${Prisma.raw(DB_FIELDS.PROJECT_NAME)},
           ${Prisma.raw(DB_FIELDS.CONTACT_INFO)},
@@ -348,7 +386,7 @@ export async function PUT(
           ${Prisma.raw(DB_FIELDS.COURIER_COMPANY)},
           ${Prisma.raw(DB_FIELDS.CATEGORY)},
           ${Prisma.raw(DB_FIELDS.SUB_CATEGORY)}
-        FROM Repair_Tickets
+        FROM Repair_Tickets WITH (UPDLOCK, HOLDLOCK)
         WHERE ${Prisma.raw(DB_FIELDS.BATCH_ID)} = ${batchId}
       `) as Record<string, unknown>[]
 
@@ -356,6 +394,60 @@ export async function PUT(
 
       const firstRecord   = batchCheckResult[0]
       const currentStatus = (firstRecord.Status as string) || (firstRecord[DB_FIELDS.STATUS] as string) || ""
+      const batchOwnerId = Number(firstRecord[DB_FIELDS.REPORT_BY_USER_ID])
+
+      if (
+        normalizedRole === UserRole.REPORTER &&
+        batchCheckResult.some((row) => Number(row[DB_FIELDS.REPORT_BY_USER_ID]) !== user.id)
+      ) {
+        throw new Error("BATCH_FORBIDDEN")
+      }
+
+      const allowedStatusesByRole: Record<UserRole, ReadonlySet<string>> = {
+        [UserRole.REPORTER]: new Set([
+          TicketStatus.CREATED,
+          TicketStatus.WAREHOUSE_CONFIRMING,
+          TicketStatus.WAREHOUSE_CONFIRMED,
+          TicketStatus.IN_REPAIR,
+          TicketStatus.PENDING_REPORTER_CONFIRM,
+          TicketStatus.TECHNICIAN_REPAIRING,
+          TicketStatus.BUSINESS_REVIEW,
+          TicketStatus.WAREHOUSE_SHIPPING,
+        ]),
+        [UserRole.WAREHOUSE]: new Set([
+          TicketStatus.CREATED,
+          TicketStatus.WAREHOUSE_CONFIRMING,
+          TicketStatus.WAREHOUSE_CONFIRMED,
+          TicketStatus.WAREHOUSE_SHIPPING,
+          TicketStatus.PENDING_SHIPMENT,
+        ]),
+        [UserRole.TECHNICIAN]: new Set([
+          TicketStatus.WAREHOUSE_CONFIRMED,
+          TicketStatus.IN_REPAIR,
+          TicketStatus.PROCESSING,
+          TicketStatus.PENDING_REPORTER_CONFIRM,
+          TicketStatus.TECHNICIAN_REPAIRING,
+          TicketStatus.BUSINESS_REVIEW,
+          TicketStatus.WAREHOUSE_SHIPPING,
+        ]),
+        [UserRole.BUSINESS]: new Set([
+          TicketStatus.BUSINESS_REVIEW,
+          TicketStatus.ADMIN_REVIEW,
+          TicketStatus.WAREHOUSE_SHIPPING,
+          TicketStatus.PENDING_SHIPMENT,
+        ]),
+        [UserRole.ADMIN]: new Set(Object.values(TicketStatus).filter(
+          (status) => ![TicketStatus.COMPLETED, TicketStatus.CANCELLED, TicketStatus.DELETED].includes(status)
+        )),
+      }
+      const allowedStatuses = allowedStatusesByRole[normalizedRole]
+      const forbiddenState = batchCheckResult.some((row) => {
+        const rawStatus = String(row[DB_FIELDS.STATUS] ?? "")
+        return !allowedStatuses.has(normalizeTicketStatus(rawStatus) ?? rawStatus)
+      })
+      if (forbiddenState) {
+        throw new Error("BATCH_STATE_FORBIDDEN")
+      }
 
       console.log(`🔍 [批次更新] batchId=${batchId} 状态=${currentStatus} 操作人=${user.username} 角色=${user.role}`)
 
@@ -543,7 +635,7 @@ export async function PUT(
               ${senderAddress   || null},
               ${trackingNumber  || null},
               ${expressCompany  || null},
-              ${user.id}${Prisma.raw(hasReportTime ? ", GETUTCDATE()" : "")}
+              ${Number.isSafeInteger(batchOwnerId) ? batchOwnerId : null}${Prisma.raw(hasReportTime ? ", GETUTCDATE()" : "")}
             )
           `)
           allDeviceChangeSummaries.push(`新增设备：${(device.serialNumber as string) || "待核"}`)
@@ -620,9 +712,15 @@ export async function PUT(
     if (errorMessage === "批次不存在") {
       return NextResponse.json({ success: false, message: errorMessage }, { status: 404 })
     }
+    if (errorMessage === "BATCH_FORBIDDEN") {
+      return NextResponse.json({ success: false, message: "您无权修改该批次" }, { status: 403 })
+    }
+    if (errorMessage === "BATCH_STATE_FORBIDDEN") {
+      return NextResponse.json({ success: false, message: "当前批次状态不允许该角色修改" }, { status: 409 })
+    }
     if (errorMessage === "已完成或已取消状态的工单不允许修改") {
       return NextResponse.json({ success: false, message: errorMessage }, { status: 403 })
     }
-    return NextResponse.json({ success: false, message: errorMessage }, { status: 500 })
+    return NextResponse.json({ success: false, message: "更新工单失败，请稍后重试" }, { status: 500 })
   }
 }

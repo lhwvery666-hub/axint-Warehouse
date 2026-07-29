@@ -1,815 +1,514 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { UserRole, normalizeUserRole, TicketStatus, VALID_TICKET_STATUSES, normalizeTicketStatus, TicketActionType } from "@/lib/enums"
+import {
+  ALL_USER_ROLES,
+  checkUserRole,
+  isErrorResponse,
+  type AuthenticatedUser,
+} from "@/lib/auth-utils"
+import { TicketActionType, TicketStatus, UserRole } from "@/lib/enums"
+
+const updateTicketSchema = z.object({
+  id: z.union([z.string(), z.number()]).optional(),
+  action: z.enum([
+    "delay",
+    "supplementSN",
+    "request_cancel",
+    "approve_cancel",
+    "reject_cancel",
+  ]).optional(),
+  status: z.string().trim().max(50).optional(),
+  deleteToRecycleBin: z.boolean().optional(),
+  supplementSN: z.boolean().optional(),
+  newSerialNumber: z.string().trim().min(1).max(100).optional(),
+  delayTo: z.string().datetime().optional(),
+  delayReason: z.string().trim().min(1).max(500).optional(),
+  cancelRequestReason: z.string().trim().min(1).max(2000).optional(),
+  scrappedReason: z.string().trim().max(2000).optional(),
+  cancelReason: z.string().trim().max(2000).optional(),
+  receivedDate: z.string().datetime().optional(),
+  factoryShipDate: z.string().datetime().optional(),
+  returnDate: z.string().datetime().optional(),
+  returnQuantity: z.number().int().min(0).max(100000).optional(),
+  returnTrackingNum: z.string().trim().max(200).optional(),
+}).strict()
+
+interface UpdatedTicketRow {
+  Id: number
+  TicketId: string | null
+  BatchId: string | null
+  DeviceSN: string
+  OldStatus: string
+  NewStatus: string
+}
+
+interface InventoryRow {
+  SerialNumber: string
+  DeviceName: string | null
+  MaterialCode: string | null
+  Status: string | null
+}
+
+async function rollback(transaction: sql.Transaction | null): Promise<null> {
+  if (!transaction) return null
+  try {
+    await transaction.rollback()
+  } catch (rollbackError) {
+    console.error("[Ticket Update API] 事务回滚失败:", rollbackError)
+  }
+  return null
+}
+
+async function writeHistory(
+  transaction: sql.Transaction,
+  user: AuthenticatedUser,
+  row: UpdatedTicketRow,
+  actionType: TicketActionType,
+  description: string,
+  delayTo: Date | null = null,
+  delayReason: string | null = null
+): Promise<void> {
+  const operatorId = Number(user.userId)
+  await new sql.Request(transaction)
+    .input("ticketId", sql.NVarChar(50), row.TicketId ?? String(row.Id))
+    .input("batchId", sql.NVarChar(50), row.BatchId)
+    .input("actionType", sql.NVarChar(50), actionType)
+    .input("oldStatus", sql.NVarChar(50), row.OldStatus)
+    .input("newStatus", sql.NVarChar(50), row.NewStatus)
+    .input("operatorId", sql.Int, operatorId)
+    .input("operatorName", sql.NVarChar(100), user.realName || user.username)
+    .input("description", sql.NVarChar(sql.MAX), description)
+    .input("delayTo", sql.DateTime2, delayTo)
+    .input("delayReason", sql.NVarChar(500), delayReason)
+    .query(`
+      INSERT INTO [dbo].[Repair_Ticket_History] (
+        [TicketID], [BatchId], [ActionType], [OldStatus], [NewStatus],
+        [OperatorId], [OperatorName], [Description], [DelayTo], [DelayReason], [CreatedAt]
+      )
+      VALUES (
+        @ticketId, @batchId, @actionType, @oldStatus, @newStatus,
+        @operatorId, @operatorName, @description, @delayTo, @delayReason, GETUTCDATE()
+      );
+    `)
+}
+
+function conflict(message = "工单状态已变化、请求重复或操作条件不满足") {
+  return NextResponse.json({ success: false, message }, { status: 409 })
+}
 
 // PUT /api/tickets/[id]/update
-// 更新维修工单状态
+// 仅保留有明确权限和状态断言的遗留单工单操作；标准批次流转使用专用 API。
 export async function PUT(
   request: Request,
-  context: { params: Promise<{ id: string }> } | { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
+  const authResult = await checkUserRole(ALL_USER_ROLES)
+  if (isErrorResponse(authResult)) return authResult
+
+  let transaction: sql.Transaction | null = null
+
   try {
-    const body = await request.json().catch(() => ({}))
-    const {
-      status,
-      deleteToRecycleBin,
-      id: bodyId,
-      // 新增：延期相关字段
-      action,
-      delayTo,
-      delayReason,
-      // 新增：补录 SN 相关字段
-      supplementSN,
-      newSerialNumber,
-      // 新增：取消申请相关字段
-      cancelRequestReason,
-      scrappedReason,
-      cancelReason,
-    } = body ?? {}
-
-    // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ id: string }> }).params
-        : (context as { params: { id: string } }).params
-
-    const ticketId = resolvedParams?.id || bodyId
-
-    if (!ticketId) {
+    const parsedBody = updateTicketSchema.safeParse(
+      await request.json().catch(() => null)
+    )
+    if (!parsedBody.success) {
       return NextResponse.json(
-        { success: false, message: "工单ID不能为空" },
+        { success: false, message: "请求参数无效" },
         { status: 400 }
       )
     }
 
-    // 判断 ticketId 是数字还是字符串
-    const isNumericId = /^\d+$/.test(ticketId)
-    console.log(`[更新工单] ${isNumericId ? '使用数字ID' : '使用设备序列号'}查询: ${ticketId}`)
-
-    const isDelayAction = action === "delay"
-    const isSupplementSNAction = action === "supplementSN" || supplementSN === true
-    const isCancelRequestAction = action === "request_cancel"
-    const isApproveCancelAction = action === "approve_cancel"
-    const isRejectCancelAction = action === "reject_cancel"
-
-    // 基于登录用户进行权限校验：只有维修工程师(Technician)、管理员(Admin)、商务人员(Business)或仓库管理员(Warehouse)才能更新工单
-    let isWarehouseOnlyUpdate = false
-    let isTechnician = false
-    let isAdmin = false
-    let isBusiness = false
-    let isWarehouse = false
-    let userRole = "" // 用户角色（原始值）
-    let userRealName = "" // 用户真实姓名
-    let userUsername = "" // 用户名
-
-    try {
-      const cookieStore = await cookies()
-      const userIdCookie = cookieStore.get("userId")?.value || null
-      if (!userIdCookie) {
-        return NextResponse.json(
-          { success: false, message: "未登录，无法更新工单" },
-          { status: 401 }
-        )
-      }
-
-      const poolForUser = await getDbConnection()
-      const userResult = await poolForUser
-        .request()
-        .input("userId", userIdCookie)
-        .query(`
-          SELECT TOP 1 Role, RealName, Username
-          FROM Users
-          WHERE UserID = @userId
-        `)
-
-      if (userResult.recordset.length === 0) {
-        return NextResponse.json(
-          { success: false, message: "用户不存在，无法更新工单" },
-          { status: 403 }
-        )
-      }
-
-      const userData = userResult.recordset[0]
-      userRole = userData.Role || "" // 保存原始角色值用于后续检查（可能是中英文混合）
-      userRealName = userData.RealName || "" // 用户真实姓名
-      userUsername = userData.Username || "" // 用户名
-
-      // 使用统一的角色归一化工具，避免在这里写一堆字符串判断
-      const normalizedRole = normalizeUserRole(userRole)
-      isTechnician = normalizedRole === UserRole.TECHNICIAN
-      isAdmin = normalizedRole === UserRole.ADMIN
-      isBusiness = normalizedRole === UserRole.BUSINESS
-      isWarehouse = normalizedRole === UserRole.WAREHOUSE
-
-      // 检查是否是仓库管理员只更新仓库相关字段的情况
-      const warehouseFields = ["receiveddate", "factoryshipdate", "returndate", "returnquantity", "returntrackingnum"]
-      const bodyKeys = Object.keys(body).map(k => k.toLowerCase())
-      const hasWarehouseFields = bodyKeys.some(key => warehouseFields.includes(key))
-      const hasOtherFields = bodyKeys.some(key => 
-        !warehouseFields.includes(key) && 
-        key !== "status" && 
-        key !== "deletetorecyclebin" && 
-        key !== "action" && 
-        key !== "delayto" && 
-        key !== "delayreason" && 
-        key !== "supplementsn" && 
-        key !== "newserialnumber"
-      )
-      
-      isWarehouseOnlyUpdate = hasWarehouseFields && !hasOtherFields && 
-                                     !status && !deleteToRecycleBin && !isDelayAction && !isSupplementSNAction
-
-      // 权限检查：仓库管理员可以更新仓库字段，维修工程师和管理员可以更新其他字段
-      if (isWarehouse) {
-        // 仓库管理员
-        if (isWarehouseOnlyUpdate) {
-          // 仓库管理员只更新仓库字段，允许
-        } else if (hasOtherFields) {
-          // 仓库管理员尝试更新非仓库字段，拒绝
-          return NextResponse.json(
-            { success: false, message: "仓库管理员只能更新仓库相关字段（收到日期、出厂日期、返还日期、返还数量、快递单号）" },
-            { status: 403 }
-          )
-        } else {
-          // 仓库管理员但没有更新仓库字段，可能是空请求或其他情况
-          return NextResponse.json(
-            { success: false, message: "请至少更新一个仓库相关字段" },
-            { status: 400 }
-          )
-        }
-      } else if (!isTechnician && !isAdmin && !isBusiness) {
-        // 既不是仓库管理员，也不是维修工程师、管理员或商务人员
-        // 但是如果是取消申请操作，现场人员也可以执行
-        if (!isCancelRequestAction) {
-          return NextResponse.json(
-            { success: false, message: "只有维修工程师、管理员、商务人员或仓库管理员可以更新工单" },
-            { status: 403 }
-          )
-        }
-      }
-
-      // 如果是取消申请操作，要求必须是现场人员（Reporter）
-      if (isCancelRequestAction) {
-        const normalizedRoleForCancel = normalizeUserRole(userRole)
-        if (normalizedRoleForCancel !== UserRole.REPORTER) {
-          return NextResponse.json(
-            { success: false, message: "只有现场人员可以申请取消工单" },
-            { status: 403 }
-          )
-        }
-      }
-
-      // 如果是延期操作，进一步要求必须是维修工程师（可根据需要保留管理员权限）
-      if (isDelayAction && !isTechnician) {
-        return NextResponse.json(
-          { success: false, message: "只有维修工程师可以申请延期" },
-          { status: 403 }
-        )
-      }
-      
-      // 如果是审批取消申请操作，要求必须是管理员或商务人员
-      if ((isApproveCancelAction || isRejectCancelAction) && !isAdmin && !isBusiness) {
-        return NextResponse.json(
-          { success: false, message: "只有管理员或商务人员可以审批取消申请" },
-          { status: 403 }
-        )
-      }
-    } catch (authError: any) {
-      console.error("工单更新权限校验失败:", authError?.message)
+    const { id } = await context.params
+    if (!/^\d+$/.test(id)) {
       return NextResponse.json(
-        { success: false, message: "工单更新权限校验失败", error: authError?.message || "未知错误" },
-        { status: 500 }
-      )
-    }
-
-    // 如果是"回收站删除"或"补录 SN"操作，可以不传业务状态
-    // 如果是仓库管理员只更新仓库字段，也可以不传状态
-    if (!status && !deleteToRecycleBin && !isDelayAction && !isSupplementSNAction && !isWarehouseOnlyUpdate && !isCancelRequestAction && !isApproveCancelAction && !isRejectCancelAction) {
-      return NextResponse.json(
-        { success: false, message: "状态不能为空" },
+        { success: false, message: "工单ID无效" },
         { status: 400 }
       )
     }
 
-    // 支持的业务状态 + 回收站状态 + 延期状态 + 返厂状态 + 终止状态
-    // 统一使用 TicketStatus 枚举，避免散落的字符串
-    const validStatuses: TicketStatus[] = VALID_TICKET_STATUSES
-    const statusMap: Record<string, string> = {
-      // 新状态
-      "created": "Created",
-      "in_repair": "In_Repair",
-      "pending_factory": "Pending_Factory",
-      "factory_finished": "Factory_Finished",
-      "admin_review": "Admin_Review",
-      "pending_shipment": "Pending_Shipment",
-      // 旧状态（向后兼容）
-      "pending": "Created", // 映射到新状态
-      "processing": "In_Repair", // 映射到新状态
-      "completed": "Completed",
-      "unrepairable": "Unrepairable",
-      "deleted": "Deleted",
-      "delayed": "Delayed",
-      // 终止状态
-      "scrapped": "Scrapped",
-      "return_unrepaired": "Return_Unrepaired",
-      "cancelled": "Cancelled",
+    const ticketId = Number(id)
+    const operatorId = Number(authResult.userId)
+    if (!Number.isSafeInteger(ticketId) || !Number.isSafeInteger(operatorId)) {
+      return NextResponse.json(
+        { success: false, message: "身份或工单参数无效" },
+        { status: 400 }
+      )
     }
 
-    // 如果是回收站删除操作，则强制使用 Deleted 状态；延期则使用 delayed；其余使用传入的 status
-    const targetStatus = deleteToRecycleBin ? "deleted" : isDelayAction ? "delayed" : status
-
-    // 归一化后的数据库状态字符串（如 Created / In_Repair / ...），仅在需要更新状态时使用
-    let dbStatus: string | null = null
-    if (targetStatus) {
-      const lower = targetStatus.toString().trim().toLowerCase()
-      const mapped = statusMap[lower]
-
-      // 未知状态直接报错
-      if (!mapped) {
-        return NextResponse.json(
-          { success: false, message: `不支持的工单状态：${targetStatus}` },
-          { status: 400 }
-        )
-      }
-
-      // 使用枚举验证状态是否合法
-      const enumStatus = normalizeTicketStatus(mapped)
-      if (!enumStatus || !validStatuses.includes(enumStatus)) {
-        return NextResponse.json(
-          { success: false, message: `无效的工单状态：${targetStatus}` },
-          { status: 400 }
-        )
-      }
-
-      dbStatus = mapped
+    const body = parsedBody.data
+    if (body.id !== undefined && String(body.id) !== id) {
+      return NextResponse.json(
+        { success: false, message: "路径工单ID与请求内容不一致" },
+        { status: 400 }
+      )
     }
 
-    // 如果是取消申请操作或审批取消申请操作，先处理这些操作（不需要状态验证）
-    // 这些操作会在处理完成后直接返回，不会执行到后面的状态验证逻辑
-    
     const pool = await getDbConnection()
+    transaction = new sql.Transaction(pool)
+    await transaction.begin()
 
-    // 动态获取 Repair_Tickets 表的列名，避免大小写或命名不一致导致错误
-    const columnsResult = await pool.request().query(`
-      SELECT COLUMN_NAME
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_NAME = 'Repair_Tickets'
-    `)
-    const columnNames = columnsResult.recordset.map((row: any) => row.COLUMN_NAME as string)
+    const role = authResult.normalizedRole
+    let updated: UpdatedTicketRow | undefined
+    let actionType = TicketActionType.STATUS_CHANGE
+    let description = "更新工单状态"
+    let historyDelayTo: Date | null = null
+    let historyDelayReason: string | null = null
 
-    // 优先使用主键列，其次使用名字中包含 "id" 的列，最后退回第一列
-    const pkResult = await pool.request().query(`
-      SELECT kcu.COLUMN_NAME
-      FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-        ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-      WHERE tc.TABLE_NAME = 'Repair_Tickets' AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-    `)
-
-    let idColumn: string
-    if (pkResult.recordset.length > 0) {
-      idColumn = pkResult.recordset[0].COLUMN_NAME as string
-    } else {
-      idColumn =
-        columnNames.find((c) => c.toLowerCase().endsWith("id")) ||
-        columnNames.find((c) => c.toLowerCase().includes("id")) ||
-        columnNames[0]
-    }
-
-    const deviceSnColumn =
-      columnNames.find((c) => c.toLowerCase() === "devicesn") ||
-      columnNames.find((c) => c.toLowerCase().includes("serial")) ||
-      "DeviceSN"
-    const productSnColumn = deviceSnColumn  // ProductSN 和 DeviceSN 是同一个列
-    const hasProductSn = false  // 数据库没有独立的 ProductSN 列
-
-    // 检查工单是否存在，并获取设备序列号和取消申请状态
-    const cancelRequestStatusCol = columnNames.find((c) => c.toLowerCase() === "cancelrequeststatus")
-    const cancelRequestStatusSelect = cancelRequestStatusCol ? `, ${cancelRequestStatusCol} as CancelRequestStatus` : ""
-    
-    // 根据参数类型选择不同的WHERE子句
-    const whereClause = isNumericId 
-      ? `${idColumn} = @ticketId`           // 数字ID: WHERE Id = 16
-      : `${deviceSnColumn} = @ticketId`      // 字符串: WHERE DeviceSN = 'PENDING_VERIFY'
-    
-    const checkResult = await pool
-      .request()
-      .input("ticketId", ticketId)
-      .query(`
-        SELECT ${idColumn} as Id, ${deviceSnColumn} as DeviceSN, ${hasProductSn ? `${productSnColumn} as ProductSN,` : ""} Status${cancelRequestStatusSelect}
-        FROM Repair_Tickets
-        WHERE ${whereClause}
-      `)
-
-    if (checkResult.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "工单不存在" },
-        { status: 404 }
-      )
-    }
-
-    const ticket = checkResult.recordset[0] as { Id: number; DeviceSN: string; ProductSN?: string; Status?: string; CancelRequestStatus?: string }
-    
-    // 获取实际的数字ID，用于后续所有更新操作
-    const actualTicketId = ticket.Id
-    console.log(`[更新工单] 找到工单，数字ID: ${actualTicketId}, 序列号: ${ticket.DeviceSN}`)
-
-    // 如果是补录 SN 操作，验证新序列号
-    if (isSupplementSNAction) {
-      if (!newSerialNumber || !newSerialNumber.trim()) {
+    const supplementSN = body.action === "supplementSN" || body.supplementSN === true
+    if (supplementSN) {
+      if (![UserRole.TECHNICIAN, UserRole.ADMIN].includes(role)) {
+        transaction = await rollback(transaction)
+        return NextResponse.json(
+          { success: false, message: "您没有权限补录设备序列号" },
+          { status: 403 }
+        )
+      }
+      if (!body.newSerialNumber) {
+        transaction = await rollback(transaction)
         return NextResponse.json(
           { success: false, message: "新序列号不能为空" },
           { status: 400 }
         )
       }
 
-      const sn = newSerialNumber.trim()
-
-      // 验证序列号是否存在于 Device_Inventory
-      try {
-        const deviceCheckResult = await pool
-          .request()
-          .input("serialNumber", sn)
-          .query(`
-            SELECT TOP 1 *
-            FROM Device_Inventory
-            WHERE SerialNumber = @serialNumber
-          `)
-
-        if (deviceCheckResult.recordset.length === 0) {
-          return NextResponse.json(
-            { success: false, message: "设备序列号不存在于设备档案中，请先录入设备信息" },
-            { status: 400 }
-          )
-        }
-
-        const device = deviceCheckResult.recordset[0] as any
-
-        // 更新工单的 DeviceSN 和 ProductSN
-        const updateColumns: string[] = []
-        const updateValues: string[] = []
-
-        updateColumns.push(`${deviceSnColumn} = @newDeviceSN`)
-        updateValues.push("@newDeviceSN")
-        if (hasProductSn) {
-          updateColumns.push(`${productSnColumn} = @newProductSN`)
-          updateValues.push("@newProductSN")
-        }
-
-        // 如果存在 MaterialCode 和 DeviceName 字段，也更新它们
-        const materialCodeColumn = columnNames.find((c) => c.toLowerCase() === "materialcode")
-        const deviceNameColumn = columnNames.find((c) => c.toLowerCase() === "devicename")
-        const warehouseColumn = columnNames.find((c) => c.toLowerCase() === "warehouse")
-
-        if (materialCodeColumn && device.MaterialCode) {
-          updateColumns.push(`${materialCodeColumn} = @materialCode`)
-          updateValues.push("@materialCode")
-        }
-        if (deviceNameColumn && device.DeviceName) {
-          updateColumns.push(`${deviceNameColumn} = @deviceName`)
-          updateValues.push("@deviceName")
-        }
-        // Warehouse字段可能不存在，需要检查
-        if (warehouseColumn && device.Warehouse) {
-          updateColumns.push(`${warehouseColumn} = @warehouse`)
-          updateValues.push("@warehouse")
-        }
-
-        const updateRequest = pool.request()
-          .input("ticketId", actualTicketId)
-          .input("newDeviceSN", sn)
-          .input("newProductSN", sn)
-
-        if (materialCodeColumn && device.MaterialCode) {
-          updateRequest.input("materialCode", device.MaterialCode)
-        }
-        if (deviceNameColumn && device.DeviceName) {
-          updateRequest.input("deviceName", device.DeviceName)
-        }
-        if (warehouseColumn && device.Warehouse) {
-          updateRequest.input("warehouse", device.Warehouse)
-        }
-
-        await updateRequest.query(`
-          UPDATE Repair_Tickets
-          SET ${updateColumns.join(", ")}
-          WHERE ${idColumn} = @ticketId
+      const inventoryResult = await new sql.Request(transaction)
+        .input("serialNumber", sql.NVarChar(100), body.newSerialNumber)
+        .query<InventoryRow>(`
+          SELECT TOP (1) [SerialNumber], [DeviceName], [MaterialCode], [Status]
+          FROM [dbo].[Device_Inventory]
+          WHERE [SerialNumber] = @serialNumber;
         `)
-
-        // 更新设备状态为"维修中"（如果设备在库或出库）
-        const currentDeviceStatus = device.Status || ""
-        const isInStock =
-          currentDeviceStatus === "在库" ||
-          currentDeviceStatus === "In Stock" ||
-          currentDeviceStatus.toLowerCase() === "instock"
-        const isOutStock =
-          currentDeviceStatus === "出库" ||
-          currentDeviceStatus === "Out Stock" ||
-          currentDeviceStatus.toLowerCase() === "outstock"
-
-        if (isInStock || isOutStock) {
-          await pool
-            .request()
-            .input("serialNumber", sn)
-            .input("newStatus", "维修中")
-            .query(`
-              UPDATE Device_Inventory
-              SET Status = @newStatus
-              WHERE SerialNumber = @serialNumber
-            `)
-        }
-
-        // 记录补录 SN 的历史记录
-        try {
-          const historyRequest = pool
-            .request()
-            .input("ticketId", ticketId.toString())
-            .input("actionType", "SupplementSN")
-            .input("oldStatus", ticket.Status || null)
-            .input("newStatus", ticket.Status || null)
-            .input("delayTo", null)
-            .input("delayReason", `补录序列号: ${sn}`)
-
-          await historyRequest.query(`
-            IF OBJECT_ID('dbo.Repair_Ticket_History', 'U') IS NOT NULL
-            BEGIN
-              INSERT INTO [dbo].[Repair_Ticket_History] (
-                TicketID, ActionType, OldStatus, NewStatus, DelayTo, DelayReason
-              )
-              VALUES (
-                @ticketId, @actionType, @oldStatus, @newStatus, @delayTo, @delayReason
-              )
-            END
-          `)
-        } catch (historyError: any) {
-          console.error("记录补录 SN 历史失败:", historyError?.message)
-        }
-
-        return NextResponse.json({
-          success: true,
-          message: "序列号补录成功",
-        })
-      } catch (deviceError: any) {
-        console.error("补录 SN 验证失败:", deviceError?.message)
+      const inventory = inventoryResult.recordset[0]
+      if (!inventory) {
+        transaction = await rollback(transaction)
         return NextResponse.json(
-          {
-            success: false,
-            message: "验证设备序列号失败",
-            error: deviceError?.message || "未知错误",
-          },
-          { status: 500 }
-        )
-      }
-    }
-
-    // 如果是延期操作，仅允许在维修中状态下申请
-    if (isDelayAction) {
-      const currentStatus = (ticket.Status || "").toString()
-      if (currentStatus !== "In_Repair" && currentStatus !== "Processing") {
-        return NextResponse.json(
-          { success: false, message: "只有\"维修检查中\"的工单才能申请延期" },
+          { success: false, message: "设备序列号不存在于设备档案中" },
           { status: 400 }
         )
       }
-    }
-    
-    // 如果是取消申请操作
-    if (isCancelRequestAction) {
-      const currentStatus = (ticket.Status || "").toString()
-      // 已取消或已完成的工单不能申请取消
-      if (currentStatus === "Cancelled" || currentStatus === "Completed") {
+
+      const updateResult = await new sql.Request(transaction)
+        .input("ticketId", sql.Int, ticketId)
+        .input("newDeviceSN", sql.NVarChar(100), inventory.SerialNumber)
+        .input("deviceName", sql.NVarChar(200), inventory.DeviceName)
+        .input("materialCode", sql.NVarChar(100), inventory.MaterialCode)
+        .query<UpdatedTicketRow>(`
+          UPDATE [dbo].[Repair_Tickets]
+          SET [DeviceSN] = @newDeviceSN,
+              [DeviceName] = COALESCE(@deviceName, [DeviceName]),
+              [MaterialCode] = COALESCE(@materialCode, [MaterialCode]),
+              [UpdatedAt] = GETUTCDATE()
+          OUTPUT inserted.[Id], inserted.[TicketId], inserted.[BatchId],
+                 inserted.[DeviceSN], deleted.[Status] AS [OldStatus],
+                 inserted.[Status] AS [NewStatus]
+          WHERE [Id] = @ticketId
+            AND [Status] NOT IN ('Completed', 'Cancelled', 'Scrapped', 'Deleted');
+        `)
+      updated = updateResult.recordset[0]
+      if (updateResult.rowsAffected[0] !== 1 || !updated) {
+        transaction = await rollback(transaction)
+        return conflict()
+      }
+
+      if (["在库", "In Stock", "instock", "出库", "Out Stock", "outstock"]
+        .includes(inventory.Status ?? "")) {
+        await new sql.Request(transaction)
+          .input("serialNumber", sql.NVarChar(100), inventory.SerialNumber)
+          .input("newStatus", sql.NVarChar(50), "维修中")
+          .query(`
+            UPDATE [dbo].[Device_Inventory]
+            SET [Status] = @newStatus, [UpdatedAt] = GETUTCDATE()
+            WHERE [SerialNumber] = @serialNumber;
+          `)
+      }
+      actionType = TicketActionType.SUPPLEMENT_SN
+      description = `补录设备序列号：${inventory.SerialNumber}`
+    } else if (body.action === "request_cancel") {
+      if (role !== UserRole.REPORTER) {
+        transaction = await rollback(transaction)
         return NextResponse.json(
-          { success: false, message: "已取消或已完成的工单不能申请取消" },
+          { success: false, message: "只有工单创建人可以申请取消" },
+          { status: 403 }
+        )
+      }
+      if (!body.cancelRequestReason) {
+        transaction = await rollback(transaction)
+        return NextResponse.json(
+          { success: false, message: "取消原因不能为空" },
           { status: 400 }
         )
       }
-      
-      // 检查是否已有待审批的取消申请
-      const cancelRequestStatusColumn = columnNames.find((c) => c.toLowerCase() === "cancelrequeststatus")
-      if (cancelRequestStatusColumn) {
-        const currentCancelRequestStatus = (ticket as any)[cancelRequestStatusColumn]
-        if (currentCancelRequestStatus === "Pending") {
-          return NextResponse.json(
-            { success: false, message: "已有待审批的取消申请，请等待审批结果" },
-            { status: 400 }
-          )
-        }
-      }
-      
-      // 更新取消申请相关字段
-      const cancelRequestStatusCol = columnNames.find((c) => c.toLowerCase() === "cancelrequeststatus")
-      const cancelRequestReasonCol = columnNames.find((c) => c.toLowerCase() === "cancelrequestreason")
-      const cancelRequestDateCol = columnNames.find((c) => c.toLowerCase() === "cancelrequestdate")
-      
-      const cancelUpdateFields: string[] = []
-      const cancelUpdateRequest = pool.request().input("ticketId", actualTicketId)
-      
-      if (cancelRequestStatusCol) {
-        cancelUpdateFields.push(`${cancelRequestStatusCol} = 'Pending'`)
-      }
-      if (cancelRequestReasonCol && cancelRequestReason) {
-        cancelUpdateFields.push(`${cancelRequestReasonCol} = @cancelRequestReason`)
-        cancelUpdateRequest.input("cancelRequestReason", cancelRequestReason)
-      }
-      if (cancelRequestDateCol) {
-        cancelUpdateFields.push(`${cancelRequestDateCol} = GETUTCDATE()`)
-      }
-      
-      if (cancelUpdateFields.length > 0) {
-        await cancelUpdateRequest.query(`
-          UPDATE Repair_Tickets
-          SET ${cancelUpdateFields.join(", ")}
-          WHERE ${idColumn} = @ticketId
+
+      const updateResult = await new sql.Request(transaction)
+        .input("ticketId", sql.Int, ticketId)
+        .input("operatorId", sql.Int, operatorId)
+        .input("reason", sql.NVarChar(sql.MAX), body.cancelRequestReason)
+        .query<UpdatedTicketRow>(`
+          UPDATE [dbo].[Repair_Tickets]
+          SET [CancelRequestStatus] = 'Pending',
+              [CancelRequestReason] = @reason,
+              [CancelRequestDate] = GETUTCDATE(),
+              [UpdatedAt] = GETUTCDATE()
+          OUTPUT inserted.[Id], inserted.[TicketId], inserted.[BatchId],
+                 inserted.[DeviceSN], deleted.[Status] AS [OldStatus],
+                 inserted.[Status] AS [NewStatus]
+          WHERE [Id] = @ticketId
+            AND [ReportByUserID] = @operatorId
+            AND [Status] NOT IN ('Completed', 'Cancelled', 'Scrapped', 'Deleted')
+            AND ISNULL([CancelRequestStatus], '') <> 'Pending';
         `)
+      updated = updateResult.recordset[0]
+      if (updateResult.rowsAffected[0] !== 1 || !updated) {
+        transaction = await rollback(transaction)
+        return conflict("工单不可取消、已有待审批申请，或您不是该工单创建人")
       }
-      
-      // 记录历史
-      try {
-        await pool.request()
-          .input("ticketId", ticketId.toString())
-          .input("actionType", "CancelRequest")
-          .input("oldStatus", ticket.Status || null)
-          .input("newStatus", ticket.Status || null)
-          .query(`
-            INSERT INTO Repair_Ticket_History (TicketID, ActionType, OldStatus, NewStatus, CreatedAt)
-            VALUES (@ticketId, @actionType, @oldStatus, @newStatus, GETUTCDATE())
-          `)
-      } catch (historyError: any) {
-        console.error("记录取消申请历史失败:", historyError?.message)
-      }
-      
-      return NextResponse.json({
-        success: true,
-        message: "取消申请已提交，等待商务人员审批",
-      })
-    }
-    
-    // 如果是审批取消申请操作
-    if (isApproveCancelAction || isRejectCancelAction) {
-      const cancelRequestStatusCol = columnNames.find((c) => c.toLowerCase() === "cancelrequeststatus")
-      const cancelApprovedByCol = columnNames.find((c) => c.toLowerCase() === "cancelapprovedby")
-      const cancelApprovedDateCol = columnNames.find((c) => c.toLowerCase() === "cancelapproveddate")
-      
-      // 检查是否有待审批的取消申请
-      if (cancelRequestStatusCol) {
-        // 优先使用从查询中获取的 CancelRequestStatus 字段
-        const currentCancelRequestStatus = ticket.CancelRequestStatus || (ticket as any)[cancelRequestStatusCol] || null
-        const statusStr = (currentCancelRequestStatus || "").toString().trim()
-        // 支持大小写不敏感的匹配
-        if (statusStr.toLowerCase() !== "pending") {
-          return NextResponse.json(
-            { success: false, message: `没有待审批的取消申请（当前状态: ${statusStr || "无"}）` },
-            { status: 400 }
-          )
-        }
-      } else {
-        // 如果字段不存在，也返回错误
+      actionType = TicketActionType.CANCEL_REQUEST
+      description = `现场人员申请取消工单：${body.cancelRequestReason}`
+    } else if (body.action === "approve_cancel" || body.action === "reject_cancel") {
+      if (![UserRole.ADMIN, UserRole.BUSINESS].includes(role)) {
+        transaction = await rollback(transaction)
         return NextResponse.json(
-          { success: false, message: "系统未配置取消申请功能" },
+          { success: false, message: "您没有权限审批取消申请" },
+          { status: 403 }
+        )
+      }
+
+      const approved = body.action === "approve_cancel"
+      const updateResult = await new sql.Request(transaction)
+        .input("ticketId", sql.Int, ticketId)
+        .input("decision", sql.NVarChar(50), approved ? "Approved" : "Rejected")
+        .input("operatorName", sql.NVarChar(100), authResult.realName || authResult.username)
+        .query<UpdatedTicketRow>(`
+          UPDATE [dbo].[Repair_Tickets]
+          SET [CancelRequestStatus] = @decision,
+              [CancelApprovedBy] = @operatorName,
+              [CancelApprovedDate] = GETUTCDATE(),
+              [Status] = CASE WHEN @decision = 'Approved' THEN 'Cancelled' ELSE [Status] END,
+              [UpdatedAt] = GETUTCDATE()
+          OUTPUT inserted.[Id], inserted.[TicketId], inserted.[BatchId],
+                 inserted.[DeviceSN], deleted.[Status] AS [OldStatus],
+                 inserted.[Status] AS [NewStatus]
+          WHERE [Id] = @ticketId
+            AND [CancelRequestStatus] = 'Pending'
+            AND [Status] NOT IN ('Completed', 'Cancelled', 'Scrapped', 'Deleted');
+        `)
+      updated = updateResult.recordset[0]
+      if (updateResult.rowsAffected[0] !== 1 || !updated) {
+        transaction = await rollback(transaction)
+        return conflict("取消申请已被处理或工单状态已变化")
+      }
+      actionType = approved
+        ? TicketActionType.CANCEL_APPROVED
+        : TicketActionType.CANCEL_REJECTED
+      description = approved ? "取消申请已批准" : "取消申请已拒绝"
+    } else if (body.action === "delay") {
+      if (role !== UserRole.TECHNICIAN) {
+        transaction = await rollback(transaction)
+        return NextResponse.json(
+          { success: false, message: "只有维修工程师可以申请延期" },
+          { status: 403 }
+        )
+      }
+      if (!body.delayTo || !body.delayReason) {
+        transaction = await rollback(transaction)
+        return NextResponse.json(
+          { success: false, message: "延期日期和原因不能为空" },
           { status: 400 }
         )
       }
-      
-      const approveUpdateFields: string[] = []
-      const approveUpdateRequest = pool.request().input("ticketId", actualTicketId)
-      
-      if (cancelRequestStatusCol) {
-        approveUpdateFields.push(`${cancelRequestStatusCol} = @cancelRequestStatus`)
-        approveUpdateRequest.input("cancelRequestStatus", isApproveCancelAction ? "Approved" : "Rejected")
-      }
-      if (cancelApprovedByCol) {
-        approveUpdateFields.push(`${cancelApprovedByCol} = @cancelApprovedBy`)
-        approveUpdateRequest.input("cancelApprovedBy", userRealName || userUsername || "")
-      }
-      if (cancelApprovedDateCol) {
-        approveUpdateFields.push(`${cancelApprovedDateCol} = GETUTCDATE()`)
-      }
-      
-      // 如果审批通过，更新工单状态为 Cancelled
-      if (isApproveCancelAction) {
-        approveUpdateFields.push(`Status = 'Cancelled'`)
-      }
-      
-      if (approveUpdateFields.length > 0) {
-        await approveUpdateRequest.query(`
-          UPDATE Repair_Tickets
-          SET ${approveUpdateFields.join(", ")}
-          WHERE ${idColumn} = @ticketId
-        `)
-      }
-      
-      // 记录历史
-      try {
-        await pool.request()
-          .input("ticketId", ticketId.toString())
-          .input("actionType", isApproveCancelAction ? "CancelApproved" : "CancelRejected")
-          .input("oldStatus", ticket.Status || null)
-          .input("newStatus", isApproveCancelAction ? "Cancelled" : ticket.Status || null)
-          .query(`
-            INSERT INTO Repair_Ticket_History (TicketID, ActionType, OldStatus, NewStatus, CreatedAt)
-            VALUES (@ticketId, @actionType, @oldStatus, @newStatus, GETUTCDATE())
-          `)
-      } catch (historyError: any) {
-        console.error("记录审批历史失败:", historyError?.message)
-      }
-      
-      return NextResponse.json({
-        success: true,
-        message: isApproveCancelAction ? "取消申请已通过，工单已取消" : "取消申请已拒绝",
-      })
-    }
-
-    // 构建更新字段列表
-    const updateFields: string[] = []
-    const updateRequest = pool.request().input("ticketId", actualTicketId)
-
-    // 如果仓库管理员只更新仓库字段，不更新状态（除非填写了快递单号）
-    if (isWarehouseOnlyUpdate && isWarehouse) {
-      // 只更新仓库相关字段
-      const receivedDateColumn = columnNames.find((c) => c.toLowerCase() === "receiveddate")
-      const factoryShipDateColumn = columnNames.find((c) => c.toLowerCase() === "factoryshipdate")
-      const returnDateColumn = columnNames.find((c) => c.toLowerCase() === "returndate")
-      const returnQuantityColumn = columnNames.find((c) => c.toLowerCase() === "returnquantity")
-      const returnTrackingNumColumn = columnNames.find((c) => c.toLowerCase() === "returntrackingnum")
-
-      if (body.receivedDate && receivedDateColumn) {
-        updateFields.push(`${receivedDateColumn} = @receivedDate`)
-        updateRequest.input("receivedDate", new Date(body.receivedDate))
-      }
-      if (body.factoryShipDate && factoryShipDateColumn) {
-        updateFields.push(`${factoryShipDateColumn} = @factoryShipDate`)
-        updateRequest.input("factoryShipDate", new Date(body.factoryShipDate))
-      }
-      if (body.returnDate && returnDateColumn) {
-        updateFields.push(`${returnDateColumn} = @returnDate`)
-        updateRequest.input("returnDate", new Date(body.returnDate))
-      }
-      if (body.returnQuantity !== undefined && returnQuantityColumn) {
-        updateFields.push(`${returnQuantityColumn} = @returnQuantity`)
-        updateRequest.input("returnQuantity", body.returnQuantity)
-      }
-      if (body.returnTrackingNum !== undefined && returnTrackingNumColumn) {
-        // 清理快递单号中的空格（防呆处理）
-        const cleanedTrackingNum = body.returnTrackingNum 
-          ? body.returnTrackingNum.replace(/\s+/g, '') 
-          : null
-        updateFields.push(`${returnTrackingNumColumn} = @returnTrackingNum`)
-        updateRequest.input("returnTrackingNum", cleanedTrackingNum)
-        
-        // 规则：仓库管理员填完 ReturnTrackingNum 时，自动转为已完成
-        if (cleanedTrackingNum && cleanedTrackingNum.trim()) {
-          updateFields.push(`Status = @status`)
-          updateRequest.input("status", "Completed")
-
-          // ⚠️ 统一完工时间写入：WarehouseShippedAt 是全系统统一的"完工时间"字段，
-          // 主流程（warehouse-shipping-batch / shipping-info）都会写入它，
-          // 但这条遗留的单设备路径此前遗漏了该字段，导致这类工单的完工时间不可追溯。
-          const warehouseShippedAtColumn = columnNames.find((c) => c.toLowerCase() === "warehouseshippedat")
-          const warehouseShippedByColumn = columnNames.find((c) => c.toLowerCase() === "warehouseshippedby")
-          if (warehouseShippedAtColumn) {
-            updateFields.push(`${warehouseShippedAtColumn} = GETUTCDATE()`)
-          }
-          if (warehouseShippedByColumn) {
-            updateFields.push(`${warehouseShippedByColumn} = @warehouseShippedBy`)
-            updateRequest.input("warehouseShippedBy", userRealName || userUsername || "仓库管理员")
-          }
-        }
-      }
-
-      if (updateFields.length > 0) {
-        await updateRequest.query(`
-          UPDATE Repair_Tickets
-          SET ${updateFields.join(", ")}
-          WHERE ${idColumn} = @ticketId
-        `)
-      }
-    } else if (!isCancelRequestAction && !isApproveCancelAction && !isRejectCancelAction) {
-      // 更新工单状态（维修工程师或管理员的操作）
-      // 取消申请和审批取消申请操作不在这里更新状态
-      if (dbStatus) {
-        await pool
-          .request()
-          .input("ticketId", actualTicketId)
-          .input("status", dbStatus)
-          .query(`
-            UPDATE Repair_Tickets
-            SET Status = @status
-            WHERE ${idColumn} = @ticketId
-          `)
-      }
-    }
-
-    // 如果工单状态为"已完成"或"无法维修"，将设备状态更新为"在库"（设备返回入库）
-    // 兼容旧状态 Processing
-    // 取消申请和审批取消申请操作不更新设备状态
-    if (dbStatus && (dbStatus === "Completed" || dbStatus === "Unrepairable") && !isCancelRequestAction && !isApproveCancelAction && !isRejectCancelAction) {
-      try {
-        await pool
-          .request()
-          .input("deviceSn", ticket.DeviceSN)
-          .input("newStatus", "在库")
-          .query(`
-            UPDATE Device_Inventory
-            SET Status = @newStatus
-            WHERE SerialNumber = @deviceSn
-          `)
-        console.log(`工单 ${ticketId} 完成，设备 ${ticket.DeviceSN} 状态已更新为：在库`)
-      } catch (deviceError: any) {
-        // 设备状态更新失败不影响工单状态更新，只记录日志
-        console.error(`更新设备状态失败（工单 ${ticketId}）:`, deviceError?.message)
-      }
-    }
-
-    // 如果历史表不存在，则创建（延期或状态变更都会用到）
-    try {
-      await pool.request().query(`
-        IF NOT EXISTS (
-          SELECT * FROM sys.objects 
-          WHERE object_id = OBJECT_ID(N'[dbo].[Repair_Ticket_History]') 
-            AND type in (N'U')
+      const delayDate = new Date(body.delayTo)
+      if (delayDate.getTime() <= Date.now()) {
+        transaction = await rollback(transaction)
+        return NextResponse.json(
+          { success: false, message: "延期日期必须晚于当前时间" },
+          { status: 400 }
         )
-        BEGIN
-          CREATE TABLE [dbo].[Repair_Ticket_History] (
-            [Id] INT IDENTITY(1,1) PRIMARY KEY,
-            [TicketID] NVARCHAR(50) NOT NULL,
-            [ActionType] NVARCHAR(50) NOT NULL,
-            [OldStatus] NVARCHAR(50) NULL,
-            [NewStatus] NVARCHAR(50) NULL,
-            [DelayTo] DATETIME NULL,
-            [DelayReason] NVARCHAR(500) NULL,
-            [CreatedAt] DATETIME NOT NULL DEFAULT(GETUTCDATE())
-          )
-        END
-      `)
-    } catch (createHistoryError: any) {
-      console.error("创建 Repair_Ticket_History 表失败:", createHistoryError?.message)
-      // 表创建失败不会阻止主流程
-    }
-
-    // 如果是延期操作，记录延期历史
-    if (isDelayAction) {
-      try {
-        const historyRequest = pool
-          .request()
-          .input("ticketId", ticketId.toString())
-          .input("actionType", TicketActionType.DELAY)
-          .input("oldStatus", ticket.Status || null)
-          .input("newStatus", dbStatus)
-          .input("delayTo", delayTo ? new Date(delayTo) : null)
-          .input("delayReason", delayReason || null)
-
-        await historyRequest.query(`
-          INSERT INTO [dbo].[Repair_Ticket_History] (
-            TicketID, ActionType, OldStatus, NewStatus, DelayTo, DelayReason
-          )
-          VALUES (
-            @ticketId, @actionType, @oldStatus, @newStatus, @delayTo, @delayReason
-          )
-        `)
-      } catch (historyError: unknown) {
-        // 延期历史记录失败不影响主工单状态
-        const errorMsg = historyError instanceof Error ? historyError.message : "未知错误"
-        console.error("记录延期历史失败:", errorMsg)
       }
+
+      const updateResult = await new sql.Request(transaction)
+        .input("ticketId", sql.Int, ticketId)
+        .input("expectedStatus", sql.NVarChar(50), TicketStatus.IN_REPAIR)
+        .input("legacyExpectedStatus", sql.NVarChar(50), TicketStatus.PROCESSING)
+        .input("newStatus", sql.NVarChar(50), TicketStatus.DELAYED)
+        .query<UpdatedTicketRow>(`
+          UPDATE [dbo].[Repair_Tickets]
+          SET [Status] = @newStatus, [UpdatedAt] = GETUTCDATE()
+          OUTPUT inserted.[Id], inserted.[TicketId], inserted.[BatchId],
+                 inserted.[DeviceSN], deleted.[Status] AS [OldStatus],
+                 inserted.[Status] AS [NewStatus]
+          WHERE [Id] = @ticketId
+            AND [Status] IN (@expectedStatus, @legacyExpectedStatus);
+        `)
+      updated = updateResult.recordset[0]
+      if (updateResult.rowsAffected[0] !== 1 || !updated) {
+        transaction = await rollback(transaction)
+        return conflict("只有维修检查中的工单可以申请延期")
+      }
+      actionType = TicketActionType.DELAY
+      description = `申请延期至 ${body.delayTo}：${body.delayReason}`
+      historyDelayTo = delayDate
+      historyDelayReason = body.delayReason
     } else {
-      // 普通状态变更历史
-      try {
-        const historyRequest = pool
-          .request()
-          .input("ticketId", ticketId.toString())
-          .input("actionType", TicketActionType.STATUS_CHANGE)
-          .input("oldStatus", ticket.Status || null)
-          .input("newStatus", dbStatus)
-          .input("delayTo", null)
-          .input("delayReason", null)
+      const hasWarehouseFields = [
+        body.receivedDate,
+        body.factoryShipDate,
+        body.returnDate,
+        body.returnQuantity,
+        body.returnTrackingNum,
+      ].some((value) => value !== undefined)
 
-        await historyRequest.query(`
-          INSERT INTO [dbo].[Repair_Ticket_History] (
-            TicketID, ActionType, OldStatus, NewStatus, DelayTo, DelayReason
+      if (hasWarehouseFields) {
+        if (![UserRole.WAREHOUSE, UserRole.ADMIN].includes(role)) {
+          transaction = await rollback(transaction)
+          return NextResponse.json(
+            { success: false, message: "您没有权限更新仓库字段" },
+            { status: 403 }
           )
-          VALUES (
-            @ticketId, @actionType, @oldStatus, @newStatus, @delayTo, @delayReason
+        }
+
+        const trackingNumber = body.returnTrackingNum?.replace(/\s+/g, "") || null
+        const completesTicket = Boolean(trackingNumber)
+        const updateResult = await new sql.Request(transaction)
+          .input("ticketId", sql.Int, ticketId)
+          .input("receivedDate", sql.DateTime2, body.receivedDate ? new Date(body.receivedDate) : null)
+          .input("factoryShipDate", sql.DateTime2, body.factoryShipDate ? new Date(body.factoryShipDate) : null)
+          .input("returnDate", sql.DateTime2, body.returnDate ? new Date(body.returnDate) : null)
+          .input("returnQuantity", sql.Int, body.returnQuantity ?? null)
+          .input("returnTrackingNum", sql.NVarChar(200), trackingNumber)
+          .input("operatorName", sql.NVarChar(100), authResult.realName || authResult.username)
+          .input("newStatus", sql.NVarChar(50), completesTicket ? TicketStatus.COMPLETED : null)
+          .query<UpdatedTicketRow>(`
+            UPDATE [dbo].[Repair_Tickets]
+            SET [ReceivedDate] = COALESCE(@receivedDate, [ReceivedDate]),
+                [FactoryShipDate] = COALESCE(@factoryShipDate, [FactoryShipDate]),
+                [ReturnDate] = COALESCE(@returnDate, [ReturnDate]),
+                [ReturnQuantity] = COALESCE(@returnQuantity, [ReturnQuantity]),
+                [ReturnTrackingNum] = COALESCE(@returnTrackingNum, [ReturnTrackingNum]),
+                [Status] = COALESCE(@newStatus, [Status]),
+                [WarehouseShippedAt] = CASE WHEN @newStatus = 'Completed' THEN GETUTCDATE() ELSE [WarehouseShippedAt] END,
+                [WarehouseShippedBy] = CASE WHEN @newStatus = 'Completed' THEN @operatorName ELSE [WarehouseShippedBy] END,
+                [UpdatedAt] = GETUTCDATE()
+            OUTPUT inserted.[Id], inserted.[TicketId], inserted.[BatchId],
+                   inserted.[DeviceSN], deleted.[Status] AS [OldStatus],
+                   inserted.[Status] AS [NewStatus]
+            WHERE [Id] = @ticketId
+              AND (
+                (@newStatus IS NULL AND [Status] NOT IN ('Completed', 'Cancelled', 'Scrapped', 'Deleted'))
+                OR (@newStatus = 'Completed' AND [Status] IN ('Warehouse_Shipping', 'Pending_Shipment'))
+              );
+          `)
+        updated = updateResult.recordset[0]
+        if (updateResult.rowsAffected[0] !== 1 || !updated) {
+          transaction = await rollback(transaction)
+          return conflict("当前工单状态不允许更新仓库字段或确认发货")
+        }
+        actionType = updated.OldStatus === updated.NewStatus
+          ? TicketActionType.STATUS_CHANGE
+          : TicketActionType.WAREHOUSE_SHIPPED
+        description = completesTicket ? "仓库确认发货并完成工单" : "更新仓库物流信息"
+      } else {
+        const requestedStatus = body.deleteToRecycleBin
+          ? TicketStatus.DELETED
+          : body.status?.trim()
+
+        if (!requestedStatus) {
+          transaction = await rollback(transaction)
+          return NextResponse.json(
+            { success: false, message: "没有可执行的更新内容" },
+            { status: 400 }
           )
-        `)
-      } catch (statusHistoryError: unknown) {
-        const errorMsg = statusHistoryError instanceof Error ? statusHistoryError.message : "未知错误"
-        console.error("记录状态变更历史失败:", errorMsg)
+        }
+
+        let expectedPredicate: string
+        let targetStatus: TicketStatus
+        if (["pending", "created"].includes(requestedStatus.toLowerCase())) {
+          if (![UserRole.TECHNICIAN, UserRole.ADMIN].includes(role)) {
+            transaction = await rollback(transaction)
+            return NextResponse.json(
+              { success: false, message: "您没有权限恢复工单" },
+              { status: 403 }
+            )
+          }
+          targetStatus = TicketStatus.CREATED
+          expectedPredicate = "[Status] = 'Deleted'"
+          description = "从回收站恢复工单"
+        } else if (requestedStatus.toLowerCase() === "deleted") {
+          if (![UserRole.TECHNICIAN, UserRole.ADMIN].includes(role)) {
+            transaction = await rollback(transaction)
+            return NextResponse.json(
+              { success: false, message: "您没有权限移入回收站" },
+              { status: 403 }
+            )
+          }
+          targetStatus = TicketStatus.DELETED
+          expectedPredicate = "[Status] NOT IN ('Completed', 'Cancelled', 'Scrapped', 'Deleted')"
+          description = "工单移入回收站"
+        } else if (requestedStatus.toLowerCase() === "cancelled") {
+          if (![UserRole.ADMIN, UserRole.BUSINESS].includes(role)) {
+            transaction = await rollback(transaction)
+            return NextResponse.json(
+              { success: false, message: "您没有权限直接取消工单" },
+              { status: 403 }
+            )
+          }
+          targetStatus = TicketStatus.CANCELLED
+          expectedPredicate = "[Status] IN ('Created', 'In_Repair', 'Admin_Review', 'Business_Review')"
+          description = body.cancelReason
+            ? `管理员取消工单：${body.cancelReason}`
+            : "管理员取消工单"
+        } else {
+          transaction = await rollback(transaction)
+          return conflict("该状态必须通过对应的专用工作流接口流转")
+        }
+
+        const updateResult = await new sql.Request(transaction)
+          .input("ticketId", sql.Int, ticketId)
+          .input("newStatus", sql.NVarChar(50), targetStatus)
+          .query<UpdatedTicketRow>(`
+            UPDATE [dbo].[Repair_Tickets]
+            SET [Status] = @newStatus, [UpdatedAt] = GETUTCDATE()
+            OUTPUT inserted.[Id], inserted.[TicketId], inserted.[BatchId],
+                   inserted.[DeviceSN], deleted.[Status] AS [OldStatus],
+                   inserted.[Status] AS [NewStatus]
+            WHERE [Id] = @ticketId AND ${expectedPredicate};
+          `)
+        updated = updateResult.recordset[0]
+        if (updateResult.rowsAffected[0] !== 1 || !updated) {
+          transaction = await rollback(transaction)
+          return conflict()
+        }
       }
     }
+
+    await writeHistory(
+      transaction,
+      authResult,
+      updated,
+      actionType,
+      description,
+      historyDelayTo,
+      historyDelayReason
+    )
+    await transaction.commit()
+    transaction = null
 
     return NextResponse.json({
       success: true,
-      message: isDelayAction ? "延期申请已提交" : isSupplementSNAction ? "序列号补录成功" : "工单状态更新成功",
-    })
-  } catch (error: any) {
-    console.error("更新工单状态失败:", error)
-    return NextResponse.json(
-      {
-        success: false,
-        message: "更新工单状态时发生错误",
-        error: error?.message || "未知错误",
+      message: description,
+      data: {
+        ticketId: updated.Id,
+        oldStatus: updated.OldStatus,
+        newStatus: updated.NewStatus,
+        statusChanged: updated.OldStatus !== updated.NewStatus,
       },
+    })
+  } catch (error: unknown) {
+    console.error("[Ticket Update API] 更新失败:", error)
+    transaction = await rollback(transaction)
+    return NextResponse.json(
+      { success: false, message: "更新工单失败，请稍后重试" },
       { status: 500 }
     )
   }

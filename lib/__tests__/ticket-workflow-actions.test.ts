@@ -11,6 +11,7 @@ import {
   WORKFLOW_TRANSITIONS,
   getAvailableAction,
   canExecuteAction,
+  getTransitionForActionAndRole,
   getNextStatusForAction,
   requiresValidation,
 } from "@/lib/ticket-workflow-actions";
@@ -167,6 +168,27 @@ describe("工单工作流动作系统", () => {
       );
 
       expect(canExecute).toBe(true);
+    });
+  });
+
+  describe("getTransitionForActionAndRole", () => {
+    it("应该从服务端动作与角色推导 expectedStatus，不依赖客户端状态", () => {
+      const transition = getTransitionForActionAndRole(
+        TicketAction.UPLOAD_SIGNATURE,
+        UserRole.REPORTER
+      );
+
+      expect(transition?.currentStatus).toBe(TicketStatus.PENDING_REPORTER_CONFIRM);
+      expect(transition?.nextStatus).toBe(TicketStatus.TECHNICIAN_REPAIRING);
+    });
+
+    it("应该拒绝动作与角色不匹配的组合", () => {
+      const transition = getTransitionForActionAndRole(
+        TicketAction.CONFIRM_PAYMENT,
+        UserRole.REPORTER
+      );
+
+      expect(transition).toBeNull();
     });
   });
 

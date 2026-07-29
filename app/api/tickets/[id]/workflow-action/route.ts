@@ -17,49 +17,30 @@
  */
 
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
+import * as sql from "mssql";
+import { z } from "zod";
 import { getDbConnection } from "@/lib/db-config";
-import {
-  TicketStatus,
-  UserRole,
-  normalizeUserRole,
-  normalizeTicketStatus,
-  TicketActionType,
-} from "@/lib/enums";
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils";
+import { TicketActionType, UserRole } from "@/lib/enums";
 import {
   TicketAction,
-  getNextStatusForAction,
-  canExecuteAction,
+  getTransitionForActionAndRole,
   TICKET_ACTION_LABELS,
 } from "@/lib/ticket-workflow-actions";
 
-// ==================== 辅助函数 ====================
+const workflowActionSchema = z.object({
+  action: z.nativeEnum(TicketAction),
+  // 兼容旧客户端，但服务端明确忽略该值，当前状态只能来自数据库。
+  currentStatus: z.unknown().optional(),
+  userRole: z.unknown().optional(),
+  signedReportPhoto: z.string().trim().min(1).max(2048).optional(),
+}).strict();
 
-/**
- * 从 Cookie 获取当前登录用户
- */
-async function getCurrentUser(cookieStore: ReturnType<typeof cookies>) {
-  const userCookie = (await cookieStore).get("user");
-  if (!userCookie?.value) {
-    return null;
-  }
-
-  try {
-    const user = JSON.parse(userCookie.value);
-    const normalizedRole = normalizeUserRole(user.role);
-    if (!normalizedRole) {
-      return null;
-    }
-
-    return {
-      id: user.id,
-      username: user.username,
-      realName: (user.realName as string | undefined) || "",
-      role: normalizedRole,
-    };
-  } catch {
-    return null;
-  }
+interface WorkflowUpdateRow {
+  OldStatus: string;
+  NewStatus: string;
+  TicketId: string | null;
+  BatchId: string | null;
 }
 
 // ==================== 主 API 处理函数 ====================
@@ -70,217 +51,156 @@ async function getCurrentUser(cookieStore: ReturnType<typeof cookies>) {
  */
 export async function POST(
   request: Request,
-  context: { params: Promise<{ id: string }> } | { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
-  let pool: any = null;
-  let transaction: any = null;
+  const authResult = await checkUserRole(ALL_USER_ROLES);
+  if (isErrorResponse(authResult)) return authResult;
+
+  let transaction: sql.Transaction | null = null;
 
   try {
-    // ==================== 1. 权限校验（第一行，遵守 cursorrules） ====================
-    
-    const cookieStore = cookies();
-    const currentUser = await getCurrentUser(cookieStore);
-
-    if (!currentUser) {
-      return NextResponse.json(
-        { success: false, message: "未登录或登录已过期" },
-        { status: 401 }
-      );
-    }
-
-    // ==================== 2. 解析请求参数 ====================
-
-    const body = await request.json().catch(() => ({}));
-    const {
-      action,
-      currentStatus,
-      userRole,
-      signedReportPhoto, // 签字凭证照片路径（上传签字时使用）
-    } = body;
-
-    // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ id: string }> }).params
-        : (context as { params: { id: string } }).params;
-
-    const ticketId = resolvedParams?.id;
-
-    if (!ticketId) {
-      return NextResponse.json(
-        { success: false, message: "工单ID不能为空" },
-        { status: 400 }
-      );
-    }
-
-    if (!action || !currentStatus) {
-      return NextResponse.json(
-        { success: false, message: "缺少必要参数：action 或 currentStatus" },
-        { status: 400 }
-      );
-    }
-
-    // 归一化状态
-    const normalizedCurrentStatus = normalizeTicketStatus(currentStatus);
-    if (!normalizedCurrentStatus) {
-      return NextResponse.json(
-        { success: false, message: `无效的工单状态：${currentStatus}` },
-        { status: 400 }
-      );
-    }
-
-    // ==================== 3. 权限校验：检查用户是否有权执行该动作 ====================
-
-    const hasPermission = canExecuteAction(
-      action as TicketAction,
-      normalizedCurrentStatus,
-      currentUser.role
+    const parsedBody = workflowActionSchema.safeParse(
+      await request.json().catch(() => null)
     );
-
-    if (!hasPermission) {
+    if (!parsedBody.success) {
       return NextResponse.json(
-        {
-          success: false,
-          message: `您没有权限执行该操作（当前状态：${currentStatus}，您的角色：${currentUser.role}）`,
-        },
+        { success: false, message: "请求参数无效" },
+        { status: 400 }
+      );
+    }
+
+    const { id } = await context.params;
+    if (!/^\d+$/.test(id)) {
+      return NextResponse.json(
+        { success: false, message: "工单ID无效" },
+        { status: 400 }
+      );
+    }
+
+    const ticketId = Number(id);
+    const operatorId = Number(authResult.userId);
+    if (!Number.isSafeInteger(ticketId) || !Number.isSafeInteger(operatorId)) {
+      return NextResponse.json(
+        { success: false, message: "身份或工单参数无效" },
+        { status: 400 }
+      );
+    }
+
+    const { action, signedReportPhoto } = parsedBody.data;
+    const transition = getTransitionForActionAndRole(
+      action,
+      authResult.normalizedRole
+    );
+    if (!transition) {
+      return NextResponse.json(
+        { success: false, message: "您没有权限执行该操作" },
         { status: 403 }
       );
     }
 
-    // ==================== 4. 获取下一个状态 ====================
-
-    const nextStatus = getNextStatusForAction(
-      action as TicketAction,
-      normalizedCurrentStatus
-    );
-
-    if (!nextStatus) {
+    if (action === TicketAction.UPLOAD_SIGNATURE && !signedReportPhoto) {
       return NextResponse.json(
-        { success: false, message: "无法确定下一个状态，操作失败" },
+        { success: false, message: "缺少签字凭证" },
         { status: 400 }
       );
     }
 
-    // ==================== 5. 开始数据库事务（遵守 cursorrules） ====================
-
-    pool = await getDbConnection();
-    transaction = pool.transaction();
-
+    const pool = await getDbConnection();
+    transaction = new sql.Transaction(pool);
     await transaction.begin();
 
-    try {
-      // ==================== 5.1 更新工单状态 ====================
+    const updateRequest = new sql.Request(transaction)
+      .input("ticketId", sql.Int, ticketId)
+      .input("expectedStatus", sql.NVarChar(50), transition.currentStatus)
+      .input("newStatus", sql.NVarChar(50), transition.nextStatus)
+      .input("operatorId", sql.Int, operatorId)
+      .input("signedReportPhoto", sql.NVarChar(sql.MAX), signedReportPhoto ?? null);
 
-      const updateRequest = transaction.request();
-      updateRequest.input("ticketId", ticketId);
-      updateRequest.input("newStatus", nextStatus);
+    const setSignedPhoto = action === TicketAction.UPLOAD_SIGNATURE
+      ? ", [SignedReportPhoto] = @signedReportPhoto, [ReporterConfirmedAt] = GETUTCDATE()"
+      : "";
+    const reporterOwnership = authResult.normalizedRole === UserRole.REPORTER
+      ? "AND [ReportByUserID] = @operatorId"
+      : "";
+    const precondition = action === TicketAction.CONFIRM_RECEIPT
+      ? "AND [ManufactureDate] IS NOT NULL"
+      : action === TicketAction.SEND_REPORT_FOR_SIGN
+        ? "AND NULLIF(LTRIM(RTRIM(ISNULL([FaultPoint], ''))), '') IS NOT NULL AND [RepairCost] IS NOT NULL"
+        : "";
 
-      // 如果是上传签字动作，同时更新签字凭证字段
-      if (action === TicketAction.UPLOAD_SIGNATURE && signedReportPhoto) {
-        updateRequest.input("signedReportPhoto", signedReportPhoto);
+    const updateResult = await updateRequest.query<WorkflowUpdateRow>(`
+      UPDATE [dbo].[Repair_Tickets]
+      SET [Status] = @newStatus,
+          [UpdatedAt] = GETUTCDATE()
+          ${setSignedPhoto}
+      OUTPUT deleted.[Status] AS [OldStatus],
+             inserted.[Status] AS [NewStatus],
+             inserted.[TicketId] AS [TicketId],
+             inserted.[BatchId] AS [BatchId]
+      WHERE [Id] = @ticketId
+        AND [Status] = @expectedStatus
+        ${reporterOwnership}
+        ${precondition};
+    `);
 
-        await updateRequest.query(`
-          UPDATE [dbo].[Repair_Tickets]
-          SET 
-            [Status] = @newStatus,
-            [SignedReportPhoto] = @signedReportPhoto,
-            [UpdatedAt] = GETUTCDATE()
-          WHERE [ID] = @ticketId
-        `);
-      } else {
-        await updateRequest.query(`
-          UPDATE [dbo].[Repair_Tickets]
-          SET 
-            [Status] = @newStatus,
-            [UpdatedAt] = GETUTCDATE()
-          WHERE [ID] = @ticketId
-        `);
-      }
-
-      // ==================== 5.2 记录操作历史（审计日志，遵守 cursorrules） ====================
-
-      const historyRequest = transaction.request();
-      historyRequest.input("ticketId", ticketId);
-      historyRequest.input("actionType", TicketActionType.STATUS_CHANGE);
-      historyRequest.input("oldStatus", normalizedCurrentStatus);
-      historyRequest.input("newStatus", nextStatus);
-      historyRequest.input("operatorId", currentUser.id);
-      // 优先使用真实姓名，回退到用户名（遵守 cursorrules §5 不硬编码用户）
-      historyRequest.input("operatorName", currentUser.realName || currentUser.username);
-      historyRequest.input(
-        "actionDescription",
-        `${TICKET_ACTION_LABELS[action as TicketAction]}`
+    if (updateResult.rowsAffected[0] !== 1 || !updateResult.recordset[0]) {
+      await transaction.rollback();
+      transaction = null;
+      return NextResponse.json(
+        { success: false, message: "工单状态已变化、操作重复或前置条件未满足" },
+        { status: 409 }
       );
+    }
 
-      await historyRequest.query(`
-        IF OBJECT_ID('dbo.Repair_Ticket_History', 'U') IS NOT NULL
-        BEGIN
-          INSERT INTO [dbo].[Repair_Ticket_History] (
-            TicketID, ActionType, OldStatus, NewStatus, 
-            OperatorID, OperatorName, ActionDescription, CreatedAt
-          )
-          VALUES (
-            @ticketId, @actionType, @oldStatus, @newStatus,
-            @operatorId, @operatorName, @actionDescription, GETUTCDATE()
-          )
-        END
+    const updated = updateResult.recordset[0];
+    await new sql.Request(transaction)
+      .input("ticketId", sql.NVarChar(50), updated.TicketId ?? id)
+      .input("batchId", sql.NVarChar(50), updated.BatchId)
+      .input("actionType", sql.NVarChar(50), TicketActionType.STATUS_CHANGE)
+      .input("oldStatus", sql.NVarChar(50), updated.OldStatus)
+      .input("newStatus", sql.NVarChar(50), updated.NewStatus)
+      .input("operatorId", sql.Int, operatorId)
+      .input("operatorName", sql.NVarChar(100), authResult.realName || authResult.username)
+      .input("description", sql.NVarChar(sql.MAX), TICKET_ACTION_LABELS[action])
+      .query(`
+        INSERT INTO [dbo].[Repair_Ticket_History] (
+          [TicketID], [BatchId], [ActionType], [OldStatus], [NewStatus],
+          [OperatorId], [OperatorName], [Description], [CreatedAt]
+        )
+        VALUES (
+          @ticketId, @batchId, @actionType, @oldStatus, @newStatus,
+          @operatorId, @operatorName, @description, GETUTCDATE()
+        );
       `);
 
-      // ==================== 5.3 提交事务 ====================
+    await transaction.commit();
+    transaction = null;
 
-      await transaction.commit();
-
-      // ==================== 6. 返回成功结果 ====================
-
-      return NextResponse.json({
-        success: true,
-        message: `操作成功：${TICKET_ACTION_LABELS[action as TicketAction]}`,
-        data: {
-          ticketId,
-          oldStatus: normalizedCurrentStatus,
-          newStatus: nextStatus,
-          action: action,
-          operator: {
-            id: currentUser.id,
-            name: currentUser.username,
-            role: currentUser.role,
-          },
-        },
-      });
-    } catch (transactionError: any) {
-      // 事务执行失败，回滚
-      console.error("[Workflow Action API] 事务执行失败:", transactionError);
-      await transaction.rollback();
-      throw transactionError;
-    }
-  } catch (error: any) {
+    return NextResponse.json({
+      success: true,
+      message: `操作成功：${TICKET_ACTION_LABELS[action]}`,
+      data: {
+        ticketId,
+        oldStatus: updated.OldStatus,
+        newStatus: updated.NewStatus,
+        action,
+      },
+    });
+  } catch (error: unknown) {
     console.error("[Workflow Action API] 执行失败:", error);
-
-    // 如果事务已开启但未提交，尝试回滚
     if (transaction) {
       try {
         await transaction.rollback();
       } catch (rollbackError) {
         console.error("[Workflow Action API] 事务回滚失败:", rollbackError);
+      } finally {
+        transaction = null;
       }
     }
 
     return NextResponse.json(
-      {
-        success: false,
-        message: "操作失败，请稍后重试",
-        error: error?.message || "未知错误",
-      },
+      { success: false, message: "操作失败，请稍后重试" },
       { status: 500 }
     );
-  } finally {
-    // 关闭数据库连接
-    if (pool) {
-      try {
-        await pool.close();
-      } catch (closeError) {
-        console.error("[Workflow Action API] 关闭数据库连接失败:", closeError);
-      }
-    }
   }
 }

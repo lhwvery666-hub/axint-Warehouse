@@ -169,6 +169,22 @@ export function canExecuteAction(
 }
 
 /**
+ * 根据动作和已验证的用户角色获取唯一的服务端流转规则。
+ *
+ * 服务端必须使用该函数决定 expectedStatus，不能相信客户端提交的 currentStatus。
+ */
+export function getTransitionForActionAndRole(
+  action: TicketAction,
+  currentUserRole: UserRole
+): WorkflowTransition | null {
+  return WORKFLOW_TRANSITIONS.find(
+    (transition) =>
+      transition.action === action &&
+      transition.allowedRole === currentUserRole
+  ) || null;
+}
+
+/**
  * 获取动作执行后的下一个状态
  * @param action 执行的动作
  * @param currentStatus 当前状态

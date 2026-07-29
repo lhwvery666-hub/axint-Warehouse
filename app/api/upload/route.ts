@@ -15,56 +15,38 @@
  */
 
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { normalizeUserRole } from "@/lib/enums";
 import { getStorageAdapter } from "@/lib/storage/storage-adapter";
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils";
 
 // ==================== 配置常量 ====================
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-const ALLOWED_MIME_TYPES = [
-  "image/jpeg",
-  "image/jpg",
-  "image/png",
-  "image/webp",
-  "application/pdf",
-];
+const MIME_TO_EXTENSIONS: Readonly<Record<string, readonly string[]>> = {
+  "image/jpeg": ["jpg", "jpeg"],
+  "image/jpg": ["jpg", "jpeg"],
+  "image/png": ["png"],
+  "image/webp": ["webp"],
+  "application/pdf": ["pdf"],
+};
+
+const ALLOWED_UPLOAD_TYPES = new Set([
+  "signature",
+  "device_photo",
+  "damage_photo",
+  "stamp_attachment",
+]);
 
 // ==================== 辅助函数 ====================
 
 /**
  * 从 Cookie 获取当前登录用户
  */
-async function getCurrentUser(cookieStore: ReturnType<typeof cookies>) {
-  const userCookie = (await cookieStore).get("user");
-  if (!userCookie?.value) {
-    return null;
-  }
-
-  try {
-    const user = JSON.parse(userCookie.value);
-    const normalizedRole = normalizeUserRole(user.role);
-    if (!normalizedRole) {
-      return null;
-    }
-
-    return {
-      id: user.id,
-      username: user.username,
-      role: normalizedRole,
-    };
-  } catch {
-    return null;
-  }
-}
-
 /**
  * 生成安全的文件名
  */
-function generateSafeFilename(originalName: string, userId: string): string {
+function generateSafeFilename(extension: string, userId: string): string {
   const timestamp = Date.now();
   const randomString = Math.random().toString(36).substring(2, 8);
-  const extension = originalName.split(".").pop() || "jpg";
   return `${userId}_${timestamp}_${randomString}.${extension}`;
 }
 
@@ -85,25 +67,18 @@ function generateStoragePath(subDir: string, filename: string): string {
  * 上传文件
  */
 export async function POST(request: Request) {
+  const authResult = await checkUserRole(ALL_USER_ROLES);
+  if (isErrorResponse(authResult)) return authResult;
+
   try {
     // ==================== 1. 权限校验（第一行，遵守 cursorrules） ====================
-
-    const cookieStore = cookies();
-    const currentUser = await getCurrentUser(cookieStore);
-
-    if (!currentUser) {
-      return NextResponse.json(
-        { success: false, message: "未登录或登录已过期" },
-        { status: 401 }
-      );
-    }
 
     // ==================== 2. 解析 FormData ====================
 
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
     const ticketId = formData.get("ticketId") as string | null;
-    const uploadType = formData.get("type") as string | null; // signature, device_photo, damage_photo
+    const uploadType = formData.get("type");
 
     if (!file) {
       return NextResponse.json(
@@ -112,10 +87,24 @@ export async function POST(request: Request) {
       );
     }
 
+    if (typeof uploadType !== "string" || !ALLOWED_UPLOAD_TYPES.has(uploadType)) {
+      return NextResponse.json(
+        { success: false, message: "上传用途无效" },
+        { status: 400 }
+      );
+    }
+
+    if (ticketId !== null && (typeof ticketId !== "string" || ticketId.length > 100)) {
+      return NextResponse.json(
+        { success: false, message: "工单标识无效" },
+        { status: 400 }
+      );
+    }
+
     // ==================== 3. 文件验证 ====================
 
     // 3.1 检查文件大小
-    if (file.size > MAX_FILE_SIZE) {
+    if (file.size <= 0 || file.size > MAX_FILE_SIZE) {
       return NextResponse.json(
         {
           success: false,
@@ -126,7 +115,13 @@ export async function POST(request: Request) {
     }
 
     // 3.2 检查文件类型
-    if (!ALLOWED_MIME_TYPES.includes(file.type)) {
+    const extension = file.name.split(".").pop()?.toLowerCase() || "";
+    const allowedExtensions = MIME_TO_EXTENSIONS[file.type];
+    const isPdfAllowed = uploadType === "signature" || uploadType === "stamp_attachment";
+    if (
+      !allowedExtensions?.includes(extension) ||
+      (file.type === "application/pdf" && !isPdfAllowed)
+    ) {
       return NextResponse.json(
         {
           success: false,
@@ -142,7 +137,7 @@ export async function POST(request: Request) {
     const subDir = uploadType === "signature" ? "signatures" : "photos";
 
     // 4.2 生成安全的文件名
-    const safeFilename = generateSafeFilename(file.name, currentUser.id);
+    const safeFilename = generateSafeFilename(extension, authResult.userId);
 
     // 4.3 生成存储路径（按年月分目录，如 photos/2026/03/xxx.jpg）
     const storagePath = generateStoragePath(subDir, safeFilename);
@@ -165,20 +160,19 @@ export async function POST(request: Request) {
         uploadType: uploadType || "unknown",
         ticketId: ticketId || null,
         uploadedBy: {
-          id: currentUser.id,
-          name: currentUser.username,
+          id: authResult.userId,
+          name: authResult.username,
         },
         uploadedAt: new Date().toISOString(),
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("[Upload API] 文件上传失败:", error);
 
     return NextResponse.json(
       {
         success: false,
         message: "文件上传失败，请稍后重试",
-        error: error?.message || "未知错误",
       },
       { status: 500 }
     );

@@ -1,163 +1,126 @@
 import { NextResponse } from "next/server"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, UserRole } from "@/lib/enums"
+import { TicketActionType, TicketStatus, UserRole } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
-// POST /api/tickets/batch-cancel-approve/[batchId]
-// 商务/管理员审批取消申请
+const decisionSchema = z.object({
+  approve: z.boolean(),
+  userId: z.unknown().optional(),
+}).strict()
+const batchIdSchema = z.string().trim().min(1).max(100)
+
+interface ApprovalGuardRow {
+  Id: number
+  Status: string
+  CancelRequestStatus: string | null
+}
+
 export async function POST(
   request: Request,
-  context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
+  context: { params: Promise<{ batchId: string }> }
 ) {
+  const authResult = await checkUserRole([UserRole.BUSINESS, UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
+  let transaction: sql.Transaction | null = null
   try {
-    const body = await request.json()
-    const { approve } = body
-
-    // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
-
-    const batchId = resolvedParams.batchId
-
-    if (!batchId) {
-      return NextResponse.json(
-        { success: false, message: "批次号不能为空" },
-        { status: 400 }
-      )
+    const parsedBody = decisionSchema.safeParse(await request.json().catch(() => null))
+    const parsedBatchId = batchIdSchema.safeParse((await context.params).batchId)
+    if (!parsedBody.success || !parsedBatchId.success) {
+      return NextResponse.json({ success: false, message: "请求参数无效" }, { status: 400 })
     }
-
-    // 验证用户权限（只有商务人员和管理员可以审批取消申请）
-    const authCheck = await checkUserRole([UserRole.BUSINESS, UserRole.ADMIN])
-    if (isErrorResponse(authCheck)) {
-      console.error("❌ [批准取消] 权限验证失败")
-      return authCheck
+    const batchId = parsedBatchId.data
+    const operatorId = Number(authResult.userId)
+    if (!Number.isSafeInteger(operatorId)) {
+      return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
     }
-
-    console.log("✅ [批准取消] 权限验证通过", { 
-      userId: authCheck.userId, 
-      role: authCheck.normalizedRole,
-      approve 
-    })
 
     const pool = await getDbConnection()
-
-    // 查询批次中的所有设备
-    const devicesResult = await pool
-      .request()
-      .input("batchId", batchId)
-      .query(`
-        SELECT ${DB_FIELDS.ID}, CancelRequestStatus
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
+    transaction = new sql.Transaction(pool)
+    await transaction.begin()
+    const guard = await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .query<ApprovalGuardRow>(`
+        SELECT [Id], [Status], [CancelRequestStatus]
+        FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [BatchId] = @batchId;
       `)
-
-    if (devicesResult.recordset.length === 0) {
+    if (guard.recordset.length === 0) {
+      await transaction.rollback()
+      transaction = null
+      return NextResponse.json({ success: false, message: "批次工单不存在" }, { status: 404 })
+    }
+    if (guard.recordset.some((row) =>
+      row.CancelRequestStatus !== "Pending" ||
+      [TicketStatus.COMPLETED, TicketStatus.CANCELLED, TicketStatus.DELETED].includes(row.Status as TicketStatus)
+    )) {
+      await transaction.rollback()
+      transaction = null
       return NextResponse.json(
-        { success: false, message: "批次工单不存在或已被删除" },
-        { status: 404 }
+        { success: false, message: "取消申请已被处理或批次状态已变化" },
+        { status: 409 }
       )
     }
 
-    const devices = devicesResult.recordset
+    const approved = parsedBody.data.approve
+    const decision = approved ? "Approved" : "Rejected"
+    const operatorName = authResult.realName || authResult.username
+    const updateResult = await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .input("decision", sql.NVarChar(50), decision)
+      .input("operatorName", sql.NVarChar(100), operatorName)
+      .query(`
+        UPDATE [dbo].[Repair_Tickets]
+        SET [CancelRequestStatus] = @decision,
+            [CancelApprovedBy] = @operatorName,
+            [CancelApprovedDate] = GETUTCDATE(),
+            [Status] = CASE WHEN @decision = 'Approved' THEN 'Cancelled' ELSE [Status] END,
+            [UpdatedAt] = GETUTCDATE()
+        WHERE [BatchId] = @batchId
+          AND [CancelRequestStatus] = 'Pending'
+          AND [Status] NOT IN ('Completed', 'Cancelled', 'Deleted');
+      `)
+    if (updateResult.rowsAffected[0] !== guard.recordset.length) {
+      throw new Error("BATCH_CONFLICT")
+    }
 
-    // 检查是否有待审批的取消申请
-    const hasPendingCancelRequest = devices.some((d: any) => {
-      return d.CancelRequestStatus === "Pending"
+    await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .input("actionType", sql.NVarChar(50), approved ? TicketActionType.CANCEL_APPROVED : TicketActionType.CANCEL_REJECTED)
+      .input("oldStatus", sql.NVarChar(50), guard.recordset[0].Status)
+      .input("newStatus", sql.NVarChar(50), approved ? TicketStatus.CANCELLED : guard.recordset[0].Status)
+      .input("operatorId", sql.Int, operatorId)
+      .input("operatorName", sql.NVarChar(100), operatorName)
+      .input("description", sql.NVarChar(sql.MAX), approved ? "批准批次取消申请" : "拒绝批次取消申请")
+      .query(`
+        INSERT INTO [dbo].[Repair_Ticket_History] (
+          [BatchId], [ActionType], [OldStatus], [NewStatus],
+          [OperatorId], [OperatorName], [Description], [CreatedAt]
+        ) VALUES (
+          @batchId, @actionType, @oldStatus, @newStatus,
+          @operatorId, @operatorName, @description, GETUTCDATE()
+        );
+      `)
+    await transaction.commit()
+    transaction = null
+    return NextResponse.json({
+      success: true,
+      message: approved
+        ? `批次取消申请已批准，共 ${guard.recordset.length} 台设备已取消`
+        : `批次取消申请已拒绝，共 ${guard.recordset.length} 台设备继续正常流程`,
+      data: { batchId, deviceCount: guard.recordset.length },
     })
-
-    if (!hasPendingCancelRequest) {
-      return NextResponse.json(
-        { success: false, message: "批次中没有待审批的取消申请" },
-        { status: 400 }
-      )
-    }
-
-    // 获取操作人姓名（从数据库查询）
-    const userResult = await pool
-      .request()
-      .input("userId", authCheck.userId)
-      .query(`SELECT TOP 1 RealName, Username FROM Users WHERE UserID = @userId`)
-    
-    const operatorName = userResult.recordset[0]?.RealName || userResult.recordset[0]?.Username || "未知"
-
-    if (approve) {
-      // 批准取消申请：将所有设备状态更新为 Cancelled
-      console.log(`🔄 [批准取消] 开始批准取消 ${devices.length} 台设备...`)
-      const updatePromises = devices.map((device: any) => {
-        const deviceId = device[DB_FIELDS.ID] || device.Id
-        return pool
-          .request()
-          .input("ticketId", deviceId)
-          .input("cancelApprovedBy", operatorName)
-          .input("cancelApprovedDate", new Date())
-          .query(`
-            UPDATE Repair_Tickets
-            SET 
-              ${DB_FIELDS.STATUS} = 'Cancelled',
-              CancelRequestStatus = 'Approved',
-              CancelApprovedBy = @cancelApprovedBy,
-              CancelApprovedDate = @cancelApprovedDate,
-              ${DB_FIELDS.UPDATED_AT} = GETUTCDATE()
-            WHERE ${DB_FIELDS.ID} = @ticketId
-          `)
-      })
-
-      await Promise.all(updatePromises)
-      console.log(`✅ [批准取消] 批准完成`)
-
-      return NextResponse.json({
-        success: true,
-        message: `批次工单取消申请已批准，共 ${devices.length} 台设备已取消`,
-        data: {
-          batchId,
-          deviceCount: devices.length
-        }
-      })
-    } else {
-      // 拒绝取消申请：将 CancelRequestStatus 更新为 Rejected
-      console.log(`🔄 [拒绝取消] 开始拒绝取消申请 ${devices.length} 台设备...`)
-      const updatePromises = devices.map((device: any) => {
-        const deviceId = device[DB_FIELDS.ID] || device.Id
-        return pool
-          .request()
-          .input("ticketId", deviceId)
-          .input("cancelApprovedBy", operatorName)
-          .input("cancelApprovedDate", new Date())
-          .query(`
-            UPDATE Repair_Tickets
-            SET 
-              CancelRequestStatus = 'Rejected',
-              CancelApprovedBy = @cancelApprovedBy,
-              CancelApprovedDate = @cancelApprovedDate,
-              ${DB_FIELDS.UPDATED_AT} = GETUTCDATE()
-            WHERE ${DB_FIELDS.ID} = @ticketId
-          `)
-      })
-
-      await Promise.all(updatePromises)
-      console.log(`✅ [拒绝取消] 拒绝完成`)
-
-      return NextResponse.json({
-        success: true,
-        message: `批次工单取消申请已拒绝，共 ${devices.length} 台设备继续正常流程`,
-        data: {
-          batchId,
-          deviceCount: devices.length
-        }
-      })
-    }
-
   } catch (error: unknown) {
-    console.error("❌ [批准取消] 处理失败:", error)
-    const errorMessage = error instanceof Error ? error.message : "处理取消申请失败"
-    return NextResponse.json(
-      { 
-        success: false, 
-        message: errorMessage
-      },
-      { status: 500 }
-    )
+    console.error("[Batch Cancel Approval API] 处理失败:", error)
+    if (transaction) {
+      try { await transaction.rollback() } catch (rollbackError) {
+        console.error("[Batch Cancel Approval API] 事务回滚失败:", rollbackError)
+      } finally { transaction = null }
+    }
+    const status = error instanceof Error && error.message === "BATCH_CONFLICT" ? 409 : 500
+    const message = status === 409 ? "批次状态已变化，请刷新后重试" : "处理取消申请失败"
+    return NextResponse.json({ success: false, message }, { status })
   }
 }

@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import * as sql from "mssql";
 import { getDbConnection } from "@/lib/db-config";
 import { cookies } from "next/headers";
-import { TicketStatus, DB_FIELDS, TicketActionType } from "@/lib/enums";
+import { TicketStatus, DB_FIELDS, TicketActionType, UserRole } from "@/lib/enums";
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils";
 import { API_DEBUG_MESSAGES, API_ERROR_MESSAGES, API_SUCCESS_MESSAGES } from "@/lib/api-messages";
 import { prisma } from "@/lib/prisma";
 import { generateSequentialBatchId } from "@/lib/batch-number";
@@ -34,6 +35,9 @@ interface CustomerInfo {
 // POST /api/tickets/batch
 // 批量创建维修工单（使用 sql.Transaction 保证原子性）
 export async function POST(request: Request) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER]);
+  if (isErrorResponse(authResult)) return authResult;
+
   try {
     const body = await request.json();
     const { customerInfo, items }: { customerInfo: CustomerInfo; items: BatchItem[] } = body;
