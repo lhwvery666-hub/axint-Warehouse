@@ -137,7 +137,6 @@ export async function POST(request: Request) {
     const hasSenderAddress   = fieldExists(DB_FIELDS.SENDER_ADDRESS);
     const hasReceivedDate    = fieldExists(DB_FIELDS.RECEIVED_DATE);
     const hasReportByUserID  = fieldExists(DB_FIELDS.REPORT_BY_USER_ID);
-    const hasReportTime      = fieldExists(DB_FIELDS.REPORT_TIME);
     const hasSubmitDate      = fieldExists(DB_FIELDS.SUBMIT_DATE);
     const hasModelName       = fieldExists(DB_FIELDS.MODEL_NAME);
     const hasFaultDescription = fieldExists(DB_FIELDS.FAULT_DESCRIPTION);
@@ -217,10 +216,8 @@ export async function POST(request: Request) {
           insertFields.push("ReportByUserID"); insertValues.push("@reportByUserID");
           insertRequest.input("reportByUserID", Number(userIdCookie));
         }
-        if (hasReportTime) {
-          insertFields.push("ReportTime"); insertValues.push("@reportTime");
-          insertRequest.input("reportTime", new Date());
-        }
+        insertFields.push("ReportTime"); insertValues.push("@reportTime");
+        insertRequest.input("reportTime", new Date());
         if (hasSubmitDate) {
           insertFields.push("SubmitDate"); insertValues.push("@submitDate");
           insertRequest.input("submitDate", new Date());
@@ -300,7 +297,7 @@ export async function POST(request: Request) {
             SELECT TOP 1 ${idColumn} as ID
             FROM Repair_Tickets
             WHERE DeviceSN = @deviceSn AND BatchId = @batchId
-            ORDER BY ${hasReportTime ? "ReportTime" : idColumn} DESC
+            ORDER BY ReportTime DESC, ${idColumn} DESC
           `);
 
         if (findResult.recordset?.length > 0) {

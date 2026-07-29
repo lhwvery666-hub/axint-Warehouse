@@ -20,6 +20,7 @@ interface FieldDefinition {
 const fieldsToAdd: FieldDefinition[] = [
   // [现场人员填报区] (创建时填)
   { name: 'SubmitDate', type: 'DATETIME', nullable: true, description: '提交日期', category: '现场人员' },
+  { name: 'ReportTime', type: 'DATETIME2(7)', nullable: true, description: '报修时间', category: '现场人员' },
   { name: 'TrackingNumber_In', type: 'NVARCHAR(100)', nullable: true, description: '发出快递单号', category: '现场人员' },
   { name: 'SenderAddress', type: 'NVARCHAR(500)', nullable: true, description: '寄件人地址', category: '现场人员' },
   { name: 'ContactInfo', type: 'NVARCHAR(200)', nullable: true, description: '联系人及电话', category: '现场人员' },

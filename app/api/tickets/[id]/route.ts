@@ -24,6 +24,7 @@ interface TicketRecord extends Record<string, unknown> {
   TrackingNumber?: string
   CourierNumber?: string
   Status?: string
+  ReportTime?: Date
   CreatedAt?: Date
   DeviceName?: string
   MaterialCode?: string
@@ -113,7 +114,7 @@ export async function GET(
       SELECT TOP (1)
         [Id], [BatchId], [DeviceSN], [ModelName], [ProjectLocation], [Problem],
         [ReportByUserID], [ExpressCompany], [CourierCompany], [TrackingNumber],
-        [CourierNumber], [Status], [CreatedAt], [DeviceName], [MaterialCode],
+        [CourierNumber], [Status], [ReportTime], [CreatedAt], [DeviceName], [MaterialCode],
         [DevicePhotos], [DamageImages], [SubmitDate], [TrackingNumber_In],
         [SenderAddress], [ContactInfo], [ProjectName], [Category], [Quantity],
         [FullSpec], [FaultPoint], [IsChargeable], [IsOutsourced],
@@ -320,7 +321,7 @@ export async function GET(
       status: mappedStatus, // 使用映射后的状态值
       reportedBy: reporterName,
       reporterPhone,
-      reportedAt: getDateField("CreatedAt") || new Date().toISOString(),
+      reportedAt: getDateField("ReportTime") || getDateField("SubmitDate") || getDateField("CreatedAt") || "",
       courierCompany: (ticket.CourierCompany as string) || (ticket.ExpressCompany as string) || "",
       trackingNumber: (ticket.CourierNumber as string) || (ticket.TrackingNumber as string) || "",
       materialCode: deviceInfo.materialCode || (ticket.MaterialCode as string) || "",

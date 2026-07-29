@@ -363,10 +363,9 @@ export async function PUT(
     const optColCheck = await prisma.$queryRaw<{ COLUMN_NAME: string }[]>(
       Prisma.sql`SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
                  WHERE TABLE_NAME = 'Repair_Tickets'
-                   AND LOWER(COLUMN_NAME) IN ('reporttime', 'repaircost')`
+                   AND LOWER(COLUMN_NAME) = 'repaircost'`
     )
     const optCols       = new Set(optColCheck.map(r => r.COLUMN_NAME.toLowerCase()))
-    const hasReportTime = optCols.has("reporttime")
     const hasRepairCost = optCols.has("repaircost")
 
     // ── 事务 ────────────────────────────────────────────────────────────────────
@@ -616,7 +615,8 @@ export async function PUT(
               ${Prisma.raw(DB_FIELDS.SENDER_ADDRESS)},
               ${Prisma.raw(DB_FIELDS.TRACKING_NUMBER_IN)},
               ${Prisma.raw(DB_FIELDS.COURIER_COMPANY)},
-              ${Prisma.raw(DB_FIELDS.REPORT_BY_USER_ID)}${Prisma.raw(hasReportTime ? `, ${DB_FIELDS.REPORT_TIME}` : "")}
+              ${Prisma.raw(DB_FIELDS.REPORT_BY_USER_ID)},
+              ${Prisma.raw(DB_FIELDS.REPORT_TIME)}
             )
             VALUES (
               ${batchId},
@@ -635,7 +635,8 @@ export async function PUT(
               ${senderAddress   || null},
               ${trackingNumber  || null},
               ${expressCompany  || null},
-              ${Number.isSafeInteger(batchOwnerId) ? batchOwnerId : null}${Prisma.raw(hasReportTime ? ", GETUTCDATE()" : "")}
+              ${Number.isSafeInteger(batchOwnerId) ? batchOwnerId : null},
+              GETUTCDATE()
             )
           `)
           allDeviceChangeSummaries.push(`新增设备：${(device.serialNumber as string) || "待核"}`)

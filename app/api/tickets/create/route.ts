@@ -185,7 +185,6 @@ export async function POST(request: Request) {
     const hasProjectLocation = availableColumns.some((col: string) => col.toLowerCase() === "projectlocation")
     const hasCourierCompany = availableColumns.some((col: string) => col.toLowerCase() === "couriercompany")
     const hasCourierNumber = availableColumns.some((col: string) => col.toLowerCase() === "couriernumber")
-    const hasReportTime = availableColumns.some((col: string) => col.toLowerCase() === "reporttime" || col.toLowerCase() === "reporttime")
     const hasReportByUserID = availableColumns.some((col: string) => col.toLowerCase() === "reportbyuserid" || col.toLowerCase() === "reportbyuserid")
 
     const reportTime = new Date().toISOString().slice(0, 19).replace("T", " ")
@@ -232,11 +231,9 @@ export async function POST(request: Request) {
         valuesPending += `, @courierNumber`
         requestPending.input("courierNumber", courierInfo || null)
       }
-      if (hasReportTime) {
-        insertPending += `, ReportTime`
-        valuesPending += `, @reportTime`
-        requestPending.input("reportTime", reportTime)
-      }
+      insertPending += `, ReportTime`
+      valuesPending += `, @reportTime`
+      requestPending.input("reportTime", reportTime)
 
       // 动态拼接待定字段 - 现场人员填报区
       if (hasSubmitDate) { insertPending += `, SubmitDate`; valuesPending += `, @submitDate`; requestPending.input("submitDate", submitDate) }
@@ -370,11 +367,9 @@ export async function POST(request: Request) {
       valuesQuery += `, @courierNumber`
       requestNormal.input("courierNumber", courierInfo || null)
     }
-    if (hasReportTime) {
-      insertQuery += `, ReportTime`
-      valuesQuery += `, @reportTime`
-      requestNormal.input("reportTime", reportTime)
-    }
+    insertQuery += `, ReportTime`
+    valuesQuery += `, @reportTime`
+    requestNormal.input("reportTime", reportTime)
 
     // 动态拼接正常流程字段
     if (hasMaterialCode) { insertQuery += `, MaterialCode`; valuesQuery += `, @materialCode`; requestNormal.input("materialCode", finalMaterialCode) }

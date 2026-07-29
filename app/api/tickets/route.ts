@@ -19,6 +19,8 @@ interface TicketDbRow {
   CourierNumber: string | null
   Status: string | null
   ReportTime: Date | string | null
+  SubmitDate: Date | string | null
+  CreatedAt: Date | string | null
   ProductSN: string | null
   WorkOrderNumber: string | null
   BatchId: string | null
@@ -87,6 +89,12 @@ interface MappedTicket {
   updatedAt: string | null
 }
 
+function toIsoDate(value: Date | string | null): string | null {
+  if (!value) return null
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
 // GET /api/tickets
 // 获取所有维修工单
 export async function GET() {
@@ -121,10 +129,6 @@ export async function GET() {
 
       // 构建查询，使用实际的列名（显式列出，避免 SELECT *）
       const selectColumns = actualColumns.map((col: string) => `[${col}]`).join(', ')
-      const orderByCol = actualColumns.find(
-        (col: string) => col.toLowerCase().includes('time') || col.toLowerCase().includes('report')
-      ) ?? actualColumns[actualColumns.length - 1]
-
       const ticketRequest = pool.request()
       if (reporterOnly) {
         ticketRequest.input("authUserId", sql.Int, authUserId)
@@ -133,7 +137,7 @@ export async function GET() {
         SELECT ${selectColumns}
         FROM [dbo].[Repair_Tickets]
         ${reporterOnly ? "WHERE [ReportByUserID] = @authUserId" : ""}
-        ORDER BY [${orderByCol}] DESC
+        ORDER BY [ReportTime] DESC, [Id] DESC
       `)
 
       // 将原始列名映射到标准字段名
@@ -141,7 +145,8 @@ export async function GET() {
         const mapped: TicketDbRow = {
           Id: null, DeviceSN: null, ModelName: null, ProjectLocation: null,
           FaultDescription: null, ReportByUserID: null, CourierCompany: null,
-          CourierNumber: null, Status: null, ReportTime: null, ProductSN: null,
+          CourierNumber: null, Status: null, ReportTime: null, SubmitDate: null,
+          CreatedAt: null, ProductSN: null,
           WorkOrderNumber: null, BatchId: null, ContactInfo: null, SenderAddress: null,
           Problem: null, CustomerName: null, SignedReportPhoto: null, Quantity: null,
           WarehouseShippedAt: null, BusinessReviewedAt: null, TechnicianCompletedAt: null,
@@ -178,6 +183,10 @@ export async function GET() {
             mapped.Status = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'reporttime' || lowerCol === 'report_time') {
             mapped.ReportTime = (row[actualCol] as Date | string | null) ?? null
+          } else if (lowerCol === 'submitdate' || lowerCol === 'submit_date') {
+            mapped.SubmitDate = (row[actualCol] as Date | string | null) ?? null
+          } else if (lowerCol === 'createdat' || lowerCol === 'created_at') {
+            mapped.CreatedAt = (row[actualCol] as Date | string | null) ?? null
           } else if (lowerCol === 'productsn' || lowerCol === 'product_sn') {
             mapped.ProductSN = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'workordernumber' || lowerCol === 'work_order_number') {
@@ -400,6 +409,10 @@ export async function GET() {
 
       // ✅ 使用 normalizeTicketStatus 统一映射，消除 Magic String if-else 链（Rule 4）
       const mappedStatus: TicketStatus = normalizeTicketStatus(row.Status ?? "") ?? TicketStatus.CREATED
+      const reportedAt = toIsoDate(row.ReportTime)
+        ?? toIsoDate(row.SubmitDate)
+        ?? toIsoDate(row.CreatedAt)
+        ?? ""
 
       return {
         id: idStr,
@@ -415,7 +428,7 @@ export async function GET() {
         reportedBy: reporterName,
         reportedByUsername: reporterInfo?.username ?? "",
         reportedByUserId: row.ReportByUserID != null ? String(row.ReportByUserID) : "",
-        reportedAt: row.ReportTime ? new Date(row.ReportTime as string).toISOString() : new Date().toISOString(),
+        reportedAt,
         courierCompany: row.CourierCompany ?? "",
         trackingNumber: row.CourierNumber ?? "",
         expectedCompletionDate: delayInfo?.delayTo ?? null,
