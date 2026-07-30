@@ -14,6 +14,7 @@ import DatabaseManager from "@/components/admin/database-manager";
 import WarehouseBatchConfirm from "@/components/warehouse-batch-confirm";
 import WarehouseBatchShipping from "@/components/warehouse-batch-shipping";
 import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
+import { WorkOrderCardStack } from "@/components/work-order-card-stack";
 import { TicketStatus } from "@/lib/enums";
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar";
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
@@ -292,17 +293,17 @@ export default function WarehouseDashboard() {
                   </p>
                 </div>
               ) : (
-                <div className="space-y-3">
+                <WorkOrderCardStack>
                   {filteredPendingBatches.map((batch, index) => {
                     // 调试：打印batch信息
                     if (index === 0) {
                       console.log('[Warehouse Dashboard] 第一个批次数据:', batch)
                     }
                     // 生成唯一key：使用时间戳确保绝对唯一
-                    const uniqueKey = `pending-${batch.batchId}-${batch.createdAt}-${index}`
+                    const uniqueKey = `pending-${batch.batchId}`
                     
                     return (
-                      <Card key={uniqueKey} className="hover:border-primary/50 transition-colors cursor-pointer" onClick={() => {
+                      <Card key={uniqueKey} className="cursor-pointer" onClick={() => {
                         setSelectedBatchId(batch.batchId);
                         setSelectedMode("confirm");
                       }}>
@@ -328,7 +329,7 @@ export default function WarehouseDashboard() {
                       </Card>
                     )
                   })}
-                </div>
+                </WorkOrderCardStack>
               )}
             </CardContent>
           </Card>
@@ -360,13 +361,13 @@ export default function WarehouseDashboard() {
                   </p>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {filteredShippingBatches.map((batch, index) => {
-                    const uniqueKey = `shipping-${batch.batchId}-${batch.createdAt}-${index}`
+                <WorkOrderCardStack>
+                  {filteredShippingBatches.map((batch) => {
+                    const uniqueKey = `shipping-${batch.batchId}`
                     const isRmaBatch = batch.status === TicketStatus.PENDING_FACTORY
                       || batch.status === "pending_factory"
                     return (
-                      <Card key={uniqueKey} className="hover:border-primary/50 transition-colors cursor-pointer" onClick={() => {
+                      <Card key={uniqueKey} className="cursor-pointer" onClick={() => {
                         setSelectedBatchId(batch.batchId);
                         setSelectedMode("shipping");
                       }}>
@@ -396,7 +397,7 @@ export default function WarehouseDashboard() {
                       </Card>
                     )
                   })}
-                </div>
+                </WorkOrderCardStack>
               )}
             </CardContent>
           </Card>
@@ -428,11 +429,11 @@ export default function WarehouseDashboard() {
                   </p>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {filteredCompletedBatches.map((batch, index) => {
-                    const uniqueKey = `completed-${batch.batchId}-${batch.createdAt}-${index}`
+                <WorkOrderCardStack>
+                  {filteredCompletedBatches.map((batch) => {
+                    const uniqueKey = `completed-${batch.batchId}`
                     return (
-                      <Card key={uniqueKey} className="hover:border-primary/50 transition-colors cursor-pointer" onClick={() => {
+                      <Card key={uniqueKey} className="cursor-pointer" onClick={() => {
                         setSelectedBatchId(batch.batchId);
                         setSelectedMode("view");
                       }}>
@@ -458,7 +459,7 @@ export default function WarehouseDashboard() {
                       </Card>
                     )
                   })}
-                </div>
+                </WorkOrderCardStack>
               )}
             </CardContent>
           </Card>
@@ -490,9 +491,9 @@ export default function WarehouseDashboard() {
                   </p>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {filteredAllBatches.map((batch, index) => {
-                    const uniqueKey = `all-${batch.batchId}-${batch.createdAt}-${index}`
+                <WorkOrderCardStack>
+                  {filteredAllBatches.map((batch) => {
+                    const uniqueKey = `all-${batch.batchId}`
                     // 根据状态确定查看模式和Badge
                     const getStatusInfo = (status: string) => {
                       if (status === TicketStatus.CREATED || status === TicketStatus.WAREHOUSE_CONFIRMING) {
@@ -509,7 +510,7 @@ export default function WarehouseDashboard() {
                     const StatusIcon = statusInfo.icon
                     
                     return (
-                      <Card key={uniqueKey} className="hover:border-primary/50 transition-colors cursor-pointer" onClick={() => {
+                      <Card key={uniqueKey} className="cursor-pointer" onClick={() => {
                         setSelectedBatchId(batch.batchId);
                         setSelectedMode(statusInfo.mode);
                       }}>
@@ -535,7 +536,7 @@ export default function WarehouseDashboard() {
                       </Card>
                     )
                   })}
-                </div>
+                </WorkOrderCardStack>
               )}
             </CardContent>
           </Card>

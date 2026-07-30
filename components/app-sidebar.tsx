@@ -47,10 +47,10 @@ export default function AppSidebar({ activeTab, onTabChange, userType }: AppSide
   const userName = user?.realName || user?.id || null
 
   return (
-    <aside className="fixed left-0 top-0 z-30 h-full w-64 flex-col border-r border-border dark:border-border bg-card dark:bg-card hidden md:flex">
+    <aside className="fixed left-0 top-0 z-30 h-full w-64 flex-col border-r border-border bg-card shadow-[8px_0_28px_-28px_rgba(15,23,42,0.7)] dark:border-border dark:bg-card hidden md:flex">
       <div className="flex h-16 items-center border-b border-border dark:border-border px-6">
-        <div className="flex items-center gap-2">
-          <img src="/icon.svg" alt="Logo" className="h-6 w-6" />
+        <div className="group flex items-center gap-2">
+          <img src="/icon.svg" alt="Logo" className="h-6 w-6 transition-transform duration-300 group-hover:rotate-6 group-hover:scale-110 motion-reduce:transform-none" />
           <span className="text-lg font-semibold">智能维修系统</span>
         </div>
       </div>
@@ -65,13 +65,13 @@ export default function AppSidebar({ activeTab, onTabChange, userType }: AppSide
                 <button
                   onClick={() => onTabChange(item.id)}
                   className={cn(
-                    "flex w-full items-center gap-3 rounded-md px-3 py-2 transition-colors text-left",
+                    "group flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left outline-none transition-[color,background-color,box-shadow,transform] duration-200 ease-out hover:translate-x-1 hover:shadow-sm active:translate-x-0 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-primary/30 motion-reduce:transform-none motion-reduce:transition-none",
                     isActive
-                      ? "bg-primary text-primary-foreground dark:bg-primary dark:text-primary-foreground"
+                      ? "bg-primary text-primary-foreground shadow-md ring-1 ring-primary/20 dark:bg-primary dark:text-primary-foreground"
                       : "hover:bg-muted dark:hover:bg-muted"
                   )}
                 >
-                  <Icon className={cn("h-5 w-5", isActive ? "" : "text-muted-foreground")} />
+                  <Icon className={cn("h-5 w-5 transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none", isActive ? "" : "text-muted-foreground")} />
                   <span>{item.label}</span>
                 </button>
               </li>
@@ -85,21 +85,21 @@ export default function AppSidebar({ activeTab, onTabChange, userType }: AppSide
             <button
               onClick={() => onTabChange("recycle")}
               className={cn(
-                "flex w-full items-center gap-3 rounded-md px-3 py-2 transition-colors text-left",
+                "group flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left outline-none transition-[color,background-color,box-shadow,transform] duration-200 ease-out hover:translate-x-1 hover:shadow-sm active:translate-x-0 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-primary/30 motion-reduce:transform-none motion-reduce:transition-none",
                 activeTab === "recycle"
-                  ? "bg-primary text-primary-foreground dark:bg-primary dark:text-primary-foreground"
+                  ? "bg-primary text-primary-foreground shadow-md ring-1 ring-primary/20 dark:bg-primary dark:text-primary-foreground"
                   : "hover:bg-muted dark:hover:bg-muted"
               )}
             >
-              <Trash2 className={cn("h-5 w-5", activeTab === "recycle" ? "" : "text-muted-foreground")} />
+              <Trash2 className={cn("h-5 w-5 transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none", activeTab === "recycle" ? "" : "text-muted-foreground")} />
               <span>工单回收站</span>
             </button>
           </div>
         )}
       </nav>
       <div className="border-t border-border dark:border-border p-4 space-y-3">
-        <div className="flex items-center gap-3 rounded-md bg-muted dark:bg-muted p-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary">
+        <div className="group flex items-center gap-3 rounded-lg border border-transparent bg-muted p-3 transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-primary/15 hover:shadow-md motion-reduce:transform-none dark:bg-muted">
+          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none">
             <span className="text-sm font-medium text-primary-foreground">
               {userName?.substring(0, 2) || "用户"}
             </span>

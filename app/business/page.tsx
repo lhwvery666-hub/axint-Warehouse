@@ -6,8 +6,8 @@ import { useAuth } from "@/context/auth-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UserRole, TicketStatus, normalizeTicketStatus, TICKET_STATUS_LABELS } from "@/lib/enums";
 import {
@@ -19,7 +19,6 @@ import {
   ChevronRight,
   DollarSign,
   Loader2,
-  Search,
   TrendingUp,
   RefreshCw,
   Receipt,
@@ -29,6 +28,10 @@ import { useRepairContext } from "@/context/RepairContext";
 import BusinessBatchReview from "@/components/business-batch-review";
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
+import { WorkOrderFilterBar } from "@/components/work-order-filter-bar";
+import { WorkOrderCardStack } from "@/components/work-order-card-stack";
+import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
+import { ALL_REPAIR_STATUS_FILTER, matchesFinancialFollowupFilters, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
 
 interface BatchTicket {
   batchId: string;
@@ -36,6 +39,14 @@ interface BatchTicket {
   projectLocation: string;
   deviceCount: number;
   category: string;
+  clientName?: string | null;
+  customerName?: string;
+  reportedBy?: string;
+  reportedByUsername?: string;
+  reportedByUserId?: string;
+  deviceSerials?: string;
+  deviceModels?: string;
+  statuses?: string;
   createdAt: string;
   status: string;
 }
@@ -60,7 +71,10 @@ export default function BusinessDashboard() {
   // ── 工单列表（数据总览 Tab 使用） ────────────────────────────────────────────
   const [allBatches, setAllBatches] = useState<BatchTicket[]>([]);
   const [loadingBatches, setLoadingBatches] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [workOrderQuery, setWorkOrderQuery] = useState("");
+  const [customerQuery, setCustomerQuery] = useState("");
+  const [deviceQuery, setDeviceQuery] = useState("");
+  const [filterStatus, setFilterStatus] = useState(ALL_REPAIR_STATUS_FILTER);
 
   // ── 待审核批次（待审核批次 Tab 使用） ─────────────────────────────────────────
   const [pendingBatches, setPendingBatches] = useState<BatchTicket[]>([]);
@@ -69,6 +83,11 @@ export default function BusinessDashboard() {
   // ── 财务跟进批次（财务跟进 Tab 使用）：已授权发货但收款/开票未结清 ──────────────
   const [followupBatches, setFollowupBatches] = useState<FollowupBatchTicket[]>([]);
   const [loadingFollowup, setLoadingFollowup] = useState(false);
+  const [followupFilters, setFollowupFilters] = useState({
+    pendingShipment: false,
+    unpaid: false,
+    notInvoiced: false,
+  });
 
   // ── 选中批次打开审核详情 ──────────────────────────────────────────────────────
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
@@ -224,15 +243,15 @@ export default function BusinessDashboard() {
     );
   }
 
-  const filteredBatches = allBatches.filter((b) => {
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      b.batchId.toLowerCase().includes(q) ||
-      (b.projectName || "").toLowerCase().includes(q) ||
-      (b.projectLocation || "").toLowerCase().includes(q)
-    );
-  });
+  const filteredBatches = allBatches.filter((batch) => matchesRepairListFilters(batch, {
+    workOrderQuery,
+    customerQuery,
+    deviceQuery,
+    status: filterStatus,
+  }));
+  const filteredFollowupBatches = followupBatches.filter((batch) =>
+    matchesFinancialFollowupFilters(batch, followupFilters),
+  );
 
   return (
     <div className="flex-1 overflow-auto">
@@ -282,7 +301,7 @@ export default function BusinessDashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-amber-600">{stats.followupTickets}</div>
-              <p className="text-xs text-muted-foreground mt-1">已发货但未结清收款/开票</p>
+              <p className="text-xs text-muted-foreground mt-1">待发货或未结清收款/开票</p>
             </CardContent>
           </Card>
 
@@ -326,16 +345,17 @@ export default function BusinessDashboard() {
 
           {/* ── Tab 1：所有工单列表 ─────────────────────────────────────────────── */}
           <TabsContent value="overview" className="space-y-4">
-            {/* 搜索框 */}
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="搜索工单号、批次号、序列号或故障描述..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-10"
-              />
-            </div>
+            <WorkOrderFilterBar
+              workOrderQuery={workOrderQuery}
+              customerQuery={customerQuery}
+              deviceQuery={deviceQuery}
+              status={filterStatus}
+              statusOptions={REPAIR_STATUS_FILTER_OPTIONS}
+              onWorkOrderQueryChange={setWorkOrderQuery}
+              onCustomerQueryChange={setCustomerQuery}
+              onDeviceQueryChange={setDeviceQuery}
+              onStatusChange={setFilterStatus}
+            />
 
             {/* 列表 */}
             {loadingBatches ? (
@@ -347,37 +367,35 @@ export default function BusinessDashboard() {
               <div className="text-center py-12">
                 <Package className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
                 <p className="text-muted-foreground">
-                  {searchQuery ? "未找到匹配的工单" : "暂无批次工单"}
+                  {(workOrderQuery || customerQuery || deviceQuery || filterStatus !== ALL_REPAIR_STATUS_FILTER) ? "未找到匹配的工单" : "暂无批次工单"}
                 </p>
               </div>
             ) : (
-              <div className="grid gap-3">
-                {filteredBatches.map((batch, idx) => (
+              <WorkOrderCardStack>
+                {filteredBatches.map((batch) => (
                   <Card
-                    key={`batch-${batch.batchId}-${idx}`}
-                    className="hover:border-primary/50 transition-colors cursor-pointer"
+                    key={`batch-${batch.batchId}`}
+                    className="cursor-pointer"
                     onClick={() => setSelectedBatchId(batch.batchId)}
                   >
-                    <CardContent className="p-4">
-                      <div className="flex items-center justify-between">
-                        <div className="flex-1 space-y-2">
-                          <div className="flex items-center gap-3 flex-wrap">
-                            <h3 className="font-semibold text-lg">{batch.batchId}</h3>
-                            {getStatusBadge(batch.status)}
-                            <Badge variant="secondary">{batch.deviceCount} 台设备</Badge>
-                          </div>
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-sm text-muted-foreground">
-                            <div><span className="font-medium">项目：</span>{batch.projectName || batch.projectLocation}</div>
-                            <div><span className="font-medium">类别：</span>{batch.category}</div>
-                            <div><span className="font-medium">创建时间：</span>{format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}</div>
-                          </div>
-                        </div>
-                        <ChevronRight className="h-5 w-5 text-muted-foreground ml-2 shrink-0" />
-                      </div>
-                    </CardContent>
+                    <BatchWorkOrderCardContent
+                      batchId={batch.batchId}
+                      deviceCount={batch.deviceCount}
+                      customerName={batch.customerName || batch.clientName}
+                      projectName={batch.projectName}
+                      projectLocation={batch.projectLocation}
+                      reportedBy={batch.reportedBy}
+                      reportedByUsername={batch.reportedByUsername}
+                      deviceSerials={batch.deviceSerials}
+                      deviceModels={batch.deviceModels}
+                      category={batch.category}
+                      statusNode={getStatusBadge(batch.status)}
+                      createdAt={`创建时间：${format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}`}
+                      trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
+                    />
                   </Card>
                 ))}
-              </div>
+              </WorkOrderCardStack>
             )}
           </TabsContent>
 
@@ -394,95 +412,128 @@ export default function BusinessDashboard() {
                 <p className="text-muted-foreground">暂无待审核的批次工单</p>
               </div>
             ) : (
-              <div className="grid gap-3">
-                {pendingBatches.map((batch, idx) => (
+              <WorkOrderCardStack>
+                {pendingBatches.map((batch) => (
                   <Card
-                    key={`pending-${batch.batchId}-${idx}`}
-                    className="hover:border-primary/50 transition-colors cursor-pointer"
+                    key={`pending-${batch.batchId}`}
+                    className="cursor-pointer"
                     onClick={() => setSelectedBatchId(batch.batchId)}
                   >
-                    <CardContent className="p-4">
-                      <div className="flex items-center justify-between">
-                        <div className="flex-1 space-y-2">
-                          <div className="flex items-center gap-3 flex-wrap">
-                            <h3 className="font-semibold text-lg">{batch.batchId}</h3>
-                            <Badge variant="outline" className="bg-purple-50 border-purple-300 text-purple-800">
-                              <DollarSign className="w-3 h-3 mr-1" />待商务审核
-                            </Badge>
-                            <Badge variant="secondary">{batch.deviceCount} 台设备</Badge>
-                          </div>
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-sm text-muted-foreground">
-                            <div><span className="font-medium">项目：</span>{batch.projectName || batch.projectLocation}</div>
-                            <div><span className="font-medium">类别：</span>{batch.category}</div>
-                            <div><span className="font-medium">创建时间：</span>{format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}</div>
-                          </div>
-                        </div>
-                        <ChevronRight className="h-5 w-5 text-muted-foreground ml-2 shrink-0" />
-                      </div>
-                    </CardContent>
+                    <BatchWorkOrderCardContent
+                      batchId={batch.batchId}
+                      deviceCount={batch.deviceCount}
+                      customerName={batch.customerName || batch.clientName}
+                      projectName={batch.projectName}
+                      projectLocation={batch.projectLocation}
+                      reportedBy={batch.reportedBy}
+                      reportedByUsername={batch.reportedByUsername}
+                      deviceSerials={batch.deviceSerials}
+                      deviceModels={batch.deviceModels}
+                      category={batch.category}
+                      statusNode={(
+                        <Badge variant="outline" className="bg-purple-50 border-purple-300 text-purple-800">
+                          <DollarSign className="w-3 h-3 mr-1" />待商务审核
+                        </Badge>
+                      )}
+                      createdAt={`创建时间：${format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}`}
+                      trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
+                    />
                   </Card>
                 ))}
-              </div>
+              </WorkOrderCardStack>
             )}
           </TabsContent>
 
           {/* ── Tab 3：财务跟进 ─────────────────────────────────────────────────── */}
           <TabsContent value="followup" className="space-y-4">
-            <Alert>
-              <Info className="h-4 w-4" />
-              <AlertDescription>
+            <Alert className="flex flex-wrap items-center gap-3">
+              <Info className="h-4 w-4 shrink-0" />
+              <AlertDescription className="min-w-0 flex-1">
                 以下批次已授权发货（或已完成），但收款/开票尚未结清，请跟进后在批次详情里补充信息。免费维修批次不会出现在此列表。
               </AlertDescription>
+              <div className="flex flex-wrap items-center gap-2" aria-label="财务跟进筛选">
+                <span className="mr-1 text-xs text-muted-foreground">多选为“且”</span>
+                <label className="flex cursor-pointer items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm transition-colors hover:bg-accent">
+                  <Checkbox
+                    checked={followupFilters.pendingShipment}
+                    onCheckedChange={(checked) => setFollowupFilters((current) => ({
+                      ...current,
+                      pendingShipment: checked === true,
+                    }))}
+                  />
+                  待发货
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm transition-colors hover:bg-accent">
+                  <Checkbox
+                    checked={followupFilters.unpaid}
+                    onCheckedChange={(checked) => setFollowupFilters((current) => ({
+                      ...current,
+                      unpaid: checked === true,
+                    }))}
+                  />
+                  未收款
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm transition-colors hover:bg-accent">
+                  <Checkbox
+                    checked={followupFilters.notInvoiced}
+                    onCheckedChange={(checked) => setFollowupFilters((current) => ({
+                      ...current,
+                      notInvoiced: checked === true,
+                    }))}
+                  />
+                  未开票
+                </label>
+              </div>
             </Alert>
             {loadingFollowup ? (
               <div className="flex items-center justify-center py-12">
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
                 <span className="ml-2 text-muted-foreground">加载中...</span>
               </div>
-            ) : followupBatches.length === 0 ? (
+            ) : filteredFollowupBatches.length === 0 ? (
               <div className="text-center py-12">
                 <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />
-                <p className="text-muted-foreground">暂无需要跟进的财务事项</p>
+                <p className="text-muted-foreground">
+                  {followupBatches.length === 0 ? "暂无需要跟进的财务事项" : "暂无符合所选条件的财务事项"}
+                </p>
               </div>
             ) : (
-              <div className="grid gap-3">
-                {followupBatches.map((batch, idx) => (
+              <WorkOrderCardStack>
+                {filteredFollowupBatches.map((batch) => (
                   <Card
-                    key={`followup-${batch.batchId}-${idx}`}
-                    className="hover:border-primary/50 transition-colors cursor-pointer"
+                    key={`followup-${batch.batchId}`}
+                    className="cursor-pointer"
                     onClick={() => setSelectedBatchId(batch.batchId)}
                   >
-                    <CardContent className="p-4">
-                      <div className="flex items-center justify-between">
-                        <div className="flex-1 space-y-2">
-                          <div className="flex items-center gap-3 flex-wrap">
-                            <h3 className="font-semibold text-lg">{batch.batchId}</h3>
-                            {getStatusBadge(batch.status)}
-                            <Badge variant="secondary">{batch.deviceCount} 台设备</Badge>
-                            {batch.isPaymentReceived ? (
-                              <Badge variant="outline" className="bg-green-50 border-green-300 text-green-800">已收款</Badge>
-                            ) : (
-                              <Badge variant="outline" className="bg-red-50 border-red-300 text-red-800">未收款</Badge>
-                            )}
-                            {batch.isInvoiced ? (
-                              <Badge variant="outline" className="bg-green-50 border-green-300 text-green-800">已开票</Badge>
-                            ) : (
-                              <Badge variant="outline" className="bg-red-50 border-red-300 text-red-800">未开票</Badge>
-                            )}
-                          </div>
-                          <div className="grid grid-cols-1 md:grid-cols-4 gap-2 text-sm text-muted-foreground">
-                            <div><span className="font-medium">项目：</span>{batch.projectName || batch.projectLocation}</div>
-                            <div><span className="font-medium">客户：</span>{batch.clientName || "—"}</div>
-                            <div><span className="font-medium">金额：</span>{batch.totalCost ? `¥${batch.totalCost}` : "—"}</div>
-                            <div><span className="font-medium">创建时间：</span>{format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}</div>
-                          </div>
+                    <BatchWorkOrderCardContent
+                      batchId={batch.batchId}
+                      deviceCount={batch.deviceCount}
+                      customerName={batch.customerName || batch.clientName}
+                      projectName={batch.projectName}
+                      projectLocation={batch.projectLocation}
+                      reportedBy={batch.reportedBy}
+                      reportedByUsername={batch.reportedByUsername}
+                      deviceSerials={batch.deviceSerials}
+                      deviceModels={batch.deviceModels}
+                      category={batch.category}
+                      statusNode={(
+                        <div className="flex flex-wrap gap-1">
+                          {getStatusBadge(batch.status)}
+                          <Badge variant="outline" className={batch.isPaymentReceived ? "bg-green-50 border-green-300 text-green-800" : "bg-red-50 border-red-300 text-red-800"}>
+                            {batch.isPaymentReceived ? "已收款" : "未收款"}
+                          </Badge>
+                          <Badge variant="outline" className={batch.isInvoiced ? "bg-green-50 border-green-300 text-green-800" : "bg-red-50 border-red-300 text-red-800"}>
+                            {batch.isInvoiced ? "已开票" : "未开票"}
+                          </Badge>
                         </div>
-                        <ChevronRight className="h-5 w-5 text-muted-foreground ml-2 shrink-0" />
-                      </div>
-                    </CardContent>
+                      )}
+                      statusDetails={`金额：${batch.totalCost ? `¥${batch.totalCost}` : "—"}`}
+                      createdAt={`创建时间：${format(new Date(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}`}
+                      trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
+                    />
                   </Card>
                 ))}
-              </div>
+              </WorkOrderCardStack>
             )}
           </TabsContent>
         </Tabs>

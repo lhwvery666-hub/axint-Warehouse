@@ -44,7 +44,7 @@ export default function BottomNav({ activeTab, onTabChange, userType }: BottomNa
       ]
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-card border-t border-border max-w-md mx-auto">
+    <nav className="fixed bottom-0 left-0 right-0 z-50 mx-auto max-w-md border-t border-border bg-card/90 shadow-[0_-14px_34px_-24px_rgba(15,23,42,0.7)] backdrop-blur-xl">
       <div className="flex items-center justify-around h-16">
         {tabs.map((tab) => {
           const Icon = tab.icon
@@ -60,19 +60,20 @@ export default function BottomNav({ activeTab, onTabChange, userType }: BottomNa
                   onTabChange(tab.id as "home" | "repair" | "profile");
                 }
               }}
-              className={`flex flex-col items-center justify-center gap-1 w-full h-full transition-colors ${
-                isActive ? "text-primary" : "text-muted-foreground hover:text-foreground"
+              className={`group relative flex h-full w-full flex-col items-center justify-center gap-1 overflow-hidden transition-[color,background-color,transform] duration-200 active:scale-[0.96] motion-reduce:transform-none motion-reduce:transition-none ${
+                isActive ? "bg-primary/5 text-primary" : "text-muted-foreground hover:-translate-y-0.5 hover:bg-muted/70 hover:text-foreground"
               }`}
             >
+              <span className={`absolute inset-x-5 top-0 h-0.5 origin-center rounded-full bg-primary transition-transform duration-200 ${isActive ? "scale-x-100" : "scale-x-0 group-hover:scale-x-50"}`} />
               {tab.id === "profile" ? (
-                <Avatar className="w-5 h-5">
+                <Avatar className="h-5 w-5 transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none">
                   <AvatarImage src={userAvatar} alt="用户头像" />
                   <AvatarFallback>
                     <Icon className={`w-3 h-3 ${isActive ? "stroke-[2.5px]" : ""}`} />
                   </AvatarFallback>
                 </Avatar>
               ) : (
-                <Icon className={`w-5 h-5 ${isActive ? "stroke-[2.5px]" : ""}`} />
+                <Icon className={`h-5 w-5 transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none ${isActive ? "stroke-[2.5px]" : ""}`} />
               )}
               <span className={`text-xs ${isActive ? "font-medium" : ""}`}>{tab.id === "profile" && userRealName ? userRealName.substring(0, 2) : tab.label}</span>
             </button>

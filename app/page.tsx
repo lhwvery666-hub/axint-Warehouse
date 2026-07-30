@@ -119,7 +119,7 @@ function HomeContent() {
   }
 
   return (
-    <div className="min-h-screen bg-background flex">
+    <div className="flex h-dvh overflow-hidden bg-background">
       {/* 侧边栏 */}
       <AppSidebar 
         activeTab={activeTab} 
@@ -128,8 +128,8 @@ function HomeContent() {
       />
       
       {/* 主内容区 */}
-      <div className="flex flex-col flex-1 md:ml-64">
-        <main className="flex-1 overflow-auto">
+      <div className="flex min-h-0 flex-1 flex-col md:ml-64">
+        <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-20 md:pb-0">
           {activeTab === "home" && (
             <Dashboard onStartRepair={handleStartRepair} />
           )}

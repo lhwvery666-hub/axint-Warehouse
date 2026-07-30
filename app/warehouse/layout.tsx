@@ -70,11 +70,11 @@ export default function WarehouseLayout({
   ];
 
   return (
-    <div className="min-h-screen bg-background flex">
+    <div className="flex h-dvh overflow-hidden bg-background">
       {/* 侧边栏 - 固定定位 */}
       <aside
         className={cn(
-          "fixed left-0 top-0 h-screen border-r border-border bg-card transition-all duration-300 z-40 overflow-y-auto",
+          "fixed left-0 top-0 z-40 h-screen overflow-y-auto border-r border-border bg-card shadow-[8px_0_28px_-28px_rgba(15,23,42,0.7)] transition-all duration-300",
           sidebarOpen ? "w-64" : "w-20"
         )}
       >
@@ -84,13 +84,13 @@ export default function WarehouseLayout({
             <div className={cn("flex items-center gap-2", !sidebarOpen && "justify-center")}>
               {sidebarOpen ? (
                 <>
-                  <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary shadow-sm transition-transform duration-300 hover:rotate-6 hover:scale-110 motion-reduce:transform-none">
                     <span className="text-primary-foreground font-bold text-lg">N</span>
                   </div>
                   <span className="font-bold text-lg">智能维修系统</span>
                 </>
               ) : (
-                <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary shadow-sm transition-transform duration-300 hover:rotate-6 hover:scale-110 motion-reduce:transform-none">
                   <span className="text-primary-foreground font-bold text-lg">N</span>
                 </div>
               )}
@@ -115,13 +115,13 @@ export default function WarehouseLayout({
                   key={item.id}
                   onClick={() => setActiveTab(item.id)}
                   className={cn(
-                    "w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-left",
+                    "group flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left outline-none transition-[color,background-color,box-shadow,transform] duration-200 ease-out hover:translate-x-1 hover:shadow-sm active:translate-x-0 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-primary/30 motion-reduce:transform-none motion-reduce:transition-none",
                     isActive
-                      ? "bg-primary text-primary-foreground"
+                      ? "bg-primary text-primary-foreground shadow-md ring-1 ring-primary/20"
                       : "hover:bg-muted text-foreground"
                   )}
                 >
-                  <Icon className="h-5 w-5 flex-shrink-0" />
+                  <Icon className="h-5 w-5 flex-shrink-0 transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none" />
                   {sidebarOpen && (
                     <div className="flex-1 min-w-0">
                       <div className="font-medium">{item.title}</div>
@@ -135,8 +135,8 @@ export default function WarehouseLayout({
 
           {/* 用户信息 */}
           <div className="p-4 border-t border-border">
-            <div className={cn("flex items-center gap-3", !sidebarOpen && "justify-center")}>
-              <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+            <div className={cn("group flex items-center gap-3 rounded-lg border border-transparent p-2 transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-primary/15 hover:shadow-md motion-reduce:transform-none", !sidebarOpen && "justify-center")}>
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none">
                 <User className="h-4 w-4 text-primary" />
               </div>
               {sidebarOpen && (
@@ -169,7 +169,7 @@ export default function WarehouseLayout({
       {/* 主内容区 */}
       <main
         className={cn(
-          "flex-1 flex flex-col min-w-0 transition-all duration-300",
+          "flex h-dvh min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain transition-all duration-300",
           sidebarOpen ? "ml-64" : "ml-20"
         )}
       >

@@ -22,6 +22,7 @@ import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import BusinessBatchReview from "@/components/business-batch-review";
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar";
+import { WorkOrderCardStack } from "@/components/work-order-card-stack";
 import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
 
@@ -252,11 +253,11 @@ export default function BusinessRepairsPage() {
             </p>
           </div>
         ) : (
-          <div className="grid gap-4">
-            {filteredBatches.map((batch, index) => (
-              <Card 
-                key={`batch-${batch.batchId}-${index}`} 
-                className="hover:border-primary/50 transition-colors cursor-pointer" 
+          <WorkOrderCardStack>
+            {filteredBatches.map((batch) => (
+              <Card
+                key={`batch-${batch.batchId}`}
+                className="cursor-pointer"
                 onClick={() => setSelectedBatchId(batch.batchId)}
               >
                 <BatchWorkOrderCardContent
@@ -276,7 +277,7 @@ export default function BusinessRepairsPage() {
                 />
               </Card>
             ))}
-          </div>
+          </WorkOrderCardStack>
         )}
       </div>
     </div>

@@ -12,6 +12,7 @@ import { Calendar as CalendarComponent } from "@/components/ui/calendar"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { RepairStatusTimeline } from "@/components/repair-status-timeline"
 import { WorkOrderListRow } from "@/components/work-order-list-row"
+import { WorkOrderCardStack } from "@/components/work-order-card-stack"
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar"
 import { format, isAfter, isBefore, parseISO, subDays, subMonths } from "date-fns"
 import { cn } from "@/lib/utils"
@@ -494,9 +495,9 @@ export default function ReportPage() {
             />
 
             {/* 任务列表 —— 紧凑列表模式 */}
-            <Card className="border-border/50 dark:border-border overflow-hidden">
+            <Card className="overflow-visible border-0 bg-transparent py-0 shadow-none">
               {filteredTasks.length > 0 ? (
-                <div className="flex flex-col">
+                <WorkOrderCardStack>
                   {filteredTasks.map((task, taskIndex) => {
                     // 确保 key 永远不为空
                     const taskKey = task.id
@@ -590,9 +591,9 @@ export default function ReportPage() {
                       />
                     )
                   })}
-                </div>
+                </WorkOrderCardStack>
               ) : (
-                <CardContent className="p-8 text-center">
+                <CardContent className="rounded-xl border border-border/50 bg-card p-8 text-center">
                   <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
                     <AlertCircle className="h-8 w-8 text-muted-foreground" />
                   </div>

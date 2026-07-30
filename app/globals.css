@@ -135,3 +135,51 @@
     @apply bg-background text-foreground;
   }
 }
+
+@keyframes work-order-card-reveal {
+  from {
+    opacity: 0.2;
+    transform: translate3d(0, 2rem, -2rem) scale(0.975);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@supports (animation-timeline: view()) {
+  .work-order-card-stack > * {
+    animation: work-order-card-reveal linear both;
+    animation-timeline: view(block);
+    animation-range: entry 0% cover 20%;
+  }
+}
+
+.work-order-card-stack > *::before {
+  position: absolute;
+  inset-block: 1rem;
+  inset-inline-start: -1px;
+  width: 0.25rem;
+  border-radius: 0 999px 999px 0;
+  background: var(--primary);
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: scaleY(0.35);
+  transition: opacity 200ms ease, transform 250ms ease;
+}
+
+.work-order-card-stack > *:is(:hover, :focus-within)::before {
+  opacity: 0.8;
+  transform: scaleY(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-order-card-stack > * {
+    animation: none;
+  }
+
+  .work-order-card-stack > *::before {
+    transition: none;
+  }
+}

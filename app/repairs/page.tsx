@@ -6,33 +6,34 @@ import { useAuth } from "@/context/auth-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Search, Plus, AlertCircle, CheckCircle, Clock, X, ArrowLeft, Download } from "lucide-react";
+import { Plus, AlertCircle, CheckCircle, Clock, X, ArrowLeft, Download } from "lucide-react";
 import { useRouter } from "next/navigation";
 import CreateTicketForm from "@/components/create-ticket-form";
 import RepairDetailWrapper from "@/components/repair-detail-wrapper";
 import { TICKET_STATUS_LABELS, TicketStatus, UserRole } from "@/lib/enums";
+import { WorkOrderFilterBar } from "@/components/work-order-filter-bar";
+import { WorkOrderCardStack } from "@/components/work-order-card-stack";
+import { WorkOrderCardColumns } from "@/components/work-order-card-columns";
+import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
 
 export default function RepairsPage() {
   const { repairs, updateRepair, deleteRepair } = useRepairContext();
   const { user } = useAuth();
   const router = useRouter();
-  const [searchQuery, setSearchQuery] = useState("");
+  const [workOrderQuery, setWorkOrderQuery] = useState("");
+  const [customerQuery, setCustomerQuery] = useState("");
+  const [deviceQuery, setDeviceQuery] = useState("");
+  const [filterStatus, setFilterStatus] = useState(ALL_REPAIR_STATUS_FILTER);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [selectedRepairId, setSelectedRepairId] = useState<string | null>(null);
 
-  // 过滤维修工单：按工单号 / 批次号 / 序列号 / 故障描述检索
-  const filteredRepairs = repairs.filter(repair => {
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      (repair as any).workOrderNumber?.toLowerCase().includes(q) ||
-      (repair as any).batchId?.toLowerCase().includes(q) ||
-      (repair.deviceSerialNumber || "").toLowerCase().includes(q) ||
-      repair.problem.toLowerCase().includes(q)
-    );
-  });
+  const filteredRepairs = repairs.filter((repair) => matchesRepairListFilters(repair, {
+    workOrderQuery,
+    customerQuery,
+    deviceQuery,
+    status: filterStatus,
+  }));
 
   // 获取状态徽章（支持新状态）
   const getStatusBadge = (status: string) => {
@@ -97,7 +98,7 @@ export default function RepairsPage() {
   };
 
   return (
-    <div className="flex-1 overflow-auto">
+    <div className="h-dvh min-h-0 flex-1 overflow-y-auto overscroll-contain">
       <div className="container mx-auto py-8 px-6">
         <div className="flex items-center gap-3 mb-6">
           <Button 
@@ -147,86 +148,91 @@ export default function RepairsPage() {
           </div>
         </div>
 
-        {/* 搜索 */}
-        <div className="mb-6">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-          <Input 
-            placeholder="搜索工单号、批次号、序列号或故障描述..." 
-            className="pl-10"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
-      </div>
+        <WorkOrderFilterBar
+          className="mb-6"
+          workOrderQuery={workOrderQuery}
+          customerQuery={customerQuery}
+          deviceQuery={deviceQuery}
+          status={filterStatus}
+          statusOptions={REPAIR_STATUS_FILTER_OPTIONS}
+          onWorkOrderQueryChange={setWorkOrderQuery}
+          onCustomerQueryChange={setCustomerQuery}
+          onDeviceQueryChange={setDeviceQuery}
+          onStatusChange={setFilterStatus}
+        />
 
       {/* 简化的工单列表 - 卡片式布局 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filteredRepairs.length > 0 ? (
-          filteredRepairs.map((repair) => (
-            <Card 
-              key={repair.id} 
-              className="hover:shadow-lg transition-shadow cursor-pointer"
+      {filteredRepairs.length > 0 ? (
+        <WorkOrderCardStack>
+          {filteredRepairs.map((repair) => (
+            <Card
+              key={repair.id}
+              className="cursor-pointer"
               onClick={() => setSelectedRepairId(repair.id)}
             >
-              <CardContent className="p-5">
-                <div className="flex items-start justify-between mb-3">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-2">
-                      {getStatusBadge(repair.status)}
-                      {(repair as any).batchId && (
-                        <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 text-xs">
-                          批次
-                        </Badge>
+              <CardContent className="p-4">
+                <WorkOrderCardColumns
+                  workOrder={(
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="truncate text-base font-semibold">
+                          工单号：{repair.workOrderNumber || repair.id}
+                        </h3>
+                        {repair.batchId && (
+                          <Badge variant="outline" className="border-blue-200 bg-blue-50 text-xs text-blue-700">批次</Badge>
+                        )}
+                      </div>
+                      {repair.batchId && (
+                        <p
+                          className="cursor-pointer truncate text-xs text-blue-600 hover:underline"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            router.push(`/batch/${repair.batchId}`);
+                          }}
+                        >
+                          批次号：{repair.batchId}
+                        </p>
                       )}
                     </div>
-                    {/* 显示工单号和批次号 */}
-                    <h3 className="font-semibold text-base mb-1 line-clamp-1">
-                      工单号：{(repair as any).workOrderNumber || repair.id}
-                    </h3>
-                    {(repair as any).batchId && (
-                      <p 
-                        className="text-xs text-blue-600 mb-1 hover:underline cursor-pointer"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          router.push(`/batch/${(repair as any).batchId}`);
+                  )}
+                  customer={(
+                    <div className="space-y-1 text-sm">
+                      <p className="truncate"><span className="text-muted-foreground">客户：</span>{repair.customerName || repair.projectName || repair.projectLocation || "未填写客户"}</p>
+                      <p className="truncate text-muted-foreground">用户：{repair.reportedBy || repair.reportedByUsername || "未填写用户"}</p>
+                    </div>
+                  )}
+                  device={(
+                    <div className="space-y-1 text-sm">
+                      <p className="truncate"><span className="text-muted-foreground">SN：</span>{repair.deviceSerialNumber || "未填写"}</p>
+                      <p className="truncate text-muted-foreground">型号：{repair.deviceModel || repair.deviceName || "未填写"}</p>
+                      <p className="truncate text-xs text-muted-foreground">故障：{repair.problem || "未填写"}</p>
+                    </div>
+                  )}
+                  status={(
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        {getStatusBadge(repair.status)}
+                        <p className="text-xs text-muted-foreground">{repair.reportedAt}</p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSelectedRepairId(repair.id);
                         }}
                       >
-                        批次号：{(repair as any).batchId}
-                      </p>
-                    )}
-                    <p className="text-xs text-muted-foreground mb-2">
-                      序列号：{repair.deviceSerialNumber || "未知"}
-                    </p>
-                  </div>
-                </div>
-                
-                <div className="space-y-2 mb-4">
-                  <div className="flex items-start gap-2 text-sm">
-                    <AlertCircle className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
-                    <p className="text-muted-foreground line-clamp-2 flex-1">{repair.problem}</p>
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    {repair.reportedAt}
-                  </div>
-                </div>
-                
-                <Button 
-                  variant="outline" 
-                  size="sm" 
-                  className="w-full"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedRepairId(repair.id);
-                  }}
-                >
-                  查看详情
-                </Button>
+                        查看详情
+                      </Button>
+                    </div>
+                  )}
+                />
               </CardContent>
             </Card>
-          ))
+          ))}
+        </WorkOrderCardStack>
         ) : (
-          <Card className="md:col-span-3 border-dashed">
+          <Card className="border-dashed">
             <CardContent className="p-12 text-center">
               <AlertCircle className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
               <p className="text-muted-foreground font-medium">未找到匹配的工单</p>
@@ -234,7 +240,6 @@ export default function RepairsPage() {
             </CardContent>
           </Card>
         )}
-        </div>
 
         {/* 添加工单对话框（新建工单表单，直接写入 SQL Server） */}
       <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
