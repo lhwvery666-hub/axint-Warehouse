@@ -39,12 +39,12 @@ tsx scripts/create-test-users.ts
 
 | 角色 | 用户名 | 密码 | 说明 |
 |------|--------|------|------|
-| 管理员 | `admin` | `111111` | 系统管理员 |
-| 维修工程师 | `tech` | `111111` | 维修工程师 |
-| 仓库管理员 | `warehouse` | `111111` | 仓库管理员 |
-| 现场报告人员 | `reporter` | `111111` | 现场报告人员 |
+| 管理员 | `admin` | `TEST_USER_PASSWORD` | 系统管理员 |
+| 维修工程师 | `tech` | `TEST_USER_PASSWORD` | 维修工程师 |
+| 仓库管理员 | `warehouse` | `TEST_USER_PASSWORD` | 仓库管理员 |
+| 现场报告人员 | `reporter` | `TEST_USER_PASSWORD` | 现场报告人员 |
 
-**注意**：所有测试账号的密码统一为 `111111`，方便测试使用。
+**注意**：测试密码通过本地环境变量 `TEST_USER_PASSWORD` 提供，不得写入代码或文档。
 
 ### 方法 2：手动创建
 

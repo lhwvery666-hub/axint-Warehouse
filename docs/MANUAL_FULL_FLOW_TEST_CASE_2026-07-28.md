@@ -20,12 +20,12 @@
 
 | 角色 | 用户名 | 密码 | 主要入口 |
 | --- | --- | --- | --- |
-| 管理员 | `admin` | `111111` | `/admin/users` |
-| 维修人员 | `wx` | `111111` | `/` |
-| 仓库人员 | `ck` | `111111` | `/warehouse/dashboard` |
-| 现场人员 | `xc` | `111111` | `/report` |
-| 商务人员 | `sw` | `111111` | `/business` |
-| 第二现场人员 | `xc2` | `111111` | `/report` |
+| 管理员 | `admin` | `TEST_USER_PASSWORD` | `/admin/users` |
+| 维修人员 | `wx` | `TEST_USER_PASSWORD` | `/` |
+| 仓库人员 | `ck` | `TEST_USER_PASSWORD` | `/warehouse/dashboard` |
+| 现场人员 | `xc` | `TEST_USER_PASSWORD` | `/report` |
+| 商务人员 | `sw` | `TEST_USER_PASSWORD` | `/business` |
+| 第二现场人员 | `xc2` | `TEST_USER_PASSWORD` | `/report` |
 
 建议给不同角色分别使用不同浏览器配置文件或无痕窗口；如果只用一个窗口，每次切换角色前先退出登录。
 

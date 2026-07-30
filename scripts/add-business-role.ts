@@ -62,7 +62,7 @@ async function addBusinessRole() {
         console.log(`\n✅ 用户 "sw" 的角色已经是商务角色: ${currentRole}`)
       }
     } else {
-      console.log(`\n⚠️  用户 "sw" 不存在，请先运行 create-business-user.ts 创建该用户`)
+      console.log(`\n⚠️  用户 "sw" 不存在，请通过管理员用户管理或受控测试用户脚本创建该用户`)
     }
 
     console.log("\n✅ 商务角色检查完成！")

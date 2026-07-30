@@ -71,7 +71,7 @@ datasource db {
 
 **环境变量**:
 ```bash
-DATABASE_URL="sqlserver://localhost:1433;database=AxinRepairDB;user=AxinUser;password=AxinPassword2026!;trustServerCertificate=true"
+DATABASE_URL="sqlserver://localhost:1433;database=AxinRepairDB;user=AxinUser;password=replace-with-a-url-encoded-password;trustServerCertificate=true"
 ```
 
 **常用 Prisma 命令**:
@@ -106,14 +106,14 @@ npm run prisma:studio
 DB_SERVER=localhost
 DB_DATABASE=AxinRepairDB
 DB_USER=AxinUser
-DB_PASSWORD=AxinPassword2026!
+DB_PASSWORD=replace-with-a-strong-password
 DB_PORT=1433
 DB_ENCRYPT=false
 DB_TRUST_CERT=true
 DB_POOL_MAX=10
 
 # Prisma 连接字符串
-DATABASE_URL="sqlserver://localhost:1433;database=AxinRepairDB;user=AxinUser;password=AxinPassword2026!;trustServerCertificate=true"
+DATABASE_URL="sqlserver://localhost:1433;database=AxinRepairDB;user=AxinUser;password=replace-with-a-url-encoded-password;trustServerCertificate=true"
 ```
 
 #### 连接池配置 (`lib/db-config.ts`)

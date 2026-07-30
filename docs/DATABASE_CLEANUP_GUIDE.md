@@ -179,7 +179,7 @@ axiom-repair/
 
 ```bash
 # SQL Server 备份命令示例
-sqlcmd -S localhost -U AxinUser -P AxinPassword2026! -Q "BACKUP DATABASE AxinRepairDB TO DISK='D:\backup\AxinRepairDB_backup.bak'"
+sqlcmd -S localhost -U AxinUser -Q "BACKUP DATABASE AxinRepairDB TO DISK='D:\backup\AxinRepairDB_backup.bak'"
 ```
 
 ---

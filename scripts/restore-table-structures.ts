@@ -26,8 +26,8 @@ async function restoreTableStructures() {
             RealName NVARCHAR(100) NULL,
             PhoneNumber NVARCHAR(20) NULL,
             IsDeleted BIT DEFAULT 0,
-            CreatedAt DATETIME2 DEFAULT GETDATE(),
-            UpdatedAt DATETIME2 DEFAULT GETDATE()
+            CreatedAt DATETIME2 DEFAULT GETUTCDATE(),
+            UpdatedAt DATETIME2 DEFAULT GETUTCDATE()
           )
           PRINT 'Users 表创建成功'
         END
@@ -66,8 +66,8 @@ async function restoreTableStructures() {
             PurchaseDate DATETIME2 NULL,
             PurchasePrice DECIMAL(18,2) NULL,
             Notes NVARCHAR(MAX) NULL,
-            CreatedAt DATETIME2 DEFAULT GETDATE(),
-            UpdatedAt DATETIME2 DEFAULT GETDATE()
+            CreatedAt DATETIME2 DEFAULT GETUTCDATE(),
+            UpdatedAt DATETIME2 DEFAULT GETUTCDATE()
           )
           PRINT 'Device_Inventory 表创建成功'
         END
@@ -98,8 +98,8 @@ async function restoreTableStructures() {
             Manufacturer NVARCHAR(200) NULL,
             DefaultWarrantyMonths INT DEFAULT 12,
             IsActive BIT DEFAULT 1,
-            CreatedAt DATETIME2 DEFAULT GETDATE(),
-            UpdatedAt DATETIME2 DEFAULT GETDATE()
+            CreatedAt DATETIME2 DEFAULT GETUTCDATE(),
+            UpdatedAt DATETIME2 DEFAULT GETUTCDATE()
           )
           PRINT 'Product_Catalog 表创建成功'
         END
@@ -129,7 +129,7 @@ async function restoreTableStructures() {
             ActionNote NVARCHAR(MAX) NULL,
             DelayTo DATETIME2 NULL,
             DelayReason NVARCHAR(500) NULL,
-            CreatedAt DATETIME2 DEFAULT GETDATE()
+            CreatedAt DATETIME2 DEFAULT GETUTCDATE()
           )
           PRINT 'Repair_Ticket_History 表创建成功'
           

@@ -9,7 +9,7 @@
   - `tech` - 维修工程师
   - `warehouse` - 仓库管理员
   - `reporter` - 现场报告人员
-- ✅ 所有测试账号密码统一为 `111111`
+- ✅ 测试账号密码通过 `TEST_USER_PASSWORD` 环境变量提供
 - ✅ 密码已加密存储（bcrypt）
 
 ### 2. 快捷登录功能删除
@@ -38,10 +38,10 @@
 ### 测试账号
 | 用户名 | 密码 | 角色 | 说明 |
 |--------|------|------|------|
-| admin | 111111 | Admin | 系统管理员 |
-| tech | 111111 | Technician | 维修工程师 |
-| warehouse | 111111 | Warehouse | 仓库管理员 |
-| reporter | 111111 | Reporter | 现场报告人员 |
+| admin | `TEST_USER_PASSWORD` | Admin | 系统管理员 |
+| tech | `TEST_USER_PASSWORD` | Technician | 维修工程师 |
+| warehouse | `TEST_USER_PASSWORD` | Warehouse | 仓库管理员 |
+| reporter | `TEST_USER_PASSWORD` | Reporter | 现场报告人员 |
 
 ### 数据库表
 - ✅ `Users` - 用户表（密码加密）
@@ -96,9 +96,6 @@
 # 创建测试用户
 npm run create-test-users
 
-# 清理用户（只保留4个测试账号）
-npm run cleanup-users
-
 # 导入 Excel 数据
 npm run import-excel
 
@@ -135,7 +132,7 @@ npm run add-warranty-fields
 ### 相关API
 - `POST /api/tickets/[id]/set-manufacture-date` - 设置出厂日期
 - `POST /api/tickets/[id]/generate-repair-report` - 生成维修报告
-- `POST /api/tickets/[id]/customer-confirm` - 客户确认
+- `POST /api/tickets/reporter-confirm/[batchId]` - 现场签字确认回传
 - `GET /api/tickets/export-excel` - 导出Excel
 
 详细说明请查看：`docs/WARRANTY_WORKFLOW.md`
@@ -145,7 +142,7 @@ npm run add-warranty-fields
 1. **密码安全**：所有新创建的密码都会加密存储
 2. **密码迁移**：运行 `npm run check-passwords` 检查明文密码，使用 `npm run migrate-passwords` 加密（请先备份数据库！）
 3. **角色管理**：新注册的用户需要管理员授予角色才能登录
-4. **数据清理**：定期运行 `cleanup-users` 脚本清理多余账号
+4. **数据清理**：仅通过受控的测试数据清理流程处理测试账号，执行前必须确认目标与备份
 5. **浏览器缓存**：如果看到旧数据，请清除浏览器缓存
 6. **API安全**：所有认证API现在都统一检查 `IsDeleted` 字段，防止已注销用户访问
 7. **保修流程**：首次使用前运行 `npm run add-warranty-fields` 添加保修相关字段

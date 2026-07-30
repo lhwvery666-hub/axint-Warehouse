@@ -5,7 +5,7 @@
 - **Server (Host)**: localhost
 - **Database Name**: AxinRepairDB
 - **User**: AxinUser
-- **Password**: AxinPassword2026!
+- **Password**: Set `DB_PASSWORD` in the local environment file; never commit the real value.
 - **Port**: 1433 (默认端口)
 
 ## 配置文件

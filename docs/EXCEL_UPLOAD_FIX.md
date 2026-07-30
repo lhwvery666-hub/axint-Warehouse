@@ -159,7 +159,7 @@ npm run dev
 
 ### 3. 登录管理员账号
 - 用户名：`admin`
-- 密码：`111111`
+- 密码：通过本地 `TEST_USER_PASSWORD` 环境变量获取
 
 ### 4. 进入数据库管理页面
 导航到：`/admin/database`

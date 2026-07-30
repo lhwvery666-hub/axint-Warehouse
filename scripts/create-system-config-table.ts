@@ -37,8 +37,8 @@ async function createSystemConfigTable() {
         Category NVARCHAR(50) NOT NULL,     -- Warranty/Report/Workflow/General
         Description NVARCHAR(500),
         IsEditable BIT DEFAULT 1,
-        CreatedAt DATETIME DEFAULT GETDATE(),
-        UpdatedAt DATETIME DEFAULT GETDATE()
+        CreatedAt DATETIME DEFAULT GETUTCDATE(),
+        UpdatedAt DATETIME DEFAULT GETUTCDATE()
       )
     `);
     

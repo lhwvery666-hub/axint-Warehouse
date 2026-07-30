@@ -61,7 +61,7 @@ async function fixIdColumn() {
         ExpressCompany NVARCHAR(100),
         TrackingNumber NVARCHAR(100),
         DevicePhotos NVARCHAR(MAX),
-        CreatedAt DATETIME2 NOT NULL DEFAULT GETDATE(),
+        CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
         UpdatedAt DATETIME2,
         ProjectLocation NVARCHAR(200),
         MaterialCode NVARCHAR(100),
