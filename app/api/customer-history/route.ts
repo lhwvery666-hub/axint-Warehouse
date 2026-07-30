@@ -1,22 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from '@/lib/auth-utils'
+import { UserRole } from '@/lib/enums'
 
 // GET: 获取当前用户的历史客户信息
-export async function GET(request: NextRequest) {
-  try {
-    const userId = request.headers.get('x-user-id')
-    
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: '未登录' },
-        { status: 401 }
-      )
-    }
+export async function GET(_request: NextRequest) {
+  const authResult = await checkUserRole(ALL_USER_ROLES)
+  if (isErrorResponse(authResult)) return authResult
 
+  try {
     // 获取用户的历史客户信息，按最后使用时间排序
     const customerHistory = await prisma.customer_History.findMany({
       where: {
-        userId: parseInt(userId),
+        userId: Number(authResult.userId),
       },
       orderBy: [
         { lastUsedAt: 'desc' },
@@ -40,16 +36,10 @@ export async function GET(request: NextRequest) {
 
 // POST: 保存或更新客户信息（在创建工单时自动调用）
 export async function POST(request: NextRequest) {
-  try {
-    const userId = request.headers.get('x-user-id')
-    
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: '未登录' },
-        { status: 401 }
-      )
-    }
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER])
+  if (isErrorResponse(authResult)) return authResult
 
+  try {
     const body = await request.json()
     const { customerName, contactPerson, contactPhone, address } = body
 
@@ -60,7 +50,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const numericUserId = parseInt(userId)
+    const numericUserId = Number(authResult.userId)
     const existing = await prisma.customer_History.findFirst({
       where: { userId: numericUserId, customerName },
       select: { id: true },

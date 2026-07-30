@@ -1,23 +1,21 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
-import { cookies } from "next/headers"
 import { getUserQueryConfig } from "@/lib/field-checks"
+import { getCurrentUserRole } from "@/lib/auth-utils"
 
 // GET /api/auth/me
 // 获取当前登录用户信息（通过 session token 验证）
 export async function GET() {
+  const authenticatedUser = await getCurrentUserRole()
+  if (!authenticatedUser) {
+    return NextResponse.json(
+      { success: false, message: "未登录或会话已过期" },
+      { status: 401 }
+    )
+  }
+
   try {
-    // 从 cookie 或 header 获取用户 session token
-    // 这里简化处理，实际应该使用 JWT 或 session
-    const cookieStore = await cookies()
-    const userId = cookieStore.get("userId")?.value || null
-    
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, message: "未登录" },
-        { status: 401 }
-      )
-    }
+    const userId = authenticatedUser.userId
 
     const pool = await getDbConnection()
 

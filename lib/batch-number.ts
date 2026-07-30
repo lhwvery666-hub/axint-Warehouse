@@ -31,22 +31,6 @@ function getCSTDateKey(date: Date = new Date()): string {
 }
 
 /**
- * 确保 Batch_Number_Sequence 表存在（内联自动迁移，沿用项目里 API 内自愈迁移的惯例）。
- */
-async function ensureSequenceTable(pool: sql.ConnectionPool): Promise<void> {
-  await pool.request().query(`
-    IF NOT EXISTS (
-      SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Batch_Number_Sequence'
-    )
-      CREATE TABLE Batch_Number_Sequence (
-        DateKey      NVARCHAR(6)  NOT NULL PRIMARY KEY,
-        CurrentValue INT          NOT NULL DEFAULT 0,
-        UpdatedAt    DATETIME     NOT NULL DEFAULT GETUTCDATE()
-      )
-  `)
-}
-
-/**
  * 生成一个并发安全的顺序批次号，格式 WO+YYMMDD+0001。
  *
  * @param pool 数据库连接池
@@ -54,8 +38,6 @@ async function ensureSequenceTable(pool: sql.ConnectionPool): Promise<void> {
  *         绝不能吞掉错误继续用空号/兜底号，那样会破坏编号唯一性保证）
  */
 export async function generateSequentialBatchId(pool: sql.ConnectionPool): Promise<string> {
-  await ensureSequenceTable(pool)
-
   const dateKey = getCSTDateKey()
   const transaction = new sql.Transaction(pool)
   await transaction.begin()

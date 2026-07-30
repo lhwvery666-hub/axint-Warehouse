@@ -92,7 +92,7 @@ export async function POST(request: Request) {
     // 如果表有 CreatedAt 和 UpdatedAt 字段，添加时间戳
     if (hasCreatedAt && hasUpdatedAt) {
       insertColumns += ", CreatedAt, UpdatedAt"
-      insertValues += ", GETDATE(), GETDATE()"
+      insertValues += ", GETUTCDATE(), GETUTCDATE()"
     }
 
     // 执行插入

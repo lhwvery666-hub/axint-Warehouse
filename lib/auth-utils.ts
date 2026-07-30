@@ -3,6 +3,15 @@ import { cookies } from "next/headers"
 import { getDbConnection } from "@/lib/db-config"
 import { UserRole, normalizeUserRole } from "@/lib/enums"
 import { getUserQueryConfig } from "@/lib/field-checks"
+import { verifySessionToken } from "@/lib/session"
+
+export const ALL_USER_ROLES: readonly UserRole[] = [
+  UserRole.ADMIN,
+  UserRole.BUSINESS,
+  UserRole.REPORTER,
+  UserRole.TECHNICIAN,
+  UserRole.WAREHOUSE,
+]
 
 export interface AuthenticatedUser {
   userId: string
@@ -31,8 +40,14 @@ export async function getCurrentUserRole(): Promise<CurrentUser | null> {
   try {
     const cookieStore = await cookies()
     const userIdCookie = cookieStore.get("userId")?.value
+    const sessionUserId = verifySessionToken(cookieStore.get("session")?.value)
 
-    if (!userIdCookie || !/^\d+$/.test(userIdCookie)) {
+    if (
+      !sessionUserId ||
+      !userIdCookie ||
+      !/^\d+$/.test(userIdCookie) ||
+      sessionUserId !== userIdCookie
+    ) {
       return null
     }
 
@@ -45,7 +60,7 @@ export async function getCurrentUserRole(): Promise<CurrentUser | null> {
     ])
     const userResult = await pool
       .request()
-      .input("userId", Number(userIdCookie))
+      .input("userId", Number(sessionUserId))
       .query(`
         SELECT TOP 1 ${queryConfig.fields}
         FROM Users
@@ -77,7 +92,7 @@ export async function getCurrentUserRole(): Promise<CurrentUser | null> {
  * 验证当前用户是否具备指定角色。
  */
 export async function checkUserRole(
-  allowedRoles: UserRole[]
+  allowedRoles: readonly UserRole[]
 ): Promise<AuthenticatedUser | NextResponse> {
   const userInfo = await getCurrentUserRole()
 

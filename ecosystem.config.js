@@ -17,6 +17,20 @@
  *   pm2 stop axiom-repair           # 停止
  */
 
+const { loadEnvConfig } = require('@next/env');
+
+loadEnvConfig(__dirname);
+
+function requireEnvironmentVariable(name) {
+  const value = process.env[name];
+
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+
+  return value;
+}
+
 module.exports = {
   apps: [
     {
@@ -56,22 +70,22 @@ module.exports = {
 
         // ── SQL Server 连接 ────────────────────────────────────────────────
         // SQL Server 和 Web 服务在同一台机器时，用 localhost
-        DB_SERVER:   'localhost',
-        DB_DATABASE: 'AxinRepairDB',
-        DB_USER:     'AxinUser',
-        DB_PASSWORD: 'AxinPassword2026!',  // ← 部署前改为真实密码
-        DB_PORT:     '1433',
-        DB_ENCRYPT:     'false',
-        DB_TRUST_CERT:  'true',
-        DB_POOL_MAX:    '10',
+        DB_SERVER:   process.env.DB_SERVER || 'localhost',
+        DB_DATABASE: process.env.DB_DATABASE || 'AxinRepairDB',
+        DB_USER:     process.env.DB_USER || 'AxinUser',
+        DB_PASSWORD: process.env.DB_PASSWORD,
+        DB_PORT:     process.env.DB_PORT || '1433',
+        DB_ENCRYPT:     process.env.DB_ENCRYPT || 'false',
+        DB_TRUST_CERT:  process.env.DB_TRUST_CERT || 'true',
+        DB_POOL_MAX:    process.env.DB_POOL_MAX || '10',
 
         // Prisma 连接字符串
-        DATABASE_URL: 'sqlserver://localhost:1433;database=AxinRepairDB;user=AxinUser;password=AxinPassword2026!;trustServerCertificate=true',
+        DATABASE_URL: requireEnvironmentVariable('DATABASE_URL'),
 
         // ── 文件存储 ───────────────────────────────────────────────────────
         // 本地存储（文件保存在服务器磁盘）
-        STORAGE_MODE: 'local',
-        UPLOAD_DIR:   '',  // 留空则默认用 ./public/uploads
+        STORAGE_MODE: process.env.STORAGE_MODE || 'local',
+        UPLOAD_DIR:   process.env.UPLOAD_DIR || '',  // 留空则默认用 ./public/uploads
 
         // 如果改用 MinIO / S3，取消下面的注释并填写真实值：
         // STORAGE_MODE:        's3',

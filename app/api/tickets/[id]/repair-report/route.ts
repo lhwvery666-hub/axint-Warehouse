@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { getDbConnection } from "@/lib/db-config";
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils";
+import { UserRole } from "@/lib/enums";
 
 /**
  * GET /api/tickets/[id]/repair-report
@@ -9,6 +11,9 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const authResult = await checkUserRole(ALL_USER_ROLES);
+  if (isErrorResponse(authResult)) return authResult;
+
   try {
     const resolvedParams = await params;
     const { id } = resolvedParams;
@@ -134,6 +139,9 @@ export async function PUT(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.TECHNICIAN]);
+  if (isErrorResponse(authResult)) return authResult;
+
   try {
     const resolvedParams = await params;
     const { id } = resolvedParams;

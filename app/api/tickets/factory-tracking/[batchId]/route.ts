@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS } from "@/lib/enums"
+import { DB_FIELDS, UserRole } from "@/lib/enums"
 import { cookies } from "next/headers"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // PUT /api/tickets/factory-tracking/[batchId]
 // 保存返厂快递单号和寄出日期
@@ -9,6 +10,9 @@ export async function PUT(
   request: Request,
   context: { params: Promise<{ batchId: string }> | { batchId: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.WAREHOUSE])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const cookieStore = await cookies()
     const sessionCookie = cookieStore.get("session")
@@ -26,16 +30,6 @@ export async function PUT(
     const { factoryTrackingNum, factoryShipDate } = body
 
     const pool = await getDbConnection()
-
-    // 确保 FactoryTrackingNum / FactoryShipDate 列存在
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-                     WHERE TABLE_NAME = 'Repair_Tickets' AND COLUMN_NAME = 'FactoryTrackingNum')
-        ALTER TABLE Repair_Tickets ADD FactoryTrackingNum NVARCHAR(200) NULL;
-      IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-                     WHERE TABLE_NAME = 'Repair_Tickets' AND COLUMN_NAME = 'FactoryShipDate')
-        ALTER TABLE Repair_Tickets ADD FactoryShipDate DATETIME NULL;
-    `)
 
     await pool
       .request()

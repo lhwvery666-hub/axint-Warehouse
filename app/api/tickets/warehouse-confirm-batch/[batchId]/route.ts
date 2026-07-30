@@ -3,6 +3,7 @@ import { cookies } from "next/headers"
 import { getDbConnection } from "@/lib/db-config"
 import { DB_FIELDS, TicketStatus, UserRole, normalizeUserRole, TicketActionType, normalizeTicketStatus } from "@/lib/enums"
 import { getDeviceQuantity, sumDeviceQuantity } from "@/lib/device-quantity"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // POST /api/tickets/warehouse-confirm-batch/[batchId]
 // 仓库管理员确认批次设备并填写出厂日期
@@ -10,6 +11,9 @@ export async function POST(
   request: Request,
   context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.WAREHOUSE])
+  if (isErrorResponse(authResult)) return authResult
+
   let pool: Awaited<ReturnType<typeof getDbConnection>> | null = null
   let transaction: any | null = null
 
@@ -106,16 +110,7 @@ export async function POST(
     try {
       const operatorName = currentUser.RealName || currentUser.Username;
 
-      // 3.0 动态检测可选列是否存在（防止列未迁移时整条 UPDATE 失败）
-      // 同时自动迁移 ArrivalDate 列（到货日期）
-      await transaction.request().query(`
-        IF NOT EXISTS (
-          SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-          WHERE TABLE_NAME = 'Repair_Tickets' AND COLUMN_NAME = 'ArrivalDate'
-        )
-          ALTER TABLE Repair_Tickets ADD ArrivalDate DATETIME NULL;
-      `)
-
+      // 3.0 动态检测可选列是否存在（防止部署版本与数据库版本不一致）
       const columnCheckResult = await transaction.request().query(`
         SELECT COLUMN_NAME
         FROM INFORMATION_SCHEMA.COLUMNS

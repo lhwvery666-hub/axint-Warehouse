@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import { DB_FIELDS, UserRole, TicketStatus } from "@/lib/enums"
-import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // GET /api/tickets/shipping-info/[batchId]
 // 获取批次的发货信息
@@ -9,6 +9,9 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
 ) {
+  const authResult = await checkUserRole(ALL_USER_ROLES)
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const resolvedParams = await Promise.resolve(context.params)
 

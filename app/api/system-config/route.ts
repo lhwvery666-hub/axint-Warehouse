@@ -6,16 +6,20 @@ import {
   getAllRoles,
   getAllStatuses,
   getCompanyInfo,
-  getBusinessConfig,
-  hasPermission
+  getBusinessConfig
 } from "@/lib/system-config";
 import { getDbConnection } from "@/lib/db-config";
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils";
+import { UserRole } from "@/lib/enums";
 
 /**
  * GET /api/system-config
  * 获取系统配置
  */
 export async function GET(request: Request) {
+  const authResult = await checkUserRole(ALL_USER_ROLES);
+  if (isErrorResponse(authResult)) return authResult;
+
   try {
     const { searchParams } = new URL(request.url);
     const category = searchParams.get('category');
@@ -116,6 +120,9 @@ export async function GET(request: Request) {
  * 更新系统配置
  */
 export async function PUT(request: Request) {
+  const authResult = await checkUserRole([UserRole.ADMIN]);
+  if (isErrorResponse(authResult)) return authResult;
+
   try {
     const body = await request.json();
     const { key, value, updatedBy } = body;
@@ -158,6 +165,9 @@ export async function PUT(request: Request) {
  * 批量更新配置
  */
 export async function POST(request: Request) {
+  const authResult = await checkUserRole([UserRole.ADMIN]);
+  if (isErrorResponse(authResult)) return authResult;
+
   try {
     const body = await request.json();
     const { configs, updatedBy } = body;

@@ -1,4 +1,62 @@
 import * as sql from 'mssql';
+import { loadEnvConfig } from '@next/env';
+
+loadEnvConfig(process.cwd(), process.env.NODE_ENV !== 'production')
+
+interface ParsedDatabaseUrl {
+  server?: string
+  database?: string
+  user?: string
+  password?: string
+  port?: number
+}
+
+function parseDatabaseUrl(value: string | undefined): ParsedDatabaseUrl {
+  if (!value) {
+    return {}
+  }
+
+  const prefix = "sqlserver://"
+  if (!value.startsWith(prefix)) {
+    throw new Error("DATABASE_URL must use the sqlserver:// scheme")
+  }
+
+  const [serverAddress, ...optionParts] = value.slice(prefix.length).split(";")
+  const lastColonIndex = serverAddress.lastIndexOf(":")
+  const parsedPort = lastColonIndex > -1
+    ? Number(serverAddress.slice(lastColonIndex + 1))
+    : undefined
+  const server = lastColonIndex > -1
+    ? serverAddress.slice(0, lastColonIndex)
+    : serverAddress
+  const options = new Map<string, string>()
+
+  for (const optionPart of optionParts) {
+    const separatorIndex = optionPart.indexOf("=")
+    if (separatorIndex <= 0) {
+      continue
+    }
+
+    const key = optionPart.slice(0, separatorIndex).toLowerCase()
+    const rawValue = optionPart.slice(separatorIndex + 1)
+    options.set(key, decodeURIComponent(rawValue))
+  }
+
+  return {
+    server: server || undefined,
+    database: options.get("database"),
+    user: options.get("user"),
+    password: options.get("password"),
+    port: Number.isInteger(parsedPort) ? parsedPort : undefined,
+  }
+}
+
+const parsedDatabaseUrl = parseDatabaseUrl(process.env.DATABASE_URL)
+const databasePassword = process.env.DB_PASSWORD || parsedDatabaseUrl.password
+
+if (!databasePassword) {
+  throw new Error("DB_PASSWORD or a password in DATABASE_URL is required")
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // SQL Server 连接配置
@@ -8,11 +66,11 @@ import * as sql from 'mssql';
 // 生产部署时通过 Docker 环境变量或 PM2 ecosystem.config.js 注入。
 // ────────────────────────────────────────────────────────────────────────────
 export const dbConfig: sql.config = {
-  server:   process.env.DB_SERVER   || 'localhost',
-  database: process.env.DB_DATABASE || 'AxinRepairDB',
-  user:     process.env.DB_USER     || 'AxinUser',
-  password: process.env.DB_PASSWORD || 'AxinPassword2026!',
-  port:     parseInt(process.env.DB_PORT || '1433', 10),
+  server:   process.env.DB_SERVER   || parsedDatabaseUrl.server || 'localhost',
+  database: process.env.DB_DATABASE || parsedDatabaseUrl.database || 'AxinRepairDB',
+  user:     process.env.DB_USER     || parsedDatabaseUrl.user || 'AxinUser',
+  password: databasePassword,
+  port:     parseInt(process.env.DB_PORT || String(parsedDatabaseUrl.port || 1433), 10),
   options: {
     encrypt:                Boolean(process.env.DB_ENCRYPT === 'true'),
     trustServerCertificate: process.env.DB_TRUST_CERT !== 'false', // 内网默认 true
@@ -55,7 +113,7 @@ export async function getDbConnection(): Promise<sql.ConnectionPool> {
 
   if (!pool) {
     try {
-      pool = await (sql as any).connect(dbConfig);
+      pool = await sql.connect(dbConfig);
       console.log('✅ 数据库连接池创建成功');
     } catch (error) {
       console.error('❌ 数据库连接失败:', error);

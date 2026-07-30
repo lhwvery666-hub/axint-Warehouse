@@ -2,6 +2,8 @@ import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import { cookies } from "next/headers"
 import { getUserQueryConfig } from "@/lib/field-checks"
+import bcrypt from "bcryptjs"
+import { createSessionToken, SESSION_MAX_AGE_SECONDS } from "@/lib/session"
 
 // POST /api/auth/login
 // 使用 SQL Server Users 表进行真实登录校验
@@ -67,16 +69,7 @@ export async function POST(request: Request) {
       PhoneNumber?: string
     }
 
-    // 验证密码（支持明文和 bcrypt 加密的密码）
-    let passwordValid = false
-    if (row.Password.startsWith('$2a$') || row.Password.startsWith('$2b$') || row.Password.startsWith('$2y$')) {
-      // bcrypt 加密的密码
-      const bcrypt = require('bcryptjs')
-      passwordValid = await bcrypt.compare(password, row.Password)
-    } else {
-      // 明文密码（向后兼容）
-      passwordValid = row.Password === password
-    }
+    const passwordValid = await bcrypt.compare(password, row.Password)
 
     if (!passwordValid) {
       return NextResponse.json(
@@ -87,11 +80,18 @@ export async function POST(request: Request) {
 
     // 设置持久化 cookie（24小时有效期）
     // secure: false — 内网 HTTP 部署，Secure 标志会导致浏览器在非 HTTPS 下拒绝存储 cookie
-    const COOKIE_MAX_AGE = 60 * 60 * 24 // 24 小时（秒）
+    const COOKIE_MAX_AGE = SESSION_MAX_AGE_SECONDS
     const cookieStore = await cookies()
+    cookieStore.set("session", createSessionToken(row.UserID.toString()), {
+      httpOnly: true,
+      secure: process.env.COOKIE_SECURE === "true",
+      sameSite: "lax",
+      maxAge: COOKIE_MAX_AGE,
+      path: "/",
+    })
     cookieStore.set("userId", row.UserID.toString(), {
       httpOnly: true,
-      secure: false,
+      secure: process.env.COOKIE_SECURE === "true",
       sameSite: "lax",
       maxAge: COOKIE_MAX_AGE,
       path: "/",
@@ -99,7 +99,7 @@ export async function POST(request: Request) {
     
     cookieStore.set("userRole", row.Role || "", {
       httpOnly: true,
-      secure: false,
+      secure: process.env.COOKIE_SECURE === "true",
       sameSite: "lax",
       maxAge: COOKIE_MAX_AGE,
       path: "/",
@@ -113,7 +113,7 @@ export async function POST(request: Request) {
     }
     cookieStore.set("user", JSON.stringify(userPayload), {
       httpOnly: true,
-      secure: false,
+      secure: process.env.COOKIE_SECURE === "true",
       sameSite: "lax",
       maxAge: COOKIE_MAX_AGE,
       path: "/",

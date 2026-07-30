@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma"
 import { cookies } from "next/headers"
 import { UserRole, normalizeUserRole } from "@/lib/enums"
 import { getDbConnection } from "@/lib/db-config"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 /**
  * DELETE /api/admin/clear-tickets
@@ -17,6 +18,9 @@ import { getDbConnection } from "@/lib/db-config"
  * 使用 Prisma $transaction 保证原子性：两步同时成功或全部回滚。
  */
 export async function DELETE() {
+  const authResult = await checkUserRole([UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     // ── 1. 身份校验：读取 Cookie ──────────────────────────────────────
     const cookieStore = await cookies()

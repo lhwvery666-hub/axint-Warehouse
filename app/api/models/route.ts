@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // GET /api/models
 // 从 SQL Server 的 Product_Catalog 表获取设备型号列表（支持分类，用于三级联动）
 export async function GET() {
+  const authResult = await checkUserRole(ALL_USER_ROLES)
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     // 使用 Prisma ORM 查询 Product_Catalog
     const products = await prisma.product_Catalog.findMany({

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import * as XLSX from "xlsx";
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils";
+import { UserRole } from "@/lib/enums";
 
 // Excel 列名映射（按列索引读取）
 interface ExcelRow {
@@ -208,6 +210,9 @@ async function batchUpsertDeviceInventory(
 // POST /api/import/excel-stream
 // 处理 Excel 文件上传和导入（流式响应，带进度）
 export async function POST(request: Request) {
+  const authResult = await checkUserRole([UserRole.ADMIN]);
+  if (isErrorResponse(authResult)) return authResult;
+
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({

@@ -31,28 +31,37 @@ export async function GET() {
       .request()
       .query(`
         SELECT 
-          ${DB_FIELDS.BATCH_ID} as batchId,
-          MAX(ProjectName) as projectName,
-          MAX(ProjectLocation) as projectLocation,
-          MAX(${DB_FIELDS.CLIENT_NAME}) as clientName,
-          MAX(ContactInfo) as contactInfo,
-          SUM(COALESCE(Quantity, 1)) as deviceCount,
-          MIN(${DB_FIELDS.CREATED_AT}) as createdAt,
-          MAX(${DB_FIELDS.STATUS}) as status,
-          MAX(CAST(${DB_FIELDS.IS_PAYMENT_RECEIVED} AS INT)) as isPaymentReceived,
-          MAX(CAST(${DB_FIELDS.IS_INVOICED} AS INT)) as isInvoiced,
-          SUM(COALESCE(${DB_FIELDS.REPAIR_COST}, 0)) as totalCost,
-          MAX(BusinessReviewedAt) as reviewedAt,
-          MAX(BusinessReviewedBy) as reviewedBy
-        FROM Repair_Tickets
+          t.${DB_FIELDS.BATCH_ID} as batchId,
+          MAX(t.ProjectName) as projectName,
+          MAX(t.ProjectLocation) as projectLocation,
+          MAX(t.${DB_FIELDS.CLIENT_NAME}) as clientName,
+          MAX(COALESCE(t.${DB_FIELDS.CLIENT_NAME}, t.ProjectName)) as customerName,
+          MAX(t.ContactInfo) as contactInfo,
+          MAX(t.Category) as category,
+          MAX(u.RealName) as reportedBy,
+          MAX(u.Username) as reportedByUsername,
+          STRING_AGG(CAST(COALESCE(t.${DB_FIELDS.DEVICE_SN}, '') AS NVARCHAR(MAX)), '|') as deviceSerials,
+          STRING_AGG(CAST(COALESCE(t.${DB_FIELDS.MODEL_NAME}, di.ModelName, '') AS NVARCHAR(MAX)), '|') as deviceModels,
+          STRING_AGG(CAST(COALESCE(t.${DB_FIELDS.STATUS}, '') AS NVARCHAR(MAX)), '|') as statuses,
+          SUM(COALESCE(t.Quantity, 1)) as deviceCount,
+          MIN(t.${DB_FIELDS.CREATED_AT}) as createdAt,
+          MAX(t.${DB_FIELDS.STATUS}) as status,
+          MAX(CAST(t.${DB_FIELDS.IS_PAYMENT_RECEIVED} AS INT)) as isPaymentReceived,
+          MAX(CAST(t.${DB_FIELDS.IS_INVOICED} AS INT)) as isInvoiced,
+          SUM(COALESCE(t.${DB_FIELDS.REPAIR_COST}, 0)) as totalCost,
+          MAX(t.BusinessReviewedAt) as reviewedAt,
+          MAX(t.BusinessReviewedBy) as reviewedBy
+        FROM Repair_Tickets t
+        LEFT JOIN Users u ON u.UserID = t.${DB_FIELDS.REPORT_BY_USER_ID}
+        LEFT JOIN Device_Inventory di ON di.SerialNumber = t.${DB_FIELDS.DEVICE_SN}
         WHERE 
-          ${DB_FIELDS.BATCH_ID} IS NOT NULL 
-          AND ${DB_FIELDS.BATCH_ID} != ''
-        GROUP BY ${DB_FIELDS.BATCH_ID}
+          t.${DB_FIELDS.BATCH_ID} IS NOT NULL
+          AND t.${DB_FIELDS.BATCH_ID} != ''
+        GROUP BY t.${DB_FIELDS.BATCH_ID}
         HAVING 
-          MAX(CAST(${DB_FIELDS.IS_CHARGEABLE} AS INT)) = 1
+          MAX(CAST(t.${DB_FIELDS.IS_CHARGEABLE} AS INT)) = 1
           AND MAX(
-            CASE WHEN ${DB_FIELDS.STATUS} IN (
+            CASE WHEN t.${DB_FIELDS.STATUS} IN (
               '${TicketStatus.WAREHOUSE_SHIPPING}',
               '${TicketStatus.COMPLETED}',
               '${TicketStatus.SCRAPPED}',
@@ -61,10 +70,10 @@ export async function GET() {
             ) THEN 1 ELSE 0 END
           ) = 1
           AND (
-            MAX(CAST(${DB_FIELDS.IS_PAYMENT_RECEIVED} AS INT)) = 0 
-            OR MAX(CAST(${DB_FIELDS.IS_INVOICED} AS INT)) = 0
+            MAX(CAST(t.${DB_FIELDS.IS_PAYMENT_RECEIVED} AS INT)) = 0
+            OR MAX(CAST(t.${DB_FIELDS.IS_INVOICED} AS INT)) = 0
           )
-        ORDER BY MIN(${DB_FIELDS.CREATED_AT}) ASC
+        ORDER BY MIN(t.${DB_FIELDS.CREATED_AT}) ASC
       `)
 
     return NextResponse.json({

@@ -340,7 +340,7 @@ export async function updateConfig(key: string, value: any, updatedBy?: string):
       .input('updatedBy', updatedBy || 'system')
       .query(`
         UPDATE System_Config 
-        SET ConfigValue = @value, UpdatedAt = GETDATE(), UpdatedBy = @updatedBy
+        SET ConfigValue = @value, UpdatedAt = GETUTCDATE(), UpdatedBy = @updatedBy
         WHERE ConfigKey = @key
       `);
 

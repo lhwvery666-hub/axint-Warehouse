@@ -10,34 +10,35 @@ import sql from 'mssql'
 import bcrypt from 'bcryptjs'
 import { dbConfig } from '../lib/db-config'
 
+const testUserPassword = process.env.TEST_USER_PASSWORD
+
+if (!testUserPassword || testUserPassword.length < 12) {
+  throw new Error('TEST_USER_PASSWORD must contain at least 12 characters')
+}
+
 const testUsers = [
   {
     username: 'admin',
-    password: '111111',
     realName: '系统管理员',
     role: 'Admin'
   },
   {
     username: 'wx',
-    password: '111111',
     realName: '维修人员',
     role: 'Technician'
   },
   {
     username: 'ck',
-    password: '111111',
     realName: '仓库',
     role: 'Warehouse'
   },
   {
     username: 'xc',
-    password: '111111',
     realName: '现场',
     role: 'Reporter'
   },
   {
     username: 'sw',
-    password: '111111',
     realName: '商务',
     role: 'Business'
   }
@@ -66,7 +67,7 @@ async function createTestUsers() {
 
         // 加密密码
         const saltRounds = 10
-        const hashedPassword = await bcrypt.hash(user.password, saltRounds)
+        const hashedPassword = await bcrypt.hash(testUserPassword, saltRounds)
 
         // 检查是否有时间戳字段
         const timestampCheck = await pool
@@ -90,7 +91,7 @@ async function createTestUsers() {
             .input('role', sql.NVarChar, user.role)
             .query(`
               INSERT INTO Users (Username, Password, RealName, Role, CreatedAt, UpdatedAt)
-              VALUES (@username, @password, @realName, @role, GETDATE(), GETDATE())
+              VALUES (@username, @password, @realName, @role, GETUTCDATE(), GETUTCDATE())
             `)
         } else {
           await pool
@@ -107,7 +108,6 @@ async function createTestUsers() {
 
         console.log(`✅ 创建用户成功: ${user.username} (${user.realName}) - 角色: ${user.role}`)
         console.log(`   用户名: ${user.username}`)
-        console.log(`   密码: ${user.password}`)
         console.log('')
       } catch (error: any) {
         console.error(`❌ 创建用户 "${user.username}" 失败:`, error.message)
@@ -118,7 +118,7 @@ async function createTestUsers() {
     console.log('\n测试账号列表:')
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
     testUsers.forEach(user => {
-      console.log(`角色: ${user.role.padEnd(12)} | 用户名: ${user.username.padEnd(12)} | 密码: ${user.password}`)
+      console.log(`角色: ${user.role.padEnd(12)} | 用户名: ${user.username.padEnd(12)}`)
     })
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n')
 

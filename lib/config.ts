@@ -170,7 +170,7 @@ export async function setConfig(key: string, value: any): Promise<boolean> {
       .input('value', stringValue)
       .query(`
         UPDATE System_Config 
-        SET ConfigValue = @value, UpdatedAt = GETDATE()
+        SET ConfigValue = @value, UpdatedAt = GETUTCDATE()
         WHERE ConfigKey = @key
       `);
 

@@ -6,8 +6,10 @@ import { cookies } from "next/headers"
 export async function POST() {
   try {
     const cookieStore = await cookies()
+    cookieStore.delete("session")
     cookieStore.delete("userId")
     cookieStore.delete("userRole")  // 同时清除角色 cookie
+    cookieStore.delete("user")
 
     return NextResponse.json({
       success: true,

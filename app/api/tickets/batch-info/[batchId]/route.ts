@@ -1,19 +1,19 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import { DB_FIELDS, UserRole } from "@/lib/enums"
-import { cookies } from "next/headers"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // PUT /api/tickets/batch-info/[batchId]
 // 更新批次基本信息
 export async function PUT(
   request: Request,
-  context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
+  context: { params: Promise<{ batchId: string }> }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
+    const resolvedParams = await context.params
 
     const batchId = resolvedParams.batchId
     const body = await request.json()
@@ -23,26 +23,6 @@ export async function PUT(
       return NextResponse.json(
         { success: false, message: "批次ID不能为空" },
         { status: 400 }
-      )
-    }
-
-    // 验证用户登录和权限
-    const cookieStore = await cookies()
-    const userIdCookie = cookieStore.get("userId")?.value
-    const userRole = cookieStore.get("userRole")?.value
-
-    if (!userIdCookie) {
-      return NextResponse.json(
-        { success: false, message: "未登录" },
-        { status: 401 }
-      )
-    }
-
-    // 权限检查：只有现场人员和管理员可以修改批次基本信息
-    if (userRole !== UserRole.REPORTER && userRole !== UserRole.ADMIN) {
-      return NextResponse.json(
-        { success: false, message: "权限不足：只有现场人员和管理员可以修改批次信息" },
-        { status: 403 }
       )
     }
 

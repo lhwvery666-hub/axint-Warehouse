@@ -31,12 +31,22 @@ export async function GET() {
         SELECT 
           t1.${DB_FIELDS.BATCH_ID} as batchId,
           MAX(t1.ProjectName) as projectName,
+          MAX(t1.ClientName) as clientName,
+          MAX(COALESCE(t1.ClientName, t1.ProjectName)) as customerName,
           MAX(t1.ProjectLocation) as projectLocation,
           MAX(t1.Category) as category,
-          SUM(COALESCE(Quantity, 1)) as deviceCount,
+          MAX(u.RealName) as reportedBy,
+          MAX(u.Username) as reportedByUsername,
+          MAX(CAST(t1.${DB_FIELDS.REPORT_BY_USER_ID} AS NVARCHAR(50))) as reportedByUserId,
+          STRING_AGG(CAST(COALESCE(t1.${DB_FIELDS.DEVICE_SN}, '') AS NVARCHAR(MAX)), '|') as deviceSerials,
+          STRING_AGG(CAST(COALESCE(t1.${DB_FIELDS.MODEL_NAME}, di.ModelName, '') AS NVARCHAR(MAX)), '|') as deviceModels,
+          STRING_AGG(CAST(COALESCE(t1.${DB_FIELDS.STATUS}, '') AS NVARCHAR(MAX)), '|') as statuses,
+          SUM(COALESCE(t1.Quantity, 1)) as deviceCount,
           MIN(t1.${DB_FIELDS.CREATED_AT}) as createdAt,
           MAX(t1.${DB_FIELDS.STATUS}) as status
         FROM Repair_Tickets t1
+        LEFT JOIN Users u ON u.UserID = t1.${DB_FIELDS.REPORT_BY_USER_ID}
+        LEFT JOIN Device_Inventory di ON di.SerialNumber = t1.${DB_FIELDS.DEVICE_SN}
         WHERE 
           t1.${DB_FIELDS.BATCH_ID} IS NOT NULL 
           AND t1.${DB_FIELDS.BATCH_ID} != ''

@@ -17,23 +17,32 @@ export async function GET() {
       .request()
       .query(`
         SELECT 
-          ${DB_FIELDS.BATCH_ID} as batchId,
-          MAX(ProjectName) as projectName,
-          MAX(ProjectLocation) as projectLocation,
-          MAX(Category) as category,
-          SUM(COALESCE(Quantity, 1)) as deviceCount,
-          MIN(${DB_FIELDS.CREATED_AT}) as createdAt,
-          MAX(${DB_FIELDS.STATUS}) as status
-        FROM Repair_Tickets
+          t.${DB_FIELDS.BATCH_ID} as batchId,
+          MAX(t.ProjectName) as projectName,
+          MAX(t.ProjectLocation) as projectLocation,
+          MAX(t.${DB_FIELDS.CLIENT_NAME}) as clientName,
+          MAX(COALESCE(t.${DB_FIELDS.CLIENT_NAME}, t.ProjectName)) as customerName,
+          MAX(t.Category) as category,
+          MAX(u.RealName) as reportedBy,
+          MAX(u.Username) as reportedByUsername,
+          STRING_AGG(CAST(COALESCE(t.${DB_FIELDS.DEVICE_SN}, '') AS NVARCHAR(MAX)), '|') as deviceSerials,
+          STRING_AGG(CAST(COALESCE(t.${DB_FIELDS.MODEL_NAME}, di.ModelName, '') AS NVARCHAR(MAX)), '|') as deviceModels,
+          STRING_AGG(CAST(COALESCE(t.${DB_FIELDS.STATUS}, '') AS NVARCHAR(MAX)), '|') as statuses,
+          SUM(COALESCE(t.Quantity, 1)) as deviceCount,
+          MIN(t.${DB_FIELDS.CREATED_AT}) as createdAt,
+          MAX(t.${DB_FIELDS.STATUS}) as status
+        FROM Repair_Tickets t
+        LEFT JOIN Users u ON u.UserID = t.${DB_FIELDS.REPORT_BY_USER_ID}
+        LEFT JOIN Device_Inventory di ON di.SerialNumber = t.${DB_FIELDS.DEVICE_SN}
         WHERE 
-          ${DB_FIELDS.BATCH_ID} IS NOT NULL 
-          AND ${DB_FIELDS.BATCH_ID} != ''
+          t.${DB_FIELDS.BATCH_ID} IS NOT NULL
+          AND t.${DB_FIELDS.BATCH_ID} != ''
           AND (
-            ${DB_FIELDS.STATUS} = '${TicketStatus.BUSINESS_REVIEW}' 
-            OR ${DB_FIELDS.STATUS} = '${TicketStatus.ADMIN_REVIEW}'
+            t.${DB_FIELDS.STATUS} = '${TicketStatus.BUSINESS_REVIEW}'
+            OR t.${DB_FIELDS.STATUS} = '${TicketStatus.ADMIN_REVIEW}'
           )
-        GROUP BY ${DB_FIELDS.BATCH_ID}
-        ORDER BY MIN(${DB_FIELDS.CREATED_AT}) ASC
+        GROUP BY t.${DB_FIELDS.BATCH_ID}
+        ORDER BY MIN(t.${DB_FIELDS.CREATED_AT}) ASC
       `)
 
     return NextResponse.json({

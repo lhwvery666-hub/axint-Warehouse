@@ -1,19 +1,19 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import { DB_FIELDS, UserRole } from "@/lib/enums"
-import { cookies } from "next/headers"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // GET /api/tickets/business-info/[batchId]
 // 获取批次的商务审核信息
 export async function GET(
   request: Request,
-  context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
+  context: { params: Promise<{ batchId: string }> }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.BUSINESS])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
+    const resolvedParams = await context.params
 
     const batchId = resolvedParams.batchId
 
@@ -76,13 +76,13 @@ export async function GET(
 // 更新批次的商务审核信息
 export async function PUT(
   request: Request,
-  context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
+  context: { params: Promise<{ batchId: string }> }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.BUSINESS])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
+    const resolvedParams = await context.params
 
     const batchId = resolvedParams.batchId
     const body = await request.json()
@@ -92,25 +92,6 @@ export async function PUT(
       return NextResponse.json(
         { success: false, message: "批次ID不能为空" },
         { status: 400 }
-      )
-    }
-
-    // 验证用户登录和权限
-    const cookieStore = await cookies()
-    const userIdCookie = cookieStore.get("userId")?.value
-    const userRole = cookieStore.get("userRole")?.value
-
-    if (!userIdCookie) {
-      return NextResponse.json(
-        { success: false, message: "未登录" },
-        { status: 401 }
-      )
-    }
-
-    if (userRole !== UserRole.BUSINESS && userRole !== UserRole.ADMIN) {
-      return NextResponse.json(
-        { success: false, message: "权限不足：只有商务人员可以修改商务信息" },
-        { status: 403 }
       )
     }
 
@@ -146,7 +127,7 @@ export async function PUT(
       .input("isInvoiced", isInvoiced || false)
       .input("totalCost", totalCost || null)
       .input("clientName", clientName || null)
-      .input("reviewedBy", userIdCookie)
+      .input("reviewedBy", authResult.userId)
       .query(`
         UPDATE Repair_Tickets
         SET IsChargeable = @isChargeable,

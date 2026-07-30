@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // GET /api/device/check?sn={sn}
 // 根据序列号检查设备是否存在于 Device_Inventory，并返回基础信息
 export async function GET(request: Request) {
+  const authResult = await checkUserRole(ALL_USER_ROLES)
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const { searchParams } = new URL(request.url)
     const sn = searchParams.get("sn")
