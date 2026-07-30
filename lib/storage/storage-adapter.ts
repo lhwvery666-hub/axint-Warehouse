@@ -14,8 +14,54 @@
 import { Readable } from "stream";
 import { S3StorageClient } from "./s3-client";
 import { writeFile, mkdir } from "fs/promises";
-import { join } from "path";
+import { isAbsolute, relative, resolve, sep } from "path";
 import { existsSync } from "fs";
+
+function decodeStoredPath(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    throw new Error("存储路径编码无效")
+  }
+}
+
+export function normalizeStorageKey(value: string): string {
+  const decoded = decodeStoredPath(value.trim())
+  if (!decoded || decoded.includes("\0") || decoded.includes("\\")) {
+    throw new Error("存储路径无效")
+  }
+
+  const withoutPrefix = decoded
+    .replace(/^\/uploads\//, "")
+    .replace(/^uploads\//, "")
+    .replace(/^\/+/, "")
+  const segments = withoutPrefix.split("/")
+  if (
+    segments.length === 0 ||
+    segments.some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    throw new Error("存储路径越界")
+  }
+  return segments.join("/")
+}
+
+export function resolveLocalUploadPath(baseDir: string, storedPath: string): string {
+  if (/^https?:\/\//i.test(storedPath)) {
+    throw new Error("本地存储不接受远程 URL")
+  }
+  const resolvedBase = resolve(baseDir)
+  const fullPath = resolve(resolvedBase, normalizeStorageKey(storedPath))
+  const relativePath = relative(resolvedBase, fullPath)
+  if (
+    !relativePath ||
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
+    throw new Error("存储路径越界")
+  }
+  return fullPath
+}
 
 // ==================== 存储适配器接口 ====================
 
@@ -91,11 +137,6 @@ export class S3StorageAdapter implements StorageAdapter {
   }
 
   getUrl(filePath: string): string {
-    // 如果已经是完整 URL，直接返回
-    if (filePath.startsWith("http://") || filePath.startsWith("https://")) {
-      return filePath;
-    }
-    // 否则从路径中提取 key 并生成 URL
     const key = this.extractKeyFromUrl(filePath);
     return this.client.getPublicUrl(key);
   }
@@ -104,15 +145,20 @@ export class S3StorageAdapter implements StorageAdapter {
    * 从 URL 或路径中提取 S3 key
    */
   private extractKeyFromUrl(urlOrPath: string): string {
-    // 如果是完整 URL，提取路径部分
     if (urlOrPath.startsWith("http://") || urlOrPath.startsWith("https://")) {
-      const url = new URL(urlOrPath);
-      // 移除开头的斜杠和 bucket 名称
-      const path = url.pathname.replace(/^\/[^\/]+\//, "").replace(/^\//, "");
-      return path;
+      const candidate = new URL(urlOrPath)
+      const endpoint = new URL(process.env.S3_ENDPOINT || "")
+      const bucket = process.env.S3_BUCKET || ""
+      if (candidate.protocol !== "https:" || candidate.origin !== endpoint.origin || !bucket) {
+        throw new Error("对象存储路径来源无效")
+      }
+      const bucketPrefix = `/${bucket}/`
+      if (!candidate.pathname.startsWith(bucketPrefix)) {
+        throw new Error("对象存储路径不属于当前存储桶")
+      }
+      return normalizeStorageKey(candidate.pathname.slice(bucketPrefix.length))
     }
-    // 如果是相对路径，移除开头的 /uploads/ 前缀（兼容旧格式）
-    return urlOrPath.replace(/^\/uploads\//, "").replace(/^\//, "");
+    return normalizeStorageKey(urlOrPath)
   }
 }
 
@@ -126,13 +172,13 @@ export class LocalStorageAdapter implements StorageAdapter {
 
   constructor() {
     // 使用环境变量或默认路径
-    this.baseDir = process.env.UPLOAD_DIR || join(process.cwd(), "public", "uploads");
+    this.baseDir = process.env.UPLOAD_DIR || resolve(process.cwd(), "public", "uploads");
   }
 
   async upload(
     filePath: string,
     data: Readable | Buffer | ArrayBuffer | Uint8Array | File,
-    contentType?: string
+    _contentType?: string
   ): Promise<string> {
     // 处理 File 对象
     let uploadData: Buffer;
@@ -158,8 +204,8 @@ export class LocalStorageAdapter implements StorageAdapter {
     }
 
     // 确保目录存在
-    const fullPath = join(this.baseDir, filePath);
-    const dir = join(fullPath, "..");
+    const fullPath = resolveLocalUploadPath(this.baseDir, filePath);
+    const dir = resolve(fullPath, "..");
     if (!existsSync(dir)) {
       await mkdir(dir, { recursive: true });
     }
@@ -173,7 +219,7 @@ export class LocalStorageAdapter implements StorageAdapter {
 
   async delete(filePath: string): Promise<void> {
     const { unlink } = await import("fs/promises");
-    const fullPath = join(this.baseDir, this.extractKeyFromPath(filePath));
+    const fullPath = resolveLocalUploadPath(this.baseDir, filePath);
     try {
       await unlink(fullPath);
     } catch (error) {
@@ -185,11 +231,6 @@ export class LocalStorageAdapter implements StorageAdapter {
   }
 
   getUrl(filePath: string): string {
-    // 如果已经是完整 URL，直接返回
-    if (filePath.startsWith("http://") || filePath.startsWith("https://")) {
-      return filePath;
-    }
-    // 返回相对路径（兼容旧格式）
     const key = this.extractKeyFromPath(filePath);
     return `/uploads/${key}`;
   }
@@ -198,7 +239,7 @@ export class LocalStorageAdapter implements StorageAdapter {
    * 从路径中提取 key（移除 /uploads/ 前缀）
    */
   private extractKeyFromPath(path: string): string {
-    return path.replace(/^\/uploads\//, "").replace(/^\//, "");
+    return normalizeStorageKey(path)
   }
 }
 

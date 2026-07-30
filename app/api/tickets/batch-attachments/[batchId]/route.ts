@@ -2,34 +2,26 @@ import { NextResponse } from "next/server"
 import * as sql from "mssql"
 import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { ALL_USER_ROLES, checkUserRole, isErrorResponse, type AuthenticatedUser } from "@/lib/auth-utils"
+import {
+  ALL_USER_ROLES,
+  checkUserRole,
+  isErrorResponse,
+  type AuthenticatedUser,
+} from "@/lib/auth-utils"
 import { UserRole } from "@/lib/enums"
+import { getStorageAdapter } from "@/lib/storage/storage-adapter"
+import { createUploadStoragePath, validateUploadedFile } from "@/lib/storage/upload-security"
 
 const batchIdSchema = z.string().trim().min(1).max(100)
-const attachmentSchema = z.object({
-  fileName: z.string().trim().min(1).max(255).optional(),
-  originalName: z.string().trim().min(1).max(255),
-  filePath: z.string().trim().min(1).max(2048),
-  mimeType: z.enum(["image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"]),
-  fileSize: z.number().int().positive().max(10 * 1024 * 1024),
-}).strict()
+const attachmentIdSchema = z.coerce.number().int().positive()
 
 interface BatchOwnerRow {
   ReportByUserID: number | null
 }
 
-function isSafeAttachmentPath(filePath: string): boolean {
-  if (filePath.includes("\0") || filePath.includes("\\") || filePath.includes("..")) return false
-  if (!/\.(?:jpe?g|png|webp|pdf)$/i.test(filePath)) return false
-  if (filePath.startsWith("/uploads/")) return true
-  if (process.env.STORAGE_MODE?.toLowerCase() !== "s3" || !process.env.S3_ENDPOINT) return false
-  try {
-    const candidate = new URL(filePath)
-    const endpoint = new URL(process.env.S3_ENDPOINT)
-    return candidate.protocol === "https:" && candidate.origin === endpoint.origin
-  } catch {
-    return false
-  }
+interface AttachmentRow {
+  Id: number
+  FilePath: string
 }
 
 async function verifyBatchAccess(
@@ -86,6 +78,7 @@ export async function GET(
       `)
     return NextResponse.json({
       success: true,
+      message: "附件查询成功",
       data: result.recordset.map((row: Record<string, unknown>) => ({
         id: row.Id,
         batchId: row.BatchId,
@@ -113,29 +106,55 @@ export async function POST(
   const authResult = await checkUserRole(ALL_USER_ROLES)
   if (isErrorResponse(authResult)) return authResult
 
+  let transaction: sql.Transaction | null = null
+  let newlyUploadedPath: string | null = null
   try {
     const parsedBatchId = batchIdSchema.safeParse((await context.params).batchId)
-    const parsedBody = attachmentSchema.safeParse(await request.json().catch(() => null))
-    if (!parsedBatchId.success || !parsedBody.success || !isSafeAttachmentPath(parsedBody.data.filePath)) {
-      return NextResponse.json({ success: false, message: "附件参数无效" }, { status: 400 })
+    if (!parsedBatchId.success) {
+      return NextResponse.json({ success: false, message: "批次ID无效" }, { status: 400 })
     }
-    const batchId = parsedBatchId.data
     const userId = Number(authResult.userId)
     if (!Number.isSafeInteger(userId)) {
       return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
     }
-    const pool = await getDbConnection()
-    const access = await verifyBatchAccess(pool.request(), batchId, authResult)
-    if (access !== "allowed") return accessError(access)
 
-    const body = parsedBody.data
-    const result = await pool.request()
+    const formData = await request.formData()
+    const file = formData.get("file")
+    if (!(file instanceof File)) {
+      return NextResponse.json({ success: false, message: "请选择附件" }, { status: 400 })
+    }
+    const validation = await validateUploadedFile(file, "stamp_attachment")
+    if (!validation.success) {
+      return NextResponse.json({ success: false, message: validation.message }, { status: 400 })
+    }
+
+    const batchId = parsedBatchId.data
+    const pool = await getDbConnection()
+    transaction = new sql.Transaction(pool)
+    await transaction.begin()
+    const access = await verifyBatchAccess(new sql.Request(transaction), batchId, authResult)
+    if (access !== "allowed") {
+      await transaction.rollback()
+      transaction = null
+      return accessError(access)
+    }
+
+    const storagePath = createUploadStoragePath(
+      "stamp_attachment",
+      authResult.userId,
+      validation.extension
+    )
+    const storage = getStorageAdapter()
+    newlyUploadedPath = await storage.upload(storagePath, file, validation.mimeType)
+    const fileName = storagePath.split("/").pop() || "attachment"
+
+    const result = await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
-      .input("fileName", sql.NVarChar(255), body.fileName || body.originalName)
-      .input("originalName", sql.NVarChar(255), body.originalName)
-      .input("filePath", sql.NVarChar(1000), body.filePath)
-      .input("mimeType", sql.NVarChar(100), body.mimeType)
-      .input("fileSize", sql.BigInt, body.fileSize)
+      .input("fileName", sql.NVarChar(255), fileName)
+      .input("originalName", sql.NVarChar(255), validation.originalName)
+      .input("filePath", sql.NVarChar(1000), newlyUploadedPath)
+      .input("mimeType", sql.NVarChar(100), validation.mimeType)
+      .input("fileSize", sql.BigInt, file.size)
       .input("uploadedById", sql.Int, userId)
       .input("uploadedByName", sql.NVarChar(100), authResult.realName || authResult.username)
       .input("uploadedByRole", sql.NVarChar(50), authResult.userRole)
@@ -150,9 +169,33 @@ export async function POST(
           @uploadedById, @uploadedByName, @uploadedByRole
         );
       `)
-    return NextResponse.json({ success: true, data: { id: result.recordset[0]?.Id } })
+    await transaction.commit()
+    transaction = null
+    newlyUploadedPath = null
+
+    return NextResponse.json({
+      success: true,
+      message: "附件上传成功",
+      data: { id: result.recordset[0]?.Id },
+    })
   } catch (error: unknown) {
     console.error("[Batch Attachments API] 创建失败:", error)
+    if (transaction) {
+      try {
+        await transaction.rollback()
+      } catch (rollbackError) {
+        console.error("[Batch Attachments API] 事务回滚失败:", rollbackError)
+      } finally {
+        transaction = null
+      }
+    }
+    if (newlyUploadedPath) {
+      try {
+        await getStorageAdapter().delete(newlyUploadedPath)
+      } catch (cleanupError) {
+        console.error("[Batch Attachments API] 清理失败上传文件失败:", cleanupError)
+      }
+    }
     return NextResponse.json({ success: false, message: "保存附件失败" }, { status: 500 })
   }
 }
@@ -167,16 +210,18 @@ export async function DELETE(
   let transaction: sql.Transaction | null = null
   try {
     const parsedBatchId = batchIdSchema.safeParse((await context.params).batchId)
-    const attachmentId = z.coerce.number().int().positive().safeParse(new URL(request.url).searchParams.get("id"))
-    if (!parsedBatchId.success || !attachmentId.success) {
+    const parsedAttachmentId = attachmentIdSchema.safeParse(
+      new URL(request.url).searchParams.get("id")
+    )
+    if (!parsedBatchId.success || !parsedAttachmentId.success) {
       return NextResponse.json({ success: false, message: "批次ID或附件ID无效" }, { status: 400 })
     }
-    const batchId = parsedBatchId.data
     const userId = Number(authResult.userId)
     if (!Number.isSafeInteger(userId)) {
       return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
     }
 
+    const batchId = parsedBatchId.data
     const pool = await getDbConnection()
     transaction = new sql.Transaction(pool)
     await transaction.begin()
@@ -190,31 +235,57 @@ export async function DELETE(
     const ownerPredicate = authResult.normalizedRole === UserRole.ADMIN
       ? ""
       : "AND [UploadedById] = @userId"
-    const deleteResult = await new sql.Request(transaction)
-      .input("attachmentId", sql.Int, attachmentId.data)
+    const attachmentResult = await new sql.Request(transaction)
+      .input("attachmentId", sql.Int, parsedAttachmentId.data)
       .input("batchId", sql.NVarChar(100), batchId)
       .input("userId", sql.Int, userId)
-      .query(`
-        DELETE FROM [dbo].[Batch_Stamp_Attachments]
+      .query<AttachmentRow>(`
+        SELECT [Id], [FilePath]
+        FROM [dbo].[Batch_Stamp_Attachments] WITH (UPDLOCK, HOLDLOCK)
         WHERE [Id] = @attachmentId
           AND [BatchId] = @batchId
           ${ownerPredicate};
       `)
-    if (deleteResult.rowsAffected[0] !== 1) {
+    const attachment = attachmentResult.recordset[0]
+    if (!attachment) {
       await transaction.rollback()
       transaction = null
-      return NextResponse.json({ success: false, message: "附件不存在或无权删除" }, { status: 404 })
+      return NextResponse.json(
+        { success: false, message: "附件不存在或无权删除" },
+        { status: 404 }
+      )
     }
+
+    const deleteResult = await new sql.Request(transaction)
+      .input("attachmentId", sql.Int, parsedAttachmentId.data)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .query(`
+        DELETE FROM [dbo].[Batch_Stamp_Attachments]
+        WHERE [Id] = @attachmentId AND [BatchId] = @batchId;
+      `)
+    if (deleteResult.rowsAffected[0] !== 1) {
+      throw new Error("ATTACHMENT_CONFLICT")
+    }
+
+    await getStorageAdapter().delete(attachment.FilePath)
     await transaction.commit()
     transaction = null
-    return NextResponse.json({ success: true })
+    return NextResponse.json({ success: true, message: "附件已删除" })
   } catch (error: unknown) {
     console.error("[Batch Attachments API] 删除失败:", error)
     if (transaction) {
-      try { await transaction.rollback() } catch (rollbackError) {
+      try {
+        await transaction.rollback()
+      } catch (rollbackError) {
         console.error("[Batch Attachments API] 事务回滚失败:", rollbackError)
-      } finally { transaction = null }
+      } finally {
+        transaction = null
+      }
     }
-    return NextResponse.json({ success: false, message: "删除附件失败" }, { status: 500 })
+    const conflict = error instanceof Error && error.message === "ATTACHMENT_CONFLICT"
+    return NextResponse.json(
+      { success: false, message: conflict ? "附件状态已变化，请刷新后重试" : "删除附件失败" },
+      { status: conflict ? 409 : 500 }
+    )
   }
 }

@@ -1,4 +1,3 @@
-import { randomUUID } from "crypto"
 import { NextResponse } from "next/server"
 import * as sql from "mssql"
 import { z } from "zod"
@@ -6,15 +5,7 @@ import { getDbConnection } from "@/lib/db-config"
 import { TicketActionType, TicketStatus, UserRole } from "@/lib/enums"
 import { getStorageAdapter } from "@/lib/storage/storage-adapter"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
-
-const MAX_FILE_SIZE = 10 * 1024 * 1024
-const MIME_TO_EXTENSIONS: Readonly<Record<string, readonly string[]>> = {
-  "image/jpeg": ["jpg", "jpeg"],
-  "image/jpg": ["jpg", "jpeg"],
-  "image/png": ["png"],
-  "image/webp": ["webp"],
-  "application/pdf": ["pdf"],
-}
+import { createUploadStoragePath, validateUploadedFile } from "@/lib/storage/upload-security"
 
 const batchIdSchema = z.string().trim().min(1).max(100)
 const deviceConfirmationSchema = z.object({
@@ -30,34 +21,7 @@ interface BatchDeviceRow {
   ReportByUserID: number | null
   RepairCost: number | string | null
   RepairReportContent: string | null
-}
-
-function getSafeStoredPath(rawPath: string): string | null {
-  const value = rawPath.trim()
-  if (!value || value.length > 2048 || value.includes("\0") || value.includes("\\") || value.includes("..")) {
-    return null
-  }
-
-  const allowedExtension = /\.(?:jpe?g|png|webp|pdf)$/i.test(value)
-  if (!allowedExtension) return null
-
-  if (value.startsWith("/uploads/signatures/") || value.startsWith("/uploads/signed-reports/")) {
-    return value
-  }
-
-  if (process.env.STORAGE_MODE?.toLowerCase() === "s3" && process.env.S3_ENDPOINT) {
-    try {
-      const candidate = new URL(value)
-      const endpoint = new URL(process.env.S3_ENDPOINT)
-      if (candidate.protocol === "https:" && candidate.origin === endpoint.origin) {
-        return value
-      }
-    } catch {
-      return null
-    }
-  }
-
-  return null
+  SignedReportPhoto: string | null
 }
 
 function parseExistingContent(raw: string | null): Record<string, unknown> {
@@ -100,7 +64,7 @@ export async function PUT(
     const formData = await request.formData()
     const devicesRaw = formData.get("devices")
     const signedPhotoRaw = formData.get("signedPhoto")
-    const signedPhotoPathRaw = formData.get("signedPhotoPath")
+    const reuseExistingPhotoRaw = formData.get("reuseExistingPhoto")
 
     let devices: z.infer<typeof devicesSchema> = []
     if (devicesRaw !== null) {
@@ -125,22 +89,25 @@ export async function PUT(
       return NextResponse.json({ success: false, message: "设备列表包含重复ID" }, { status: 400 })
     }
 
-    let signedPhotoPath: string | null = null
-    if (signedPhotoPathRaw !== null) {
-      if (typeof signedPhotoPathRaw !== "string") {
-        return NextResponse.json({ success: false, message: "签字凭证路径无效" }, { status: 400 })
-      }
-      signedPhotoPath = getSafeStoredPath(signedPhotoPathRaw)
-      if (!signedPhotoPath) {
-        return NextResponse.json({ success: false, message: "签字凭证路径无效" }, { status: 400 })
-      }
+    if (signedPhotoRaw !== null && !(signedPhotoRaw instanceof File)) {
+      return NextResponse.json({ success: false, message: "签字凭证格式无效" }, { status: 400 })
+    }
+    if (
+      reuseExistingPhotoRaw !== null &&
+      (typeof reuseExistingPhotoRaw !== "string" || reuseExistingPhotoRaw !== "true")
+    ) {
+      return NextResponse.json({ success: false, message: "复用签字凭证参数无效" }, { status: 400 })
+    }
+    const reuseExistingPhoto = reuseExistingPhotoRaw === "true"
+    if (reuseExistingPhoto && signedPhotoRaw instanceof File) {
+      return NextResponse.json({ success: false, message: "不能同时上传并复用签字凭证" }, { status: 400 })
     }
 
     const pool = await getDbConnection()
     const precheck = await pool.request()
       .input("batchId", sql.NVarChar(100), batchId)
       .query<BatchDeviceRow>(`
-        SELECT [Id], [Status], [ReportByUserID], [RepairCost], [RepairReportContent]
+        SELECT [Id], [Status], [ReportByUserID], [RepairCost], [RepairReportContent], [SignedReportPhoto]
         FROM [dbo].[Repair_Tickets]
         WHERE [BatchId] = @batchId;
       `)
@@ -160,31 +127,45 @@ export async function PUT(
       )
     }
 
-    if (!signedPhotoPath && signedPhotoRaw instanceof File) {
-      const extension = signedPhotoRaw.name.split(".").pop()?.toLowerCase() ?? ""
-      const allowedExtensions = MIME_TO_EXTENSIONS[signedPhotoRaw.type]
-      if (
-        signedPhotoRaw.size <= 0 ||
-        signedPhotoRaw.size > MAX_FILE_SIZE ||
-        !allowedExtensions?.includes(extension)
-      ) {
+    const storage = getStorageAdapter()
+    let signedPhotoPath: string | null = null
+    if (reuseExistingPhoto) {
+      const existingPaths = new Set(
+        precheck.recordset
+          .map((row) => row.SignedReportPhoto)
+          .filter((value): value is string => Boolean(value))
+      )
+      if (existingPaths.size !== 1 || precheck.recordset.some((row) => !row.SignedReportPhoto)) {
         return NextResponse.json(
-          { success: false, message: "签字凭证类型、扩展名或大小不符合要求" },
+          { success: false, message: "当前批次没有可复用的一致签字凭证" },
+          { status: 409 }
+        )
+      }
+      try {
+        signedPhotoPath = storage.getUrl([...existingPaths][0])
+      } catch {
+        return NextResponse.json(
+          { success: false, message: "历史签字凭证路径不安全，无法复用" },
+          { status: 409 }
+        )
+      }
+    } else if (signedPhotoRaw instanceof File) {
+      const validation = await validateUploadedFile(signedPhotoRaw, "signature")
+      if (!validation.success) {
+        return NextResponse.json(
+          { success: false, message: validation.message },
           { status: 400 }
         )
       }
-
-      const now = new Date()
-      const storagePath = [
-        "signatures",
-        String(now.getUTCFullYear()),
-        String(now.getUTCMonth() + 1).padStart(2, "0"),
-        `${operatorId}_${Date.now()}_${randomUUID()}.${extension}`,
-      ].join("/")
-      signedPhotoPath = await getStorageAdapter().upload(
+      const storagePath = createUploadStoragePath(
+        "signature",
+        authResult.userId,
+        validation.extension
+      )
+      signedPhotoPath = await storage.upload(
         storagePath,
         signedPhotoRaw,
-        signedPhotoRaw.type
+        validation.mimeType
       )
       newlyUploadedPath = signedPhotoPath
     }
@@ -207,7 +188,7 @@ export async function PUT(
     const lockedResult = await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
       .query<BatchDeviceRow>(`
-        SELECT [Id], [Status], [ReportByUserID], [RepairCost], [RepairReportContent]
+        SELECT [Id], [Status], [ReportByUserID], [RepairCost], [RepairReportContent], [SignedReportPhoto]
         FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BatchId] = @batchId;
       `)
@@ -215,9 +196,20 @@ export async function PUT(
     const ownershipChanged =
       authResult.normalizedRole === UserRole.REPORTER &&
       lockedRows.some((row) => row.ReportByUserID !== operatorId)
+    let reusedPhotoChanged = false
+    if (reuseExistingPhoto && signedPhotoPath) {
+      try {
+        reusedPhotoChanged = lockedRows.some(
+          (row) => !row.SignedReportPhoto || storage.getUrl(row.SignedReportPhoto) !== signedPhotoPath
+        )
+      } catch {
+        reusedPhotoChanged = true
+      }
+    }
     const stateChanged =
       lockedRows.length !== precheck.recordset.length ||
-      lockedRows.some((row) => row.Status !== TicketStatus.PENDING_REPORTER_CONFIRM)
+      lockedRows.some((row) => row.Status !== TicketStatus.PENDING_REPORTER_CONFIRM) ||
+      reusedPhotoChanged
     if (lockedRows.length === 0 || ownershipChanged || stateChanged) {
       throw new Error("BATCH_CONFLICT")
     }

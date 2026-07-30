@@ -263,41 +263,18 @@ export default function TicketActionBar({
     setExecutingAction(TicketAction.UPLOAD_SIGNATURE);
 
     try {
-      // 1. 上传文件到服务器
       const formData = new FormData();
-      formData.append("file", uploadFile);
-      formData.append("ticketId", ticket.id);
-      formData.append("type", "signature");
+      formData.append("action", TicketAction.UPLOAD_SIGNATURE);
+      formData.append("signedPhoto", uploadFile);
 
-      const uploadResponse = await fetch("/api/upload", {
+      const actionResponse = await fetch(`/api/tickets/${ticket.id}/workflow-action`, {
         method: "POST",
         body: formData,
       });
 
-      const uploadResult = await uploadResponse.json();
-
-      if (!uploadResult.success) {
-        setValidationError(uploadResult.message || "文件上传失败");
-        return;
-      }
-
-      // 2. 调用工作流动作 API，传递文件路径
-      const actionResponse = await fetch(`/api/tickets/${ticket.id}/workflow-action`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          action: TicketAction.UPLOAD_SIGNATURE,
-          currentStatus: ticket.status,
-          userRole: currentUser.role,
-          signedReportPhoto: uploadResult.data.filePath, // 传递上传后的文件路径
-        }),
-      });
-
       const actionResult = await actionResponse.json();
 
-      if (!actionResult.success) {
+      if (!actionResponse.ok || !actionResult.success) {
         setValidationError(actionResult.message || "操作失败");
         return;
       }

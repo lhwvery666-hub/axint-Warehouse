@@ -1,7 +1,7 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
-import { Settings, LogOut, Camera, Pencil, Check, User2, Loader2, Users, Shield, Mail, Phone, Calendar, KeyRound, BadgeCheck, Database, UserCheck, Bell, FileText, HelpCircle, ChevronRight, MessageSquare, Info, ChevronDown, X } from "lucide-react"
+import { useState, useEffect } from "react"
+import { Settings, Pencil, Check, User2, Loader2, Users, Shield, Mail, Phone, Calendar, KeyRound, BadgeCheck, Database, UserCheck, Bell, FileText, HelpCircle, ChevronRight, MessageSquare, Info, ChevronDown, X } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar"
@@ -28,7 +28,7 @@ const menuItems = [
 ]
 
 export default function AdminProfile() {
-  const { user, logout } = useAuth()
+  const { user, refreshUser } = useAuth()
   const { repairs } = useRepairContext()
   const { theme, setTheme } = useTheme()
   const router = useRouter()
@@ -39,8 +39,6 @@ export default function AdminProfile() {
     phone: "",
     avatar: ""
   })
-  const [avatarFile, setAvatarFile] = useState<File | null>(null)
-  const avatarInputRef = useRef<HTMLInputElement>(null)
   
   // 对话框状态
   const [openDialog, setOpenDialog] = useState<string | null>(null)
@@ -70,46 +68,45 @@ export default function AdminProfile() {
     }
   }, [user])
 
-  const handleLogout = () => {
-    setIsLoading(true)
-    setTimeout(() => {
-      logout()
-      setIsLoading(false)
-    }, 1000)
-  }
-
   const handleEditToggle = async () => {
-    if (isEditing) {
-      // 保存更改到数据库（通过 API）
-      try {
-        // TODO: 调用 API 更新用户信息
-        // await fetch(`/api/users/${user?.id}`, { method: 'PUT', ... })
-        console.log('保存用户信息:', editedUser)
-      } catch (error) {
-        console.error('保存用户信息失败:', error)
-      }
-      setTimeout(() => {
-        setIsEditing(false)
-        alert("个人信息已更新")
-      }, 500)
-    } else {
+    if (!isEditing) {
       setIsEditing(true)
+      return
     }
-  }
-
-  const handleAvatarClick = () => {
-    if (isEditing && avatarInputRef.current) {
-      avatarInputRef.current.click()
+    if (!user?.id || !editedUser.realName.trim()) {
+      alert("姓名不能为空")
+      return
     }
-  }
+    if (editedUser.phone && !/^1[3-9]\d{9}$/.test(editedUser.phone)) {
+      alert("手机号格式不正确，请输入11位有效手机号")
+      return
+    }
 
-  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) {
-      setAvatarFile(file)
-      // 创建临时URL用于预览
-      const imageUrl = URL.createObjectURL(file)
-      setEditedUser(prev => ({ ...prev, avatar: imageUrl }))
+    try {
+      setIsLoading(true)
+      const response = await fetch(`/api/users/${user.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          realName: editedUser.realName.trim(),
+          phoneNumber: editedUser.phone || null,
+        }),
+      })
+      const result: unknown = await response.json().catch(() => null)
+      const payload = result && typeof result === "object"
+        ? result as { success?: boolean; message?: string }
+        : null
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.message || "保存失败")
+      }
+      await refreshUser()
+      setIsEditing(false)
+      alert("个人信息已更新")
+    } catch (error: unknown) {
+      console.error("保存用户信息失败:", error)
+      alert(error instanceof Error ? error.message : "保存失败，请重试")
+    } finally {
+      setIsLoading(false)
     }
   }
 
@@ -168,31 +165,13 @@ export default function AdminProfile() {
             <Card className="border-border/50 dark:border-border overflow-hidden shadow-lg bg-card dark:bg-card">
               <div className="bg-gradient-to-br from-primary/10 via-primary/5 to-transparent dark:from-primary/20 dark:via-primary/10 dark:to-transparent p-6">
                 <div className="flex flex-col items-center space-y-4">
-                  <div className="relative group">
-                    <Avatar className={cn(
-                      "w-24 h-24 border-4 border-background shadow-xl transition-all",
-                      isEditing && "ring-4 ring-primary/20 ring-offset-2"
-                    )}>
+                  <div className="relative">
+                    <Avatar className="w-24 h-24 border-4 border-background shadow-xl">
                       <AvatarImage src={editedUser.avatar} alt={editedUser.realName} />
                       <AvatarFallback className="text-2xl font-bold bg-gradient-to-br from-primary to-primary/80 text-primary-foreground">
                         {editedUser.realName?.substring(0, 2) || "用户"}
                       </AvatarFallback>
                     </Avatar>
-                    {isEditing && (
-                      <button
-                        onClick={handleAvatarClick}
-                        className="absolute bottom-0 right-0 w-9 h-9 rounded-full bg-primary text-primary-foreground flex items-center justify-center shadow-lg hover:bg-primary/90 transition-all hover:scale-110"
-                      >
-                        <Camera className="h-4 w-4" />
-                      </button>
-                    )}
-                    <input
-                      ref={avatarInputRef}
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={handleAvatarChange}
-                    />
                   </div>
                   <div className="text-center space-y-2">
                     <div className="flex items-center justify-center gap-2">
@@ -272,9 +251,12 @@ export default function AdminProfile() {
                     variant="outline"
                     className="flex-1"
                     onClick={handleEditToggle}
+                    disabled={isLoading}
                     size="sm"
                   >
-                    {isEditing ? (
+                    {isLoading ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : isEditing ? (
                       <>
                         <Check className="mr-2 h-4 w-4" />
                         保存

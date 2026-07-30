@@ -205,27 +205,9 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
     try {
       const formData = new FormData()
       formData.append("file", file)
-      formData.append("type", "stamp_attachment")
-      const uploadRes = await fetch("/api/upload", { method: "POST", body: formData })
-      const uploadResult = await uploadRes.json()
-      if (!uploadRes.ok || !uploadResult.success) {
-        throw new Error(uploadResult.message || "文件上传失败")
-      }
-
-      // /api/upload 的文件信息位于 data 中；旧代码读取顶层字段，导致 filePath 始终为空。
-      const filePath: string | undefined = uploadResult.data?.filePath
-      if (!filePath) throw new Error("上传成功，但未返回文件地址")
-
       const attachmentRes = await fetch(`/api/tickets/batch-attachments/${batchId}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fileName: file.name,
-          originalName: file.name,
-          filePath,
-          mimeType: file.type,
-          fileSize: file.size,
-        }),
+        body: formData,
       })
       const attachmentResult = await attachmentRes.json()
       if (!attachmentRes.ok || !attachmentResult.success) {
@@ -243,8 +225,19 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
 
   const handleDeleteAttachment = async (id: number) => {
     if (!confirm("确认删除此附件？")) return
-    await fetch(`/api/tickets/batch-attachments/${batchId}?id=${id}`, { method: "DELETE" })
-    await fetchStampAttachments()
+    try {
+      const response = await fetch(`/api/tickets/batch-attachments/${batchId}?id=${id}`, {
+        method: "DELETE",
+      })
+      const result = await response.json()
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "删除附件失败")
+      }
+      await fetchStampAttachments()
+      toast.success("附件已删除")
+    } catch (error: unknown) {
+      toast.error(error instanceof Error ? error.message : "删除附件失败")
+    }
   }
 
   const handleDownloadAttachment = async (filePath: string, originalName: string) => {
@@ -347,43 +340,15 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
 
   /**
    * 提交签字凭证：
-   * 1. 上传文件到 /api/upload，拿到持久化 filePath
-   * 2. 把 filePath 以 FormData 形式 PUT 给 reporter-confirm 批量接口，
-   *    该接口会同时将批次内所有设备状态推进到 Technician_Repairing
-   *    并写入 SignedReportPhoto 字段
+   * 直接交给 reporter-confirm 安全上传并在同一业务动作中写入关联，
+   * 避免先上传后确认失败产生孤立文件。
    */
   const handleUploadSignature = async () => {
     if (!signatureFile) return
     setIsUploadingSignature(true)
     try {
-      // Step 1: 上传文件
-      const uploadForm = new FormData()
-      uploadForm.append("file", signatureFile)
-      uploadForm.append("ticketId", batchId)
-      uploadForm.append("type", "signature")
-
-      const uploadRes = await fetch("/api/upload", {
-        method: "POST",
-        body: uploadForm,
-      })
-      const uploadResult = await uploadRes.json()
-
-      if (!uploadResult.success) {
-        toast.error(uploadResult.message || "文件上传失败")
-        return
-      }
-
-      const filePath: string = uploadResult.data?.filePath || uploadResult.filePath
-      if (!filePath) {
-        toast.error("上传成功但未获取到文件路径，请重试")
-        return
-      }
-
-      // Step 2: 通知批次接口推进状态 + 写入签字照片（发送已持久化的 filePath，避免二次上传）
       const confirmForm = new FormData()
-      // 发送字符串路径，reporter-confirm 路由会将其直接写入 SignedReportPhoto 列
-      // 并将批次内所有设备状态推进至 Technician_Repairing
-      confirmForm.append("signedPhotoPath", filePath)
+      confirmForm.append("signedPhoto", signatureFile)
 
       const confirmRes = await fetch(`/api/tickets/reporter-confirm/${batchId}`, {
         method: "PUT",
@@ -423,7 +388,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
     setIsReconfirming(true)
     try {
       const confirmForm = new FormData()
-      confirmForm.append("signedPhotoPath", batchInfo.signedReportPhoto)
+      confirmForm.append("reuseExistingPhoto", "true")
 
       const confirmRes = await fetch(`/api/tickets/reporter-confirm/${batchId}`, {
         method: "PUT",

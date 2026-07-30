@@ -1,374 +1,284 @@
+import bcrypt from "bcryptjs"
 import { NextResponse } from "next/server"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
-import { UserRole } from "@/lib/enums"
-const bcrypt = require('bcryptjs')
+import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { normalizeUserRole, UserRole } from "@/lib/enums"
+import { canAccessUserResource } from "@/lib/user-profile-policy"
 
-// GET /api/users/[id]
-// 获取单个用户信息
+const userIdSchema = z.coerce.number().int().positive()
+const phoneSchema = z.union([
+  z.string().regex(/^1[3-9]\d{9}$/, "手机号格式不正确"),
+  z.literal(""),
+  z.null(),
+])
+const selfUpdateSchema = z.object({
+  realName: z.string().trim().min(1).max(100).optional(),
+  phoneNumber: phoneSchema.optional(),
+}).strict()
+const adminUpdateSchema = selfUpdateSchema.extend({
+  username: z.string().trim().min(1).max(100).optional(),
+  password: z.string().min(1).max(128).optional(),
+  role: z.string().trim().min(1).max(50).nullable().optional(),
+}).strict()
+
+interface UserRow {
+  UserID: number
+  Username: string
+  Role: string
+  RealName: string | null
+  PhoneNumber: string | null
+  CreatedAt: Date | null
+  UpdatedAt: Date | null
+}
+
+interface UserUpdate {
+  username?: string
+  password?: string
+  realName?: string
+  phoneNumber?: string | null
+  role?: string | null
+}
+
 export async function GET(
-  request: Request,
-  context: { params: Promise<{ id: string }> } | { params: { id: string } }
+  _request: Request,
+  context: { params: Promise<{ id: string }> }
 ) {
-  const authResult = await checkUserRole([UserRole.ADMIN])
+  const authResult = await checkUserRole(ALL_USER_ROLES)
   if (isErrorResponse(authResult)) return authResult
 
   try {
-    // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ id: string }> }).params
-        : (context as { params: { id: string } }).params
-
-    const userId = resolvedParams?.id
-
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, message: "用户ID不能为空" },
-        { status: 400 }
-      )
+    const parsedUserId = userIdSchema.safeParse((await context.params).id)
+    const requesterId = Number(authResult.userId)
+    if (!parsedUserId.success || !Number.isSafeInteger(requesterId)) {
+      return NextResponse.json({ success: false, message: "用户ID无效" }, { status: 400 })
+    }
+    if (!canAccessUserResource(requesterId, authResult.normalizedRole, parsedUserId.data)) {
+      return NextResponse.json({ success: false, message: "您无权查看该用户" }, { status: 403 })
     }
 
     const pool = await getDbConnection()
-
-    // 检查表结构
-    const columnCheck = await pool
-      .request()
-      .query(`
-        SELECT COLUMN_NAME 
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_NAME = 'Users' AND COLUMN_NAME IN ('CreatedAt', 'UpdatedAt', 'PhoneNumber')
+    const result = await pool.request()
+      .input("userId", sql.Int, parsedUserId.data)
+      .query<UserRow>(`
+        SELECT [UserID], [Username], [Role], [RealName], [PhoneNumber], [CreatedAt], [UpdatedAt]
+        FROM [dbo].[Users]
+        WHERE [UserID] = @userId AND ISNULL([IsDeleted], 0) = 0;
       `)
-    
-    const hasCreatedAt = columnCheck.recordset.some((r: any) => r.COLUMN_NAME === 'CreatedAt')
-    const hasUpdatedAt = columnCheck.recordset.some((r: any) => r.COLUMN_NAME === 'UpdatedAt')
-    const hasPhoneNumber = columnCheck.recordset.some((r: any) => r.COLUMN_NAME === 'PhoneNumber')
-    
-    let selectFields = "UserID, Username, Role, RealName"
-    if (hasPhoneNumber) selectFields += ", PhoneNumber"
-    if (hasCreatedAt) selectFields += ", CreatedAt"
-    if (hasUpdatedAt) selectFields += ", UpdatedAt"
-    
-    const result = await pool
-      .request()
-      .input("userId", userId)
-      .query(`
-        SELECT ${selectFields}
-        FROM Users
-        WHERE UserID = @userId
-      `)
-
-    if (result.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "用户不存在" },
-        { status: 404 }
-      )
-    }
-
     const row = result.recordset[0]
+    if (!row) {
+      return NextResponse.json({ success: false, message: "用户不存在" }, { status: 404 })
+    }
 
     return NextResponse.json({
       success: true,
+      message: "用户信息查询成功",
       data: {
-        id: row.UserID?.toString() || "",
-        username: row.Username || "",
-        role: row.Role || "",
+        id: String(row.UserID),
+        username: row.Username,
+        role: row.Role,
         realName: row.RealName || "",
-        phoneNumber: hasPhoneNumber ? (row.PhoneNumber || "") : "",
-        createdAt: row.CreatedAt ? new Date(row.CreatedAt).toISOString() : null,
-        updatedAt: row.UpdatedAt ? new Date(row.UpdatedAt).toISOString() : null,
+        phoneNumber: row.PhoneNumber || "",
+        createdAt: row.CreatedAt?.toISOString() || null,
+        updatedAt: row.UpdatedAt?.toISOString() || null,
       },
     })
   } catch (error: unknown) {
-    console.error("获取用户信息失败:", error)
-    return NextResponse.json(
-      {
-        success: false,
-        message: "获取用户信息时发生错误",
-      },
-      { status: 500 }
-    )
+    console.error("[Users API] 获取用户信息失败:", error)
+    return NextResponse.json({ success: false, message: "获取用户信息失败" }, { status: 500 })
   }
 }
 
-// PUT /api/users/[id]
-// 更新用户信息
 export async function PUT(
   request: Request,
-  context: { params: Promise<{ id: string }> } | { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
-  const authResult = await checkUserRole([UserRole.ADMIN])
+  const authResult = await checkUserRole(ALL_USER_ROLES)
   if (isErrorResponse(authResult)) return authResult
 
+  let transaction: sql.Transaction | null = null
   try {
-    // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ id: string }> }).params
-        : (context as { params: { id: string } }).params
+    const parsedUserId = userIdSchema.safeParse((await context.params).id)
+    const requesterId = Number(authResult.userId)
+    if (!parsedUserId.success || !Number.isSafeInteger(requesterId)) {
+      return NextResponse.json({ success: false, message: "用户ID无效" }, { status: 400 })
+    }
+    const targetUserId = parsedUserId.data
+    if (!canAccessUserResource(requesterId, authResult.normalizedRole, targetUserId)) {
+      return NextResponse.json({ success: false, message: "您只能修改自己的个人资料" }, { status: 403 })
+    }
 
-    const userId = resolvedParams?.id
-    const body = await request.json()
-    const { username, password, realName, role, phoneNumber } = body ?? {}
-
-    if (!userId) {
+    const rawBody: unknown = await request.json().catch(() => null)
+    const parsedBody = authResult.normalizedRole === UserRole.ADMIN
+      ? adminUpdateSchema.safeParse(rawBody)
+      : selfUpdateSchema.safeParse(rawBody)
+    if (!parsedBody.success) {
       return NextResponse.json(
-        { success: false, message: "用户ID不能为空" },
+        { success: false, message: "更新字段或格式无效" },
         { status: 400 }
       )
+    }
+    const update: UserUpdate = parsedBody.data
+    if (Object.keys(update).length === 0) {
+      return NextResponse.json({ success: false, message: "没有要更新的字段" }, { status: 400 })
+    }
+    if (update.role !== undefined && update.role !== null) {
+      const normalizedRole = normalizeUserRole(update.role)
+      if (!normalizedRole && update.role.toLowerCase() !== "user") {
+        return NextResponse.json({ success: false, message: "角色值无效" }, { status: 400 })
+      }
     }
 
     const pool = await getDbConnection()
-
-    // 检查用户是否存在
-    const userResult = await pool
-      .request()
-      .input("userId", userId)
-      .query(`SELECT Username FROM Users WHERE UserID = @userId`)
-
-    if (userResult.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "用户不存在" },
-        { status: 404 }
-      )
-    }
-
-    // 如果更新用户名，检查是否重复
-    if (username) {
-      const existsResult = await pool
-        .request()
-        .input("username", username)
-        .input("userId", userId)
-        .query(`SELECT 1 FROM Users WHERE Username = @username AND UserID != @userId`)
-
-      if (existsResult.recordset.length > 0) {
-        return NextResponse.json(
-          { success: false, message: "用户名已存在，请使用其他用户名" },
-          { status: 400 }
-        )
-      }
-    }
-
-    // 如果更新手机号，验证格式并检查是否重复
-    if (phoneNumber !== undefined) {
-      if (phoneNumber) {
-        const phoneRegex = /^1[3-9]\d{9}$/
-        if (!phoneRegex.test(phoneNumber)) {
-          return NextResponse.json(
-            { success: false, message: "手机号格式不正确，请输入11位有效手机号" },
-            { status: 400 }
-          )
-        }
-        
-        // 检查手机号是否已被其他用户使用
-        const phoneExistsResult = await pool
-          .request()
-          .input("phoneNumber", phoneNumber)
-          .input("userId", userId)
-          .query(`SELECT 1 FROM Users WHERE PhoneNumber = @phoneNumber AND UserID != @userId`)
-
-        if (phoneExistsResult.recordset.length > 0) {
-          return NextResponse.json(
-            { success: false, message: "该手机号已被其他用户使用" },
-            { status: 400 }
-          )
-        }
-      }
-    }
-
-    // 验证角色 —— 使用大小写不敏感匹配，兼容 PascalCase 与 lowercase 两种写法
-    const validRoles = ["Admin", "Technician", "Warehouse", "Reporter", "Business", "User"]
-    if (role !== undefined && role !== null && role !== "" &&
-        !validRoles.some(r => r.toLowerCase() === role.toLowerCase())) {
-      return NextResponse.json(
-        { success: false, message: `角色必须是以下之一: ${validRoles.join(", ")}` },
-        { status: 400 }
-      )
-    }
-
-    // 检查表是否有 PhoneNumber 字段
-    const phoneColumnCheck = await pool
-      .request()
-      .query(`
-        SELECT COLUMN_NAME 
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_NAME = 'Users' AND COLUMN_NAME = 'PhoneNumber'
+    transaction = new sql.Transaction(pool)
+    await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE)
+    const currentResult = await new sql.Request(transaction)
+      .input("userId", sql.Int, targetUserId)
+      .query<{ UserID: number }>(`
+        SELECT [UserID]
+        FROM [dbo].[Users] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [UserID] = @userId AND ISNULL([IsDeleted], 0) = 0;
       `)
-    const hasPhoneNumber = phoneColumnCheck.recordset.length > 0
+    if (!currentResult.recordset[0]) {
+      await transaction.rollback()
+      transaction = null
+      return NextResponse.json({ success: false, message: "用户不存在" }, { status: 404 })
+    }
 
-    // 构建更新语句
+    if (update.username !== undefined) {
+      const usernameResult = await new sql.Request(transaction)
+        .input("username", sql.NVarChar(100), update.username)
+        .input("userId", sql.Int, targetUserId)
+        .query(`
+          SELECT TOP 1 [UserID]
+          FROM [dbo].[Users] WITH (UPDLOCK, HOLDLOCK)
+          WHERE [Username] = @username AND [UserID] <> @userId;
+        `)
+      if (usernameResult.recordset.length > 0) {
+        await transaction.rollback()
+        transaction = null
+        return NextResponse.json({ success: false, message: "用户名已存在" }, { status: 409 })
+      }
+    }
+    if (update.phoneNumber) {
+      const phoneResult = await new sql.Request(transaction)
+        .input("phoneNumber", sql.NVarChar(20), update.phoneNumber)
+        .input("userId", sql.Int, targetUserId)
+        .query(`
+          SELECT TOP 1 [UserID]
+          FROM [dbo].[Users] WITH (UPDLOCK, HOLDLOCK)
+          WHERE [PhoneNumber] = @phoneNumber AND [UserID] <> @userId;
+        `)
+      if (phoneResult.recordset.length > 0) {
+        await transaction.rollback()
+        transaction = null
+        return NextResponse.json({ success: false, message: "该手机号已被其他用户使用" }, { status: 409 })
+      }
+    }
+
     const updates: string[] = []
-    const dbRequest = pool.request()
+    const updateRequest = new sql.Request(transaction).input("userId", sql.Int, targetUserId)
+    if (update.username !== undefined) {
+      updates.push("[Username] = @username")
+      updateRequest.input("username", sql.NVarChar(100), update.username)
+    }
+    if (update.password !== undefined) {
+      updates.push("[Password] = @password")
+      updateRequest.input("password", sql.NVarChar(255), await bcrypt.hash(update.password, 10))
+    }
+    if (update.realName !== undefined) {
+      updates.push("[RealName] = @realName")
+      updateRequest.input("realName", sql.NVarChar(100), update.realName)
+    }
+    if (update.phoneNumber !== undefined) {
+      updates.push("[PhoneNumber] = @phoneNumber")
+      updateRequest.input("phoneNumber", sql.NVarChar(20), update.phoneNumber || null)
+    }
+    if (update.role !== undefined) {
+      updates.push("[Role] = @role")
+      updateRequest.input("role", sql.NVarChar(50), update.role || "User")
+    }
+    updates.push("[UpdatedAt] = SYSUTCDATETIME()")
 
-    if (username) {
-      updates.push("Username = @username")
-      dbRequest.input("username", username)
-    }
-    if (password) {
-      const saltRounds = 10
-      const hashedPassword = await bcrypt.hash(password, saltRounds)
-      updates.push("Password = @password")
-      dbRequest.input("password", hashedPassword)
-    }
-    if (realName) {
-      updates.push("RealName = @realName")
-      dbRequest.input("realName", realName)
-    }
-    if (hasPhoneNumber && phoneNumber !== undefined) {
-      updates.push("PhoneNumber = @phoneNumber")
-      dbRequest.input("phoneNumber", phoneNumber || null)
-    }
-    if (role !== undefined) {
-      updates.push("Role = @role")
-      dbRequest.input("role", role || null)
-    }
-
-    if (updates.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "没有要更新的字段" },
-        { status: 400 }
-      )
-    }
-
-    // 检查是否有 UpdatedAt 字段
-    const hasUpdatedAt = await pool
-      .request()
-      .query(`
-        SELECT COLUMN_NAME 
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_NAME = 'Users' AND COLUMN_NAME = 'UpdatedAt'
-      `)
-    
-    if (hasUpdatedAt.recordset.length > 0) {
-      updates.push("UpdatedAt = GETUTCDATE()")
-    }
-    
-    dbRequest.input("userId", userId)
-
-    const updateQuery = `
-      UPDATE Users
+    const updateResult = await updateRequest.query(`
+      UPDATE [dbo].[Users]
       SET ${updates.join(", ")}
-      WHERE UserID = @userId
-    `
-    
-    console.log("执行更新SQL:", updateQuery)
-    console.log("更新参数:", {
-      userId,
-      username,
-      realName,
-      phoneNumber,
-      role,
-      hasPassword: !!password
-    })
+      WHERE [UserID] = @userId AND ISNULL([IsDeleted], 0) = 0;
+    `)
+    if (updateResult.rowsAffected[0] !== 1) {
+      throw new Error("USER_UPDATE_CONFLICT")
+    }
 
-    await dbRequest.query(updateQuery)
-
-    return NextResponse.json({
-      success: true,
-      message: "用户更新成功",
-    })
+    await transaction.commit()
+    transaction = null
+    return NextResponse.json({ success: true, message: "用户信息更新成功" })
   } catch (error: unknown) {
-    console.error("更新用户失败:", error)
+    console.error("[Users API] 更新用户失败:", error)
+    if (transaction) {
+      try {
+        await transaction.rollback()
+      } catch (rollbackError) {
+        console.error("[Users API] 事务回滚失败:", rollbackError)
+      } finally {
+        transaction = null
+      }
+    }
+    const conflict = error instanceof Error && error.message === "USER_UPDATE_CONFLICT"
     return NextResponse.json(
-      {
-        success: false,
-        message: "更新用户时发生错误",
-      },
-      { status: 500 }
+      { success: false, message: conflict ? "用户信息已变化，请刷新后重试" : "更新用户失败" },
+      { status: conflict ? 409 : 500 }
     )
   }
 }
 
-// DELETE /api/users/[id]
-// 删除用户
 export async function DELETE(
-  request: Request,
-  context: { params: Promise<{ id: string }> } | { params: { id: string } }
+  _request: Request,
+  context: { params: Promise<{ id: string }> }
 ) {
   const authResult = await checkUserRole([UserRole.ADMIN])
   if (isErrorResponse(authResult)) return authResult
 
   try {
-    // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ id: string }> }).params
-        : (context as { params: { id: string } }).params
-
-    const userId = resolvedParams?.id
-
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, message: "用户ID不能为空" },
-        { status: 400 }
-      )
+    const parsedUserId = userIdSchema.safeParse((await context.params).id)
+    const requesterId = Number(authResult.userId)
+    if (!parsedUserId.success || !Number.isSafeInteger(requesterId)) {
+      return NextResponse.json({ success: false, message: "用户ID无效" }, { status: 400 })
+    }
+    if (parsedUserId.data === requesterId) {
+      return NextResponse.json({ success: false, message: "不能注销当前登录账号" }, { status: 400 })
     }
 
     const pool = await getDbConnection()
-
-    // 检查用户是否存在
-    const userResult = await pool
-      .request()
-      .input("userId", userId)
-      .query(`SELECT Username, Role FROM Users WHERE UserID = @userId`)
-
-    if (userResult.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "用户不存在" },
-        { status: 404 }
-      )
-    }
-
+    const userResult = await pool.request()
+      .input("userId", sql.Int, parsedUserId.data)
+      .query<{ Role: string }>(`
+        SELECT [Role]
+        FROM [dbo].[Users]
+        WHERE [UserID] = @userId AND ISNULL([IsDeleted], 0) = 0;
+      `)
     const user = userResult.recordset[0]
-    
-    // 防止删除管理员账号（可选，根据需求）
-    if (user.Role === "Admin") {
-      return NextResponse.json(
-        { success: false, message: "不能注销管理员账号" },
-        { status: 400 }
-      )
+    if (!user) {
+      return NextResponse.json({ success: false, message: "用户不存在" }, { status: 404 })
+    }
+    if (normalizeUserRole(user.Role) === UserRole.ADMIN) {
+      return NextResponse.json({ success: false, message: "不能注销管理员账号" }, { status: 400 })
     }
 
-    // 检查是否存在 IsDeleted 字段
-    const columnCheck = await pool
-      .request()
+    const result = await pool.request()
+      .input("userId", sql.Int, parsedUserId.data)
       .query(`
-        SELECT COLUMN_NAME 
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_NAME = 'Users' AND COLUMN_NAME = 'IsDeleted'
+        UPDATE [dbo].[Users]
+        SET [IsDeleted] = 1, [UpdatedAt] = SYSUTCDATETIME()
+        WHERE [UserID] = @userId AND ISNULL([IsDeleted], 0) = 0;
       `)
-    const hasIsDeleted = columnCheck.recordset.length > 0
-
-    if (!hasIsDeleted) {
-      // 如果没有软删除字段，避免误删，直接返回错误提示
-      return NextResponse.json(
-        { success: false, message: "当前数据库未配置软删除字段 IsDeleted，请先更新表结构" },
-        { status: 500 }
-      )
+    if (result.rowsAffected[0] !== 1) {
+      return NextResponse.json({ success: false, message: "用户状态已变化" }, { status: 409 })
     }
 
-    // 执行软删除：将 IsDeleted 标记为 1，而不是物理删除
-    await pool
-      .request()
-      .input("userId", userId)
-      .query(`
-        UPDATE Users
-        SET IsDeleted = 1
-        WHERE UserID = @userId
-      `)
-
-    return NextResponse.json({
-      success: true,
-      message: "用户已注销（软删除），历史工单仍可保留姓名与电话",
-    })
+    return NextResponse.json({ success: true, message: "用户已注销，历史工单数据仍保留" })
   } catch (error: unknown) {
-    console.error("删除用户失败:", error)
-    return NextResponse.json(
-      {
-        success: false,
-        message: "删除用户时发生错误",
-      },
-      { status: 500 }
-    )
+    console.error("[Users API] 注销用户失败:", error)
+    return NextResponse.json({ success: false, message: "注销用户失败" }, { status: 500 })
   }
 }

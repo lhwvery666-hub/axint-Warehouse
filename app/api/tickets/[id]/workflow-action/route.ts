@@ -28,13 +28,14 @@ import {
   TICKET_ACTION_LABELS,
 } from "@/lib/ticket-workflow-actions";
 import { sumDeviceQuantity } from "@/lib/device-quantity";
+import { getStorageAdapter } from "@/lib/storage/storage-adapter";
+import { createUploadStoragePath, validateUploadedFile } from "@/lib/storage/upload-security";
 
 const workflowActionSchema = z.object({
   action: z.nativeEnum(TicketAction),
   // 兼容旧客户端，但服务端明确忽略该值，当前状态只能来自数据库。
   currentStatus: z.unknown().optional(),
   userRole: z.unknown().optional(),
-  signedReportPhoto: z.string().trim().min(1).max(2048).optional(),
 }).strict();
 
 interface WorkflowUpdateRow {
@@ -80,10 +81,27 @@ export async function POST(
   if (isErrorResponse(authResult)) return authResult;
 
   let transaction: sql.Transaction | null = null;
+  let newlyUploadedPath: string | null = null;
 
   try {
+    let signedPhotoFile: File | null = null;
+    let rawBody: unknown;
+    if (request.headers.get("content-type")?.toLowerCase().startsWith("multipart/form-data")) {
+      const formData = await request.formData();
+      const fileValue = formData.get("signedPhoto");
+      if (fileValue !== null && !(fileValue instanceof File)) {
+        return NextResponse.json(
+          { success: false, message: "签字凭证格式无效" },
+          { status: 400 }
+        );
+      }
+      signedPhotoFile = fileValue;
+      rawBody = { action: formData.get("action") };
+    } else {
+      rawBody = await request.json().catch(() => null);
+    }
     const parsedBody = workflowActionSchema.safeParse(
-      await request.json().catch(() => null)
+      rawBody
     );
     if (!parsedBody.success) {
       return NextResponse.json(
@@ -109,7 +127,7 @@ export async function POST(
       );
     }
 
-    const { action, signedReportPhoto } = parsedBody.data;
+    const { action } = parsedBody.data;
     const transitions = getTransitionsForActionAndRole(
       action,
       authResult.normalizedRole
@@ -121,9 +139,15 @@ export async function POST(
       );
     }
 
-    if (action === TicketAction.UPLOAD_SIGNATURE && !signedReportPhoto) {
+    if (action === TicketAction.UPLOAD_SIGNATURE && !signedPhotoFile) {
       return NextResponse.json(
         { success: false, message: "缺少签字凭证" },
+        { status: 400 }
+      );
+    }
+    if (action !== TicketAction.UPLOAD_SIGNATURE && signedPhotoFile) {
+      return NextResponse.json(
+        { success: false, message: "当前动作不接受签字凭证" },
         { status: 400 }
       );
     }
@@ -310,6 +334,30 @@ export async function POST(
     }
     const transition = transitions[0];
 
+    let signedReportPhoto: string | null = null;
+    if (action === TicketAction.UPLOAD_SIGNATURE && signedPhotoFile) {
+      const validation = await validateUploadedFile(signedPhotoFile, "signature");
+      if (!validation.success) {
+        await transaction.rollback();
+        transaction = null;
+        return NextResponse.json(
+          { success: false, message: validation.message },
+          { status: 400 }
+        );
+      }
+      const storagePath = createUploadStoragePath(
+        "signature",
+        authResult.userId,
+        validation.extension
+      );
+      signedReportPhoto = await getStorageAdapter().upload(
+        storagePath,
+        signedPhotoFile,
+        validation.mimeType
+      );
+      newlyUploadedPath = signedReportPhoto;
+    }
+
     const updateRequest = new sql.Request(transaction)
       .input("ticketId", sql.Int, ticketId)
       .input("expectedStatus", sql.NVarChar(50), transition.currentStatus)
@@ -348,6 +396,10 @@ export async function POST(
     if (updateResult.rowsAffected[0] !== 1 || !updateResult.recordset[0]) {
       await transaction.rollback();
       transaction = null;
+      if (newlyUploadedPath) {
+        await getStorageAdapter().delete(newlyUploadedPath);
+        newlyUploadedPath = null;
+      }
       return NextResponse.json(
         { success: false, message: "工单状态已变化、操作重复或前置条件未满足" },
         { status: 409 }
@@ -377,6 +429,7 @@ export async function POST(
 
     await transaction.commit();
     transaction = null;
+    newlyUploadedPath = null;
 
     return NextResponse.json({
       success: true,
@@ -397,6 +450,15 @@ export async function POST(
         console.error("[Workflow Action API] 事务回滚失败:", rollbackError);
       } finally {
         transaction = null;
+      }
+    }
+    if (newlyUploadedPath) {
+      try {
+        await getStorageAdapter().delete(newlyUploadedPath);
+      } catch (cleanupError) {
+        console.error("[Workflow Action API] 清理失败上传文件失败:", cleanupError);
+      } finally {
+        newlyUploadedPath = null;
       }
     }
 
