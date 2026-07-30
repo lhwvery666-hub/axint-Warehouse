@@ -4,6 +4,7 @@ import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
 import { TicketActionType, UserRole } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 const requestSchema = z.object({
   reason: z.string().trim().min(1).max(2000),
@@ -13,6 +14,7 @@ const batchIdSchema = z.string().trim().min(1).max(100)
 
 interface CancelGuardRow {
   Id: number
+  quantity: number | null
   Status: string
   ReportByUserID: number | null
   CancelRequestStatus: string | null
@@ -44,7 +46,7 @@ export async function POST(
     const guard = await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
       .query<CancelGuardRow>(`
-        SELECT [Id], [Status], [ReportByUserID], [CancelRequestStatus]
+        SELECT [Id], [Quantity] AS [quantity], [Status], [ReportByUserID], [CancelRequestStatus]
         FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BatchId] = @batchId;
       `)
@@ -89,6 +91,7 @@ export async function POST(
     if (updateResult.rowsAffected[0] !== guard.recordset.length) {
       throw new Error("BATCH_CONFLICT")
     }
+    const deviceCount = sumDeviceQuantity(guard.recordset)
 
     await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
@@ -105,8 +108,8 @@ export async function POST(
     transaction = null
     return NextResponse.json({
       success: true,
-      message: `批次工单取消申请已提交，共 ${guard.recordset.length} 台设备等待审批`,
-      data: { batchId, deviceCount: guard.recordset.length },
+      message: `批次工单取消申请已提交，共 ${deviceCount} 台设备等待审批`,
+      data: { batchId, deviceCount },
     })
   } catch (error: unknown) {
     console.error("[Batch Cancel API] 申请失败:", error)

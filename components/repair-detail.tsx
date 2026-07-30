@@ -33,6 +33,7 @@ import WorkflowProgress from "@/components/workflow-progress"
 import { calculateProgress, getCurrentStep, getNextStep, STATUS_TRANSITIONS } from "@/lib/workflow-utils"
 import { UserRole, TicketStatus, normalizeTicketStatus, TERMINAL_STATUSES, WarrantyStatus, FaultCategory, RepairAction, REPAIR_ACTION_LABELS, FinalOutcome, FINAL_OUTCOME_LABELS, TICKET_STATUS_LABELS, isPendingSNPlaceholder } from "@/lib/enums"
 import TicketActionBar from "@/components/ticket-action-bar"
+import { TicketAction } from "@/lib/ticket-workflow-actions"
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
@@ -165,6 +166,7 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
   })
   const [isSavingRepair, setIsSavingRepair] = useState(false)
   const [isSavingAdmin, setIsSavingAdmin] = useState(false)
+  const [isSubmittingFactoryAction, setIsSubmittingFactoryAction] = useState(false)
   const [isSavingWarehouse, setIsSavingWarehouse] = useState(false)
   // 维修报告已提交后，是否允许重新编辑（点击"修改报告"后置为 true）
   const [isEditingRepairAfterSubmit, setIsEditingRepairAfterSubmit] = useState(false)
@@ -720,14 +722,10 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
     try {
       const requestBody: Record<string, unknown> = {}
       
-      // ✅ 新版 RMA 流程（2026-03 更新）：
-      // 返厂维修（RMA）现在与普通维修走完全相同的流程：
-      //   1. 维修人员勾选"返厂维修"后，直接填写维修报告（供应商、预估费用、出厂快递单号等）
-      //   2. 保存不改变状态（仍在 IN_REPAIR），不再设置 PENDING_FACTORY
-      //   3. 后续：发送报告 → 现场签字 → 技术员选最终处理结果 → 仓库发货
-      //   4. 对现场人员隐藏 RMA 标签，显示为"维修"（信息隔离保持不变）
+      // 新版 RMA 流程：先保存当前设备的返厂资料，但不在资料接口里隐式改变状态；
+      // 待同批次每台设备资料完整后，再由显式工作流动作将整批原子流转到 Pending_Factory。
       if (isOutsourced) {
-        // RMA 模式：保存所有字段，但【不改变状态】，流程继续走正常维修路径
+        // RMA 模式：仅保存资料，不改变状态。
         requestBody.supplierName       = repairFormData.supplierName || null
         requestBody.factoryTrackingNum = repairFormData.factoryTrackingNum || null
         requestBody.factoryRepairDate  = repairFormData.factoryRepairDate?.toISOString() || null
@@ -738,12 +736,11 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
         requestBody.faultPoint         = faultAndNotesCombined.trim() || null
         // ✅ 不再设置 requestBody.status = PENDING_FACTORY
       } else if (isRecheckMode) {
-        // 复检模式：填写故障点后流转到 Admin_Review
+        // 复检模式：仅保存复检资料，后续状态流转仍由专用工作流动作完成。
         requestBody.faultPoint = faultAndNotesCombined
         requestBody.materialCode = repairFormData.materialCode
         requestBody.deviceName = repairFormData.deviceName
         requestBody.fullSpec = repairFormData.fullSpec
-        // 状态会自动流转到 Admin_Review（通过后端逻辑）
       } else {
         // 正常维修模式
         requestBody.materialCode = repairFormData.materialCode
@@ -756,15 +753,8 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
         requestBody.factoryTrackingNum = repairFormData.factoryTrackingNum
         requestBody.supplierName = repairFormData.supplierName
         
-        // ⚠️ 回退逻辑（和仓库确认的 SN 变更回退机制相同）：
-        // 如果维修报告已经提交（状态为 Pending_Reporter_Confirm），现场人员尚未签字，
-        // 此时维修人员修改了报告内容 → 自动回退到 In_Repair，
-        // 需要重新通过工作流操作栏发起现场确认流程。
-        if (isEditingRepairAfterSubmit &&
-            normalizeTicketStatus(repairData.status || "") === TicketStatus.PENDING_REPORTER_CONFIRM) {
-          requestBody.status = TicketStatus.IN_REPAIR
-        }
-        // 其他情况不自动流转状态：维修人员填写完报告后需通过"工作流操作栏"手动发送
+        // 待现场确认阶段修改的仍是尚未签字的数据，无需通过通用资料接口回退状态。
+        // 所有状态变化只能由专用工作流动作执行。
       }
 
       // 无论哪种模式，追加 3W1H 相关字段（空值传 null）；故障点与处理说明使用同一合并内容
@@ -787,12 +777,12 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
         setRepairData({
           ...repairData,
           ...requestBody,
-          // ✅ RMA 不再改变状态；仅复检模式（兼容旧 Factory_Finished 工单）才流转到 Admin_Review
-          status: isRecheckMode ? TicketStatus.ADMIN_REVIEW : repairData.status,
+          // 资料保存不改变状态，后续流转统一由专用工作流动作完成。
+          status: repairData.status,
         })
         // 报告修改保存后退出编辑模式，回到只读"已提交"状态
         setIsEditingRepairAfterSubmit(false)
-        alert(isRecheckMode ? "复检完成，工单已流转至商务处理" : "维修记录保存成功")
+        alert(isRecheckMode ? "复检记录保存成功，请执行后续工作流动作" : "维修记录保存成功")
         // 刷新数据
         window.location.reload()
       } else {
@@ -842,41 +832,43 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
     }
   }
 
-  // 确认收到原厂寄回设备
-  const handleConfirmFactoryReceived = async () => {
-    if (!confirm("确认收到原厂寄回的设备？此操作将通知维修人员进行复检。")) {
+  const executeFactoryWorkflowAction = async (action: TicketAction) => {
+    setIsSubmittingFactoryAction(true)
+    try {
+      const response = await fetch(`/api/tickets/${taskId}/workflow-action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok || !result.success) {
+        alert(result.message || "返厂流程操作失败")
+        return false
+      }
+      window.location.reload()
+      return true
+    } catch (error: unknown) {
+      console.error("返厂流程操作失败:", error)
+      alert("操作失败，请重试")
+      return false
+    } finally {
+      setIsSubmittingFactoryAction(false)
+    }
+  }
+
+  const handleRequestFactoryRepair = async () => {
+    if (!confirm("确认将该批次全部设备提交原厂返修？请先保存每台设备的返厂方式、供应商和快递单号。")) {
       return
     }
-    
-    setIsSavingAdmin(true)
-    try {
-      const response = await fetch(`/api/tickets/${taskId}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          status: "Factory_Finished",
-        }),
-      })
+    await executeFactoryWorkflowAction(TicketAction.REQUEST_FACTORY_REPAIR)
+  }
 
-      const result = await response.json()
-      if (result.success) {
-        setRepairData({
-          ...repairData,
-          status: "Factory_Finished",
-        })
-        alert("已确认收到原厂寄回设备，已通知维修人员复检")
-        window.location.reload()
-      } else {
-        alert(result.message || "操作失败")
-      }
-    } catch (error) {
-      console.error("确认收到设备失败:", error)
-      alert("操作失败，请重试")
-    } finally {
-      setIsSavingAdmin(false)
+  // 确认收到原厂寄回设备
+  const handleConfirmFactoryReceived = async () => {
+    if (!confirm("确认已收到该批次全部原厂返修设备？此操作将整批通知维修人员复检。")) {
+      return
     }
+    await executeFactoryWorkflowAction(TicketAction.CONFIRM_FACTORY_RETURN)
   }
 
   // 保存管理员工作台数据
@@ -1492,10 +1484,13 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
             ticket={{
               id: repairData.id,
               batchId: repairData.batchId ?? undefined,
-              status: normalizeTicketStatus(repairData.status) || repairData.status as any,
+              status: normalizeTicketStatus(repairData.status) || TicketStatus.CREATED,
               faultPoint: repairData.faultPoint,
               repairCost: repairData.repairCost,
               signedReportPhoto: repairData.signedReportPhoto,
+              repairAction,
+              supplierName: repairData.supplierName,
+              factoryTrackingNum: repairData.factoryTrackingNum,
             }}
             currentUser={{
               id: user?.id || "",
@@ -1506,6 +1501,10 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
               // 刷新工单数据
               loadTicketData();
             }}
+            excludedActions={[
+              TicketAction.REQUEST_FACTORY_REPAIR,
+              TicketAction.CONFIRM_FACTORY_RETURN,
+            ]}
           />
         )}
         
@@ -1982,6 +1981,30 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                                     />
                                   </div>
                                 </div>
+                                {user && [UserRole.ADMIN, UserRole.TECHNICIAN].includes(user.role) &&
+                                  [TicketStatus.IN_REPAIR, TicketStatus.TECHNICIAN_REPAIRING].includes(
+                                    normalizeTicketStatus(repairData.status) as TicketStatus
+                                  ) && (
+                                  <div className="pointer-events-auto space-y-2 border-t pt-3">
+                                    <p className="text-xs text-muted-foreground">
+                                      请先保存本批次每台设备的返厂资料，再执行整批状态流转。
+                                    </p>
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      onClick={handleRequestFactoryRepair}
+                                      disabled={
+                                        isSavingRepair ||
+                                        isSubmittingFactoryAction ||
+                                        !repairFormData.supplierName.trim() ||
+                                        !repairFormData.factoryTrackingNum.trim()
+                                      }
+                                    >
+                                      <Truck className="mr-2 h-4 w-4" />
+                                      {isSubmittingFactoryAction ? "提交中..." : "提交整批返厂申请"}
+                                    </Button>
+                                  </div>
+                                )}
                               </div>
                             )}
                           </CardContent>
@@ -2307,7 +2330,7 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                                 </Button>
                                 <Button 
                                   onClick={handleConfirmFactoryReceived}
-                                  disabled={isSavingAdmin}
+                                  disabled={isSavingAdmin || isSubmittingFactoryAction}
                                 >
                                   <Truck className="w-4 h-4 mr-2" />
                                   确认收到原厂寄回设备

@@ -2,15 +2,14 @@
 
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
-import { Clock, Wrench, AlertCircle, ChevronRight, Filter, Search, Plus, ArrowLeft, ShieldCheck, ShieldAlert, Calendar, CheckCircle, Package, MessageSquare, FileCheck, Camera, ZoomIn, Download, Copy, FileText, DollarSign, Send, ClipboardList, PenTool } from "lucide-react"
+import { Clock, Wrench, AlertCircle, ChevronRight, Filter, Plus, ArrowLeft, ShieldCheck, ShieldAlert, Calendar, CheckCircle, Package, MessageSquare, FileCheck, Camera, ZoomIn, Download, Copy, FileText, DollarSign, Send, ClipboardList, PenTool } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Calendar as CalendarComponent } from "@/components/ui/calendar"
-import { format, isAfter, isBefore, parseISO, subDays, subMonths } from "date-fns"
+import { format } from "date-fns"
 import { zhCN } from "date-fns/locale"
 import { cn, toBeijingTime } from "@/lib/utils"
 import { useAuth } from "@/context/auth-context"
@@ -21,7 +20,11 @@ import { TicketChat } from "@/components/TicketChat"
 import { UserRole, TicketStatus, normalizeTicketStatus, OperationLogType, OPERATION_LOG_TYPE_LABELS, isTerminalStatus, TICKET_STATUS_LABELS } from "@/lib/enums"
 import { toast } from "sonner"
 import { WorkOrderListRow } from "@/components/work-order-list-row"
+import { WorkOrderCardStack } from "@/components/work-order-card-stack"
+import { WorkOrderFilterBar } from "@/components/work-order-filter-bar"
 import { resolveTimeFilterPool, getTimeFilterTargetDate } from "@/lib/workflow-utils"
+import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, matchesRepairTimeRange, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 // ==================== 类型定义 ====================
 /**
@@ -47,6 +50,7 @@ interface BatchDevice {
   problem?: string
   fault?: string
   repairReason?: string
+  quantity?: number
 }
 
 interface RepairPageProps {
@@ -124,8 +128,10 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
       setView(batchContext ? "batchSelect" : "tasks")
     }
   }, [taskId, batchContext])
-  const [searchQuery, setSearchQuery] = useState("")
-  const [filterStatus, setFilterStatus] = useState<string>("all")
+  const [workOrderQuery, setWorkOrderQuery] = useState("")
+  const [customerQuery, setCustomerQuery] = useState("")
+  const [deviceQuery, setDeviceQuery] = useState("")
+  const [filterStatus, setFilterStatus] = useState<string>(ALL_REPAIR_STATUS_FILTER)
   const [filterTimeRange, setFilterTimeRange] = useState<string>("all")
   const [dateRange, setDateRange] = useState<{
     from: Date | undefined;
@@ -144,9 +150,12 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
     // 转换为组件需要的格式
     const formattedTasks = repairs.map((repair) => ({
       id: repair.id,
+      workOrderNumber: repair.workOrderNumber || "",
       deviceId: repair.deviceId,
       // 列表卡片只显示产品名称，避免前缀太长
       deviceName: repair.deviceName || repair.deviceModel || "未知设备",
+      deviceModel: repair.deviceModel || "",
+      quantity: repair.quantity,
       deviceSerialNumber: repair.deviceSerialNumber,
       productSN: repair.productSN || repair.deviceSerialNumber || "", // ProductSN 字段
       location: repair.location,
@@ -160,7 +169,11 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
       // 批次相关字段
       batchId: (repair as any).batchId || null,
       projectName: (repair as any).projectName || repair.projectLocation || repair.location || "",
+      customerName: repair.customerName || "",
       contactInfo: (repair as any).contactInfo || "",
+      reportedBy: repair.reportedBy || "",
+      reportedByUsername: repair.reportedByUsername || "",
+      reportedByUserId: repair.reportedByUserId || "",
       rawData: repair, // 保存原始数据
     }));
     
@@ -176,7 +189,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
           // 已有该批次，添加设备到devices数组
           const batchTask = batchMap.get(task.batchId);
           batchTask.devices.push(task);
-          batchTask.deviceCount = batchTask.devices.length;
+          batchTask.deviceCount = sumDeviceQuantity(batchTask.devices);
         } else {
           // 新批次，创建批次任务对象
           batchMap.set(task.batchId, {
@@ -185,7 +198,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
             batchId: task.batchId,
             projectName: task.projectName || "未知项目",
             contactInfo: task.contactInfo || "无联系信息",
-            deviceCount: 1,
+            deviceCount: sumDeviceQuantity([task]),
             status: task.status,
             priority: task.priority,
             reportedAt: task.reportedAt,
@@ -344,42 +357,21 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
   // 其余状态 / "全部" → 保持原有的 reportedAt 基础逻辑。详见 lib/workflow-utils.ts。
   const filterTasksByTimeRange = (task: any) => {
     if (filterTimeRange === "all") return true;
-    
-    // 获取完整的reportedAt日期字符串，而不是只取时间部分
-    const baseReportDate = task.reportedAt.includes(" ") ? 
-      task.reportedAt : 
-      repairs.find(r => r.id === task.id)?.reportedAt || "";
+
+    // API 返回的是完整 ISO 时间。批次 task.id 是 batchId，不能用它回查单设备 id，
+    // 否则 ISO 字符串会被错误丢弃，导致“今天”筛选始终为空。
+    const baseReportDate = task.reportedAt ||
+      task.devices?.[0]?.reportedAt ||
+      repairs.find(r => r.id === task.id)?.reportedAt ||
+      "";
 
     const pool = resolveTimeFilterPool(filterStatus);
     const fullReportDate = getTimeFilterTargetDate(pool, task.rawData, baseReportDate) || "";
-    
-    // 解析日期字符串为Date对象
-    const taskDate = parseISO(fullReportDate.split(" ")[0]);
-    const today = new Date();
-    
-    // 添加调试日志
-    console.log("Task date:", taskDate, "Full report date:", fullReportDate);
-    
-    switch (filterTimeRange) {
-      case "today":
-        return taskDate.toDateString() === today.toDateString();
-      case "week":
-        return isAfter(taskDate, subDays(today, 7));
-      case "month":
-        return isAfter(taskDate, subMonths(today, 1));
-      case "custom":
-        if (!dateRange.from) return true;
-        if (dateRange.from && !dateRange.to) {
-          return isAfter(taskDate, dateRange.from) || taskDate.toDateString() === dateRange.from.toDateString();
-        }
-        return (isAfter(taskDate, dateRange.from) || taskDate.toDateString() === dateRange.from.toDateString()) && 
-               (isBefore(taskDate, dateRange.to || new Date()) || taskDate.toDateString() === (dateRange.to || new Date()).toDateString());
-      default:
-        return true;
-    }
+
+    return matchesRepairTimeRange(fullReportDate, filterTimeRange, dateRange);
   };
   
-  // 先按状态筛选，再按时间筛选，最后按搜索关键词筛选
+  // 排除终止状态后，依次应用时间筛选和多条件联合筛选
   // 排除终止状态的工单（Cancelled, Scrapped, Return_Unrepaired）
   const filteredTasks = tasks
     .filter(task => {
@@ -390,23 +382,13 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
       }
       return true
     })
-    .filter(task => 
-      // ⚠️ 修复：task.status 是 RepairContext 转换后的全小写状态（如 "completed"），
-      // 而下拉框的 filterStatus 是后端规范枚举值（如 "Completed"），两者大小写/命名不一致，
-      // 必须先用 normalizeTicketStatus 统一归一化后再比较，否则筛选永远不匹配
-      filterStatus === "all" || 
-      normalizeTicketStatus(task.status) === filterStatus
-    )
     .filter(filterTasksByTimeRange)
-    .filter(task => {
-      if (searchQuery === "") return true
-      const q = searchQuery.toLowerCase()
-      return (
-        (task.workOrderNumber && task.workOrderNumber.toLowerCase().includes(q)) ||
-        (task.deviceSerialNumber && task.deviceSerialNumber.toLowerCase().includes(q)) ||
-        (task.fault && task.fault.toLowerCase().includes(q))
-      )
-    })
+    .filter(task => matchesRepairListFilters(task, {
+      workOrderQuery,
+      customerQuery,
+      deviceQuery,
+      status: filterStatus,
+    }))
 
   // 报告人员使用专门的报告页面，不再在这里处理
   if (userRole === UserRole.REPORTER) {
@@ -441,41 +423,21 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
 
           <div className="space-y-6">
             {/* 搜索和筛选 */}
-            <div className="flex flex-col md:flex-row gap-4">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input 
-                  placeholder="搜索维修工单..." 
-                  className="pl-10"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-              </div>
-              
-              {/* 状态筛选 */}
-              <div className="flex gap-2">
+            <WorkOrderFilterBar
+              workOrderQuery={workOrderQuery}
+              customerQuery={customerQuery}
+              deviceQuery={deviceQuery}
+              status={filterStatus}
+              statusOptions={REPAIR_STATUS_FILTER_OPTIONS}
+              onWorkOrderQueryChange={setWorkOrderQuery}
+              onCustomerQueryChange={setCustomerQuery}
+              onDeviceQueryChange={setDeviceQuery}
+              onStatusChange={setFilterStatus}
+              trailing={(
+                <>
                 <select
-                  className="px-3 py-2 rounded-md border border-border bg-background text-sm"
-                  value={filterStatus}
-                  onChange={(e) => setFilterStatus(e.target.value)}
-                >
-                  <option value="all">全部状态</option>
-                  <option value={TicketStatus.CREATED}>待处理</option>
-                  <option value={TicketStatus.WAREHOUSE_CONFIRMING}>待仓库确认</option>
-                  <option value={TicketStatus.WAREHOUSE_CONFIRMED}>仓库已确认</option>
-                  <option value={TicketStatus.IN_REPAIR}>维修检查中</option>
-                  <option value={TicketStatus.PENDING_REPORTER_CONFIRM}>待现场确认</option>
-                  <option value={TicketStatus.TECHNICIAN_REPAIRING}>维修作业中</option>
-                  <option value={TicketStatus.BUSINESS_REVIEW}>待商务处理</option>
-                  <option value={TicketStatus.WAREHOUSE_SHIPPING}>待发货</option>
-                  <option value={TicketStatus.COMPLETED}>已完成</option>
-                  <option value={TicketStatus.UNREPAIRABLE}>无法维修</option>
-                  <option value={TicketStatus.DELAYED}>已延期</option>
-                </select>
-                
-                {/* 时间筛选 */}
-                <select
-                  className="px-3 py-2 rounded-md border border-border bg-background text-sm"
+                  aria-label="筛选时间范围"
+                  className="h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm"
                   value={filterTimeRange}
                   onChange={(e) => setFilterTimeRange(e.target.value)}
                 >
@@ -485,7 +447,6 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                   <option value="month">最近30天</option>
                   <option value="custom">自定义时间</option>
                 </select>
-                
                 {/* 自定义时间范围选择器 */}
                 {filterTimeRange === "custom" && (
                   <Popover open={isCalendarOpen} onOpenChange={setIsCalendarOpen}>
@@ -532,8 +493,9 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                     </PopoverContent>
                   </Popover>
                 )}
-              </div>
-            </div>
+                </>
+              )}
+            />
 
             {/* 任务统计 */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -576,9 +538,9 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
             </div>
 
             {/* 任务列表 —— 紧凑列表模式 */}
-            <Card className="border-border/50 dark:border-border overflow-hidden">
+            <Card className="overflow-visible border-0 bg-transparent py-0 shadow-none">
               {filteredTasks.length > 0 ? (
-                <div className="flex flex-col">
+                <WorkOrderCardStack>
                   {filteredTasks.map((task) => {
                     const unread = task.isBatch ? getUnreadCount(task.batchId, task.rawData?.messageCount || 0) : 0
                     const isTerminal = isTerminalStatus(task.status)
@@ -595,9 +557,15 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                         title={task.isBatch ? `工单号：${task.batchId}` : `工单号：${task.workOrderNumber || task.id}`}
                         isBatch={task.isBatch}
                         projectName={task.isBatch ? task.projectName : undefined}
+                        customerName={task.customerName || task.devices?.[0]?.customerName}
+                        reportedBy={task.reportedBy || task.devices?.[0]?.reportedBy}
+                        reportedByUsername={task.reportedByUsername || task.devices?.[0]?.reportedByUsername}
                         contactInfo={task.isBatch ? task.contactInfo : undefined}
                         deviceCount={task.isBatch ? task.deviceCount : undefined}
                         deviceSerials={task.isBatch && task.devices ? task.devices.map((d: any) => d.deviceSerialNumber) : undefined}
+                        deviceSerialNumber={task.deviceSerialNumber}
+                        deviceModel={task.deviceModel}
+                        deviceModels={task.isBatch && task.devices ? task.devices.map((d: any) => d.deviceModel) : undefined}
                         faultText={task.fault}
                         inWarranty={task.inWarranty}
                         priorityIndicator={getPriorityIndicator(task.priority)}
@@ -624,9 +592,9 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                       />
                     )
                   })}
-                </div>
+                </WorkOrderCardStack>
               ) : (
-                <CardContent className="p-8 text-center">
+                <CardContent className="rounded-xl border border-border/50 bg-card p-8 text-center">
                   <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
                     <AlertCircle className="h-8 w-8 text-muted-foreground" />
                   </div>
@@ -673,7 +641,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                 工单号：{activeBatchContext.batchId}
               </p>
               <p className="text-xs text-muted-foreground mt-1">
-                共 {activeBatchContext.devices.length} 个设备
+                共 {sumDeviceQuantity(activeBatchContext.devices)} 台设备
               </p>
             </div>
           </div>

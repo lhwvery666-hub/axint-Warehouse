@@ -291,6 +291,7 @@ export enum TicketActionType {
   REWIND_UPDATE = "Rewind_Update",                    // 状态自动回溯更新（编辑导致状态回退）
   MANUFACTURE_DATE_OVERRIDE = "ManufactureDateOverride", // 仓库人员在后期流程中特权修改出厂日期（不改变工单状态）
   RMA_REQUEST = "RMA_Request",                        // 返厂维修申请（填写返厂快递单号）
+  FACTORY_RETURN_CONFIRMED = "FactoryReturnConfirmed", // 确认整批原厂返修设备已寄回
 }
 
 // ==================== 路由路径常量 ====================

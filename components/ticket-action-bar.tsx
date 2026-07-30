@@ -27,14 +27,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { AlertCircle, CheckCircle, Upload, Loader2 } from "lucide-react";
-import { TicketStatus, UserRole, TICKET_STATUS_LABELS, normalizeTicketStatus } from "@/lib/enums";
+import { RepairAction, TicketStatus, UserRole, TICKET_STATUS_LABELS, normalizeTicketStatus } from "@/lib/enums";
 import {
-  getAvailableAction,
+  getAvailableActions,
   TicketAction,
   TICKET_ACTION_LABELS,
-  WorkflowTransition,
 } from "@/lib/ticket-workflow-actions";
 import { cn } from "@/lib/utils";
+import { sumDeviceQuantity } from "@/lib/device-quantity";
 
 // ==================== 类型定义 ====================
 
@@ -48,10 +48,14 @@ export interface TicketData {
   // 用于验证的字段
   faultPoint?: string | null;
   repairCost?: number | null;
+  repairAction?: string | null;
+  supplierName?: string | null;
+  factoryTrackingNum?: string | null;
   signedReportPhoto?: string | null; // 签字凭证照片路径
   // 批次相关
   devices?: Array<{
     id: string;
+    quantity?: number | null;
     shippingDate?: string | null; // 出库日期
   }>;
 }
@@ -80,6 +84,7 @@ export interface TicketActionBarProps {
   ticket: TicketData;
   currentUser: CurrentUser;
   onActionSuccess?: () => void; // 操作成功后的回调（用于刷新数据）
+  excludedActions?: readonly TicketAction[];
   className?: string;
 }
 
@@ -101,7 +106,7 @@ function validateAllDevicesHaveShippingDate(ticket: TicketData): ValidationResul
   if (devicesWithoutDate.length > 0) {
     return {
       valid: false,
-      message: `请先录入所有设备的出库日期（还有 ${devicesWithoutDate.length} 台设备未录入）`,
+      message: `请先录入所有设备的出库日期（还有 ${sumDeviceQuantity(devicesWithoutDate)} 台设备未录入）`,
     };
   }
 
@@ -132,6 +137,17 @@ function validateRepairReportComplete(ticket: TicketData): ValidationResult {
   return { valid: true };
 }
 
+function validateFactoryRepairDetails(ticket: TicketData): ValidationResult {
+  const missingFields: string[] = [];
+  if (ticket.repairAction !== RepairAction.RMA) missingFields.push("维修动作选择返厂维修");
+  if (!ticket.supplierName?.trim()) missingFields.push("供应商名称");
+  if (!ticket.factoryTrackingNum?.trim()) missingFields.push("返厂快递单号");
+
+  return missingFields.length === 0
+    ? { valid: true }
+    : { valid: false, message: `请先保存：${missingFields.join("、")}` };
+}
+
 /**
  * 根据验证键执行对应的验证逻辑
  */
@@ -144,6 +160,8 @@ function runValidation(
       return validateAllDevicesHaveShippingDate(ticket);
     case "repair_report_complete":
       return validateRepairReportComplete(ticket);
+    case "factory_repair_details_complete":
+      return validateFactoryRepairDetails(ticket);
     default:
       console.warn(`[TicketActionBar] 未知的验证键: ${validationKey}`);
       return { valid: true };
@@ -156,11 +174,12 @@ export default function TicketActionBar({
   ticket,
   currentUser,
   onActionSuccess,
+  excludedActions = [],
   className,
 }: TicketActionBarProps) {
   // ==================== 状态管理 ====================
   
-  const [isExecuting, setIsExecuting] = useState(false);
+  const [executingAction, setExecutingAction] = useState<TicketAction | null>(null);
   const [showUploadDialog, setShowUploadDialog] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadPreview, setUploadPreview] = useState<string | null>(null);
@@ -168,27 +187,12 @@ export default function TicketActionBar({
 
   // ==================== 核心逻辑：获取当前可执行的动作 ====================
 
-  const availableTransition = getAvailableAction(ticket.status, currentUser.role);
+  const availableTransitions = getAvailableActions(ticket.status, currentUser.role)
+    .filter((transition) => !excludedActions.includes(transition.action));
 
   // 如果没有可执行的动作，不显示任何操作栏
-  if (!availableTransition) {
+  if (availableTransitions.length === 0) {
     return null;
-  }
-
-  const { action, nextStatus, requiresValidation, validationKey } =
-    availableTransition;
-
-  // ==================== 前置条件验证 ====================
-
-  let canProceed = true;
-  let blockMessage: string | null = null;
-
-  if (requiresValidation && validationKey) {
-    const validationResult = runValidation(validationKey, ticket);
-    if (!validationResult.valid) {
-      canProceed = false;
-      blockMessage = validationResult.message || "前置条件未满足";
-    }
   }
 
   // ==================== 动作执行处理 ====================
@@ -196,7 +200,7 @@ export default function TicketActionBar({
   /**
    * 执行工作流动作
    */
-  const handleExecuteAction = async () => {
+  const handleExecuteAction = async (action: TicketAction) => {
     setValidationError(null);
 
     // 特殊处理：上传签字凭证需要弹出文件上传对话框
@@ -206,14 +210,14 @@ export default function TicketActionBar({
     }
 
     // 其他动作直接调用 API
-    await executeAction();
+    await executeAction(action);
   };
 
   /**
    * 调用 Server Action API
    */
-  const executeAction = async () => {
-    setIsExecuting(true);
+  const executeAction = async (action: TicketAction) => {
+    setExecutingAction(action);
 
     try {
       const response = await fetch(`/api/tickets/${ticket.id}/workflow-action`, {
@@ -239,11 +243,11 @@ export default function TicketActionBar({
       if (onActionSuccess) {
         onActionSuccess();
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("[TicketActionBar] 执行动作失败:", error);
-      setValidationError(error.message || "网络错误，请稍后重试");
+      setValidationError(error instanceof Error ? error.message : "网络错误，请稍后重试");
     } finally {
-      setIsExecuting(false);
+      setExecutingAction(null);
     }
   };
 
@@ -256,7 +260,7 @@ export default function TicketActionBar({
       return;
     }
 
-    setIsExecuting(true);
+    setExecutingAction(TicketAction.UPLOAD_SIGNATURE);
 
     try {
       // 1. 上传文件到服务器
@@ -303,11 +307,11 @@ export default function TicketActionBar({
       if (onActionSuccess) {
         onActionSuccess();
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("[TicketActionBar] 文件上传失败:", error);
-      setValidationError(error.message || "网络错误，请稍后重试");
+      setValidationError(error instanceof Error ? error.message : "网络错误，请稍后重试");
     } finally {
-      setIsExecuting(false);
+      setExecutingAction(null);
     }
   };
 
@@ -341,20 +345,10 @@ export default function TicketActionBar({
           <CardDescription>
             当前状态：{normalizeTicketStatus(ticket.status) 
               ? TICKET_STATUS_LABELS[normalizeTicketStatus(ticket.status)!] 
-              : ticket.status} → 下一状态：{normalizeTicketStatus(nextStatus) 
-              ? TICKET_STATUS_LABELS[normalizeTicketStatus(nextStatus)!] 
-              : nextStatus}
+              : ticket.status}；可执行 {availableTransitions.length} 个动作
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* 前置条件未满足的提示 */}
-          {!canProceed && blockMessage && (
-            <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>{blockMessage}</AlertDescription>
-            </Alert>
-          )}
-
           {/* 验证错误提示 */}
           {validationError && (
             <Alert variant="destructive">
@@ -363,16 +357,39 @@ export default function TicketActionBar({
             </Alert>
           )}
 
-          {/* 操作按钮 */}
-          <Button
-            onClick={handleExecuteAction}
-            disabled={!canProceed || isExecuting}
-            className="w-full"
-            size="lg"
-          >
-            {isExecuting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {TICKET_ACTION_LABELS[action]}
-          </Button>
+          {availableTransitions.map((transition) => {
+            const validationResult = transition.requiresValidation && transition.validationKey
+              ? runValidation(transition.validationKey, ticket)
+              : { valid: true };
+            const nextStatusLabel = normalizeTicketStatus(transition.nextStatus)
+              ? TICKET_STATUS_LABELS[normalizeTicketStatus(transition.nextStatus)!]
+              : transition.nextStatus;
+
+            return (
+              <div key={transition.action} className="space-y-2 rounded-lg border p-3">
+                <div className="text-sm text-muted-foreground">
+                  执行后进入：{nextStatusLabel}
+                </div>
+                {!validationResult.valid && validationResult.message && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>{validationResult.message}</AlertDescription>
+                  </Alert>
+                )}
+                <Button
+                  onClick={() => handleExecuteAction(transition.action)}
+                  disabled={!validationResult.valid || executingAction !== null}
+                  className="w-full"
+                  size="lg"
+                >
+                  {executingAction === transition.action && (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  )}
+                  {TICKET_ACTION_LABELS[transition.action]}
+                </Button>
+              </div>
+            );
+          })}
         </CardContent>
       </Card>
 
@@ -394,7 +411,7 @@ export default function TicketActionBar({
                 type="file"
                 accept="image/*,.pdf"
                 onChange={handleFileChange}
-                disabled={isExecuting}
+                disabled={executingAction !== null}
               />
             </div>
 
@@ -422,12 +439,14 @@ export default function TicketActionBar({
             <Button
               variant="outline"
               onClick={() => setShowUploadDialog(false)}
-              disabled={isExecuting}
+              disabled={executingAction !== null}
             >
               取消
             </Button>
-            <Button onClick={handleFileUpload} disabled={!uploadFile || isExecuting}>
-              {isExecuting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            <Button onClick={handleFileUpload} disabled={!uploadFile || executingAction !== null}>
+              {executingAction === TicketAction.UPLOAD_SIGNATURE && (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              )}
               <Upload className="mr-2 h-4 w-4" />
               上传并提交
             </Button>

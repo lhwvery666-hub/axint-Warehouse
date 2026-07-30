@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, UserRole, normalizeUserRole, REPAIR_ACTION_LABELS, RepairAction, TicketActionType, TERMINAL_STATUSES, normalizeTicketStatus } from "@/lib/enums"
-import { cookies } from "next/headers"
+import { DB_FIELDS, UserRole, REPAIR_ACTION_LABELS, RepairAction, TicketActionType, TERMINAL_STATUSES, normalizeTicketStatus } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 const REPAIR_REPORT_READ_ROLES: UserRole[] = [
   UserRole.ADMIN,
@@ -205,63 +205,20 @@ export async function GET(
  */
 export async function PUT(
   request: Request,
-  context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
+  context: { params: Promise<{ batchId: string }> }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.TECHNICIAN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
-    // 权限验证：只有维修人员可以编辑维修报告
-    const cookieStore = await cookies()
-    const userIdCookie = cookieStore.get("userId")?.value || null
-    
-    if (!userIdCookie) {
-      return NextResponse.json(
-        { success: false, message: "未登录，无法更新维修报告" },
-        { status: 401 }
-      )
-    }
-
     const pool = await getDbConnection()
-    
-    // 查询用户角色
-    const userResult = await pool
-      .request()
-      .input("userId", userIdCookie)
-      .query(`
-        SELECT TOP 1 Role, RealName
-        FROM Users
-        WHERE UserID = @userId
-      `)
-
-    if (userResult.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "用户不存在" },
-        { status: 403 }
-      )
-    }
-
-    const userData = userResult.recordset[0]
-    const normalizedRole = normalizeUserRole(userData.Role)
-    
-    // 只有维修人员和管理员可以编辑维修报告
-    if (normalizedRole !== UserRole.TECHNICIAN && normalizedRole !== UserRole.ADMIN) {
-      return NextResponse.json(
-        { 
-          success: false, 
-          message: "权限不足：只有维修人员和管理员可以编辑维修报告" 
-        },
-        { status: 403 }
-      )
-    }
-
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
+    const resolvedParams = await context.params
 
     const batchId = resolvedParams.batchId
     const body = await request.json()
     // sendToReporter: true = 发送流程（改变状态）
     // isRevision:     true = 已发送后的修改（需要回退状态 + 写入变更日志）
-    const { devices, remarks, sendToReporter, isRevision } = body
+    const { devices, sendToReporter, isRevision } = body
 
     if (!devices || !Array.isArray(devices)) {
       return NextResponse.json(
@@ -270,12 +227,21 @@ export async function PUT(
       )
     }
 
-    console.log(`📝 维修人员 ${userData.RealName} 更新批次维修报告: ${batchId}, ${devices.length} 个设备, sendToReporter=${sendToReporter}, isRevision=${isRevision}`)
+    const quantityResult = await pool
+      .request()
+      .input("batchId", batchId)
+      .query<{ totalQuantity: number }>(`
+        SELECT SUM(CASE WHEN ISNULL(${DB_FIELDS.QUANTITY}, 0) > 0 THEN ${DB_FIELDS.QUANTITY} ELSE 1 END) AS totalQuantity
+        FROM Repair_Tickets
+        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
+      `)
+    const totalQuantity = Number(quantityResult.recordset[0]?.totalQuantity) || sumDeviceQuantity(devices)
+    console.log(`📝 维修人员 ${authResult.realName} 更新批次维修报告: ${batchId}, ${totalQuantity} 台设备, sendToReporter=${sendToReporter}, isRevision=${isRevision}`)
 
     // ── 若是修订模式，先读取旧值用于比对 ──
     // 只关心 repairCost（金额是最常见的修改项）
     type OldDevice = { Id: number; RepairCost: number | null; RepairReportContent: string | null }
-    let oldDeviceMap: Map<number, OldDevice> = new Map()
+    const oldDeviceMap: Map<number, OldDevice> = new Map()
     if (isRevision === true) {
       const oldResult = await pool
         .request()
@@ -376,8 +342,8 @@ export async function PUT(
           .request()
           .input("batchId", batchId)
           .input("actionType", TicketActionType.REPAIR_REPORT_REVISED)
-          .input("operatorId", Number(userIdCookie))
-          .input("operatorName", userData.RealName || "维修人员")
+          .input("operatorId", Number(authResult.userId))
+          .input("operatorName", authResult.realName || "维修人员")
           .input("oldStatus", currentStatus)
           .input("newStatus", isTerminal ? currentStatus : "In_Repair")
           .input("description",
@@ -428,9 +394,9 @@ export async function PUT(
             .request()
             .input("batchId", batchId)
             .input("actionType", TicketActionType.REPAIR_REPORT_SUBMITTED)
-            .input("operatorId", Number(userIdCookie))
-            .input("operatorName", userData.RealName || "维修人员")
-            .input("description", `提交维修报告并发送流程，现场人员可签字确认（共 ${devices.length} 台设备）`)
+            .input("operatorId", Number(authResult.userId))
+            .input("operatorName", authResult.realName || "维修人员")
+            .input("description", `提交维修报告并发送流程，现场人员可签字确认（共 ${totalQuantity} 台设备）`)
             .input("createdAt", new Date())
             .query(`
               INSERT INTO Repair_Ticket_History (

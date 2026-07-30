@@ -19,6 +19,7 @@ export enum TicketAction {
   
   // 维修人员动作
   SEND_REPORT_FOR_SIGN = "send_report_for_sign", // 发送维修报告至现场确认
+  REQUEST_FACTORY_REPAIR = "request_factory_repair", // 提交整批返厂维修申请
   /**
    * @deprecated 遗留动作，未被任何前端组件触发。
    * 该动作原本允许维修人员在"维修作业中"（Technician_Repairing）状态下
@@ -34,6 +35,7 @@ export enum TicketAction {
   
   // 商务人员动作
   CONFIRM_PAYMENT = "confirm_payment",           // 确认收费完结，通知发货
+  CONFIRM_FACTORY_RETURN = "confirm_factory_return", // 确认整批原厂返修设备已寄回
 }
 
 /**
@@ -43,9 +45,11 @@ export const TICKET_ACTION_LABELS: Record<TicketAction, string> = {
   [TicketAction.CONFIRM_RECEIPT]: "核对设备并确认收货",
   [TicketAction.CONFIRM_SHIPMENT]: "确认出库发货",
   [TicketAction.SEND_REPORT_FOR_SIGN]: "发送维修报告至现场确认",
+  [TicketAction.REQUEST_FACTORY_REPAIR]: "提交整批返厂维修申请",
   [TicketAction.CONFIRM_SIGNATURE]: "核对凭证并转交商务",
   [TicketAction.UPLOAD_SIGNATURE]: "上传签字凭证",
   [TicketAction.CONFIRM_PAYMENT]: "确认收费完结，通知发货",
+  [TicketAction.CONFIRM_FACTORY_RETURN]: "确认收到整批原厂返修设备",
 };
 
 // ==================== 状态流转规则定义 ====================
@@ -89,6 +93,38 @@ export const WORKFLOW_TRANSITIONS: WorkflowTransition[] = [
     requiresValidation: true,
     validationKey: "repair_report_complete",
   },
+  {
+    currentStatus: TicketStatus.IN_REPAIR,
+    allowedRole: UserRole.TECHNICIAN,
+    action: TicketAction.REQUEST_FACTORY_REPAIR,
+    nextStatus: TicketStatus.PENDING_FACTORY,
+    requiresValidation: true,
+    validationKey: "factory_repair_details_complete",
+  },
+  {
+    currentStatus: TicketStatus.TECHNICIAN_REPAIRING,
+    allowedRole: UserRole.TECHNICIAN,
+    action: TicketAction.REQUEST_FACTORY_REPAIR,
+    nextStatus: TicketStatus.PENDING_FACTORY,
+    requiresValidation: true,
+    validationKey: "factory_repair_details_complete",
+  },
+  {
+    currentStatus: TicketStatus.IN_REPAIR,
+    allowedRole: UserRole.ADMIN,
+    action: TicketAction.REQUEST_FACTORY_REPAIR,
+    nextStatus: TicketStatus.PENDING_FACTORY,
+    requiresValidation: true,
+    validationKey: "factory_repair_details_complete",
+  },
+  {
+    currentStatus: TicketStatus.TECHNICIAN_REPAIRING,
+    allowedRole: UserRole.ADMIN,
+    action: TicketAction.REQUEST_FACTORY_REPAIR,
+    nextStatus: TicketStatus.PENDING_FACTORY,
+    requiresValidation: true,
+    validationKey: "factory_repair_details_complete",
+  },
   
   // 4. 待现场确认 -> 维修进行中（签字已上传）
   {
@@ -126,6 +162,20 @@ export const WORKFLOW_TRANSITIONS: WorkflowTransition[] = [
     nextStatus: TicketStatus.COMPLETED,
     requiresValidation: false,
   },
+  {
+    currentStatus: TicketStatus.PENDING_FACTORY,
+    allowedRole: UserRole.ADMIN,
+    action: TicketAction.CONFIRM_FACTORY_RETURN,
+    nextStatus: TicketStatus.FACTORY_FINISHED,
+    requiresValidation: false,
+  },
+  {
+    currentStatus: TicketStatus.PENDING_FACTORY,
+    allowedRole: UserRole.BUSINESS,
+    action: TicketAction.CONFIRM_FACTORY_RETURN,
+    nextStatus: TicketStatus.FACTORY_FINISHED,
+    requiresValidation: false,
+  },
 ];
 
 // ==================== 工具函数 ====================
@@ -136,15 +186,15 @@ export const WORKFLOW_TRANSITIONS: WorkflowTransition[] = [
  * @param currentUserRole 当前用户角色
  * @returns 可执行的工作流流转规则，如果没有则返回 null
  */
-export function getAvailableAction(
+export function getAvailableActions(
   currentStatus: TicketStatus,
   currentUserRole: UserRole
-): WorkflowTransition | null {
-  return WORKFLOW_TRANSITIONS.find(
+): WorkflowTransition[] {
+  return WORKFLOW_TRANSITIONS.filter(
     (transition) =>
       transition.currentStatus === currentStatus &&
       transition.allowedRole === currentUserRole
-  ) || null;
+  );
 }
 
 /**
@@ -173,15 +223,15 @@ export function canExecuteAction(
  *
  * 服务端必须使用该函数决定 expectedStatus，不能相信客户端提交的 currentStatus。
  */
-export function getTransitionForActionAndRole(
+export function getTransitionsForActionAndRole(
   action: TicketAction,
   currentUserRole: UserRole
-): WorkflowTransition | null {
-  return WORKFLOW_TRANSITIONS.find(
+): WorkflowTransition[] {
+  return WORKFLOW_TRANSITIONS.filter(
     (transition) =>
       transition.action === action &&
       transition.allowedRole === currentUserRole
-  ) || null;
+  );
 }
 
 /**

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, TicketStatus, TicketActionType } from "@/lib/enums"
+import { DB_FIELDS, TicketStatus, TicketActionType, UserRole } from "@/lib/enums"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 // POST /api/tickets/warehouse-shipping-batch/[batchId]
 // 仓库管理员完成批次发货（发回客户或入库）
@@ -9,9 +11,13 @@ export async function POST(
   request: Request,
   context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.WAREHOUSE])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const body = await request.json()
-    let { shippingType, returnDate, returnTrackingNum, returnQuantity } = body
+    const { shippingType, returnDate, returnQuantity } = body
+    let { returnTrackingNum } = body
     
     // 清理快递单号中的空格（防呆处理）
     if (returnTrackingNum && typeof returnTrackingNum === 'string') {
@@ -92,7 +98,7 @@ export async function POST(
       .request()
       .input("batchId", batchId)
       .query(`
-        SELECT ${DB_FIELDS.ID}
+        SELECT ${DB_FIELDS.ID}, ${DB_FIELDS.QUANTITY} AS quantity
         FROM Repair_Tickets
         WHERE ${DB_FIELDS.BATCH_ID} = @batchId
       `)
@@ -103,6 +109,7 @@ export async function POST(
         { status: 404 }
       )
     }
+    const deviceCount = sumDeviceQuantity(devicesResult.recordset)
 
     // 更新批次中所有设备的发货信息和状态
     const updatePromises = devicesResult.recordset.map(async (device: any) => {
@@ -149,7 +156,7 @@ export async function POST(
     try {
       const operatorName = userResult.recordset[0].RealName || userResult.recordset[0].Username || "仓库管理员"
       const shippingDesc = shippingType === "return"
-        ? `发回客户（快递单号：${returnTrackingNum || "无"}，数量：${returnQuantity || devicesResult.recordset.length} 台）`
+        ? `发回客户（快递单号：${returnTrackingNum || "无"}，数量：${returnQuantity || deviceCount} 台）`
         : `产品入库存储`
 
       // OperatorId 必须是合法整数，否则 SQL Server INT 列报错导致日志丢失
@@ -161,7 +168,7 @@ export async function POST(
         .input("batchId", batchId)
         .input("actionType", TicketActionType.WAREHOUSE_SHIPPED)
         .input("operatorName", operatorName)
-        .input("description", `仓库发货完成，${shippingDesc}，共 ${devicesResult.recordset.length} 台设备`)
+        .input("description", `仓库发货完成，${shippingDesc}，共 ${deviceCount} 台设备`)
         .input("createdAt", new Date())
 
       if (safeOperatorId !== null) histReq.input("operatorId", safeOperatorId)
@@ -182,11 +189,11 @@ export async function POST(
     return NextResponse.json({
       success: true,
       message: shippingType === "return" 
-        ? `批次设备已发回客户，共 ${devicesResult.recordset.length} 台` 
-        : `批次设备已入库，共 ${devicesResult.recordset.length} 台`,
+        ? `批次设备已发回客户，共 ${deviceCount} 台`
+        : `批次设备已入库，共 ${deviceCount} 台`,
       data: {
         batchId,
-        deviceCount: devicesResult.recordset.length,
+        deviceCount,
         shippingType
       }
     })

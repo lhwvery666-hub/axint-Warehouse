@@ -33,6 +33,7 @@ import { useAuth } from "@/context/auth-context"
 import { format } from "date-fns"
 import { zhCN } from "date-fns/locale"
 import { toBeijingTime } from "@/lib/utils"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 interface Device {
   id: string
@@ -40,6 +41,7 @@ interface Device {
   modelName: string
   deviceName: string
   status: string
+  quantity?: number
   cancelRequestStatus?: string | null
   cancelRequestReason?: string | null
 }
@@ -102,6 +104,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
   const [hasCancelRequest, setHasCancelRequest] = useState(false)
   const [cancelRequestReason, setCancelRequestReason] = useState("")
   const [isHandlingCancelRequest, setIsHandlingCancelRequest] = useState(false)
+  const totalDeviceQuantity = batchInfo?.deviceCount ?? sumDeviceQuantity(devices)
 
 
   useEffect(() => {
@@ -356,7 +359,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
           <div>
             <h1 className="text-2xl font-bold">商务审核</h1>
             <p className="text-sm text-muted-foreground">
-              批次号：{batchId} | 共 {devices.length} 台设备
+              批次号：{batchId} | 共 {totalDeviceQuantity} 台设备
             </p>
           </div>
         </div>
@@ -485,7 +488,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
             </div>
             <div>
               <p className="text-sm text-muted-foreground">设备数量</p>
-              <p className="font-medium text-lg text-primary">{devices.length} 台</p>
+              <p className="font-medium text-lg text-primary">{totalDeviceQuantity} 台</p>
             </div>
           </div>
         </CardContent>

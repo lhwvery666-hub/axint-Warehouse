@@ -4,6 +4,7 @@ import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
 import { TicketActionType, TicketStatus, UserRole } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 const decisionSchema = z.object({
   approve: z.boolean(),
@@ -13,6 +14,7 @@ const batchIdSchema = z.string().trim().min(1).max(100)
 
 interface ApprovalGuardRow {
   Id: number
+  quantity: number | null
   Status: string
   CancelRequestStatus: string | null
 }
@@ -43,7 +45,7 @@ export async function POST(
     const guard = await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
       .query<ApprovalGuardRow>(`
-        SELECT [Id], [Status], [CancelRequestStatus]
+        SELECT [Id], [Quantity] AS [quantity], [Status], [CancelRequestStatus]
         FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BatchId] = @batchId;
       `)
@@ -85,6 +87,7 @@ export async function POST(
     if (updateResult.rowsAffected[0] !== guard.recordset.length) {
       throw new Error("BATCH_CONFLICT")
     }
+    const deviceCount = sumDeviceQuantity(guard.recordset)
 
     await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
@@ -108,9 +111,9 @@ export async function POST(
     return NextResponse.json({
       success: true,
       message: approved
-        ? `批次取消申请已批准，共 ${guard.recordset.length} 台设备已取消`
-        : `批次取消申请已拒绝，共 ${guard.recordset.length} 台设备继续正常流程`,
-      data: { batchId, deviceCount: guard.recordset.length },
+        ? `批次取消申请已批准，共 ${deviceCount} 台设备已取消`
+        : `批次取消申请已拒绝，共 ${deviceCount} 台设备继续正常流程`,
+      data: { batchId, deviceCount },
     })
   } catch (error: unknown) {
     console.error("[Batch Cancel Approval API] 处理失败:", error)

@@ -1,10 +1,9 @@
 "use client"
 
-import { ChevronRight, Clock, Wrench, AlertCircle, CheckCircle, Search, Calendar, FileText, Printer } from "lucide-react"
+import { ChevronRight, Clock, Wrench, AlertCircle, CheckCircle, Calendar, FileText, Printer } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Calendar as CalendarComponent } from "@/components/ui/calendar"
@@ -16,13 +15,28 @@ import { cn } from "@/lib/utils"
 import { useSearchParams, useRouter } from "next/navigation"
 import { useAuth } from "@/context/auth-context"
 import { WorkOrderListRow } from "@/components/work-order-list-row"
+import { WorkOrderCardStack } from "@/components/work-order-card-stack"
+import { WorkOrderFilterBar } from "@/components/work-order-filter-bar"
 import { getPendingStatusesForRole, calculateProgress, getCurrentStep, resolveTimeFilterPool, getTimeFilterTargetDate } from "@/lib/workflow-utils"
 import { TicketStatus, UserRole, normalizeTicketStatus, isTerminalStatus, TICKET_STATUS_LABELS } from "@/lib/enums"
+import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters } from "@/lib/repair-list-filters"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 import WorkflowProgress from "@/components/workflow-progress"
 
 interface DashboardProps {
   onStartRepair: (taskId: string, batchContext?: { batchId: string; devices: any[] }) => void
 }
+
+const DASHBOARD_STATUS_FILTER = {
+  ALL: "all",
+  PENDING: "pending",
+  ACTIVE: "active",
+} as const
+
+const DASHBOARD_STATUS_FILTER_OPTIONS = [
+  { value: DASHBOARD_STATUS_FILTER.PENDING, label: "待处理" },
+  { value: DASHBOARD_STATUS_FILTER.ACTIVE, label: "进行中（含已延期）" },
+] as const
 
 /** 计算某批次的未读消息数（与 localStorage 存储的已读数对比） */
 function getUnreadCount(batchId: string, totalCount: number): number {
@@ -42,10 +56,12 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
   const [tasks, setTasks] = useState<any[]>([]);
   const [filteredTasks, setFilteredTasks] = useState<any[]>([]);
   
-  // 从 URL 参数恢复搜索状态
-  const [searchQuery, setSearchQuery] = useState(() => {
-    return searchParams.get("q") || "";
+  // 从 URL 参数恢复联合筛选状态；q 为旧版综合搜索参数的兼容入口
+  const [workOrderQuery, setWorkOrderQuery] = useState(() => {
+    return searchParams.get("workOrder") || searchParams.get("q") || "";
   });
+  const [customerQuery, setCustomerQuery] = useState(() => searchParams.get("customer") || "");
+  const [deviceQuery, setDeviceQuery] = useState(() => searchParams.get("device") || "");
   
   // 时间筛选状态 - 从 URL 参数恢复
   const [filterTimeRange, setFilterTimeRange] = useState<string>(() => {
@@ -55,7 +71,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
   // 统计卡片联动的状态筛选："all" | "pending"（待处理） | "active"（进行中，含已延期）
   // 从 URL 参数恢复，保证刷新/分享链接后筛选状态不丢失
   const [filterStatus, setFilterStatus] = useState<string>(() => {
-    return searchParams.get("status") || "all";
+    return searchParams.get("status") || DASHBOARD_STATUS_FILTER.ALL;
   });
   
   const [dateRange, setDateRange] = useState<{
@@ -123,6 +139,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
           reportedAt: repair.reportedAt ? (repair.reportedAt.split(" ")[1] || repair.reportedAt) : "",
           reportedAtFull: repair.reportedAt || "",
           deviceModel: repair.deviceModel || "",
+          quantity: repair.quantity,
           deviceSerialNumber: repair.deviceSerialNumber || "",
           productSN: repair.productSN || repair.deviceSerialNumber || "",
           expectedCompletionDate: repair.expectedCompletionDate,
@@ -131,7 +148,12 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
           rawData: repair, // 保存原始数据用于进度显示
           batchId: (repair as any).batchId || null, // 批次ID
           projectName: (repair as any).projectName || repair.projectLocation || repair.location || "",
+          projectLocation: repair.projectLocation || "",
+          customerName: repair.customerName || "",
           contactInfo: (repair as any).contactInfo || "",
+          reportedBy: repair.reportedBy || "",
+          reportedByUsername: repair.reportedByUsername || "",
+          reportedByUserId: repair.reportedByUserId || "",
         };
       });
     
@@ -149,7 +171,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
           // 已有该批次，添加设备到devices数组
           const batchTask = batchMap.get(task.batchId);
           batchTask.devices.push(task);
-          batchTask.deviceCount = batchTask.devices.length;
+          batchTask.deviceCount = sumDeviceQuantity(batchTask.devices);
         } else {
           // 新批次，创建批次任务对象
           batchMap.set(task.batchId, {
@@ -158,7 +180,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
             batchId: task.batchId,
             projectName: task.projectName || "未知项目",
             contactInfo: task.contactInfo || "无联系信息",
-            deviceCount: 1,
+            deviceCount: sumDeviceQuantity([task]),
             status: task.status,
             priority: task.priority,
             reportedAt: task.reportedAt,
@@ -233,15 +255,21 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
     const timer = setTimeout(() => {
       const params = new URLSearchParams();
       
-      if (searchQuery.trim()) {
-        params.set("q", searchQuery.trim());
+      if (workOrderQuery.trim()) {
+        params.set("workOrder", workOrderQuery.trim());
+      }
+      if (customerQuery.trim()) {
+        params.set("customer", customerQuery.trim());
+      }
+      if (deviceQuery.trim()) {
+        params.set("device", deviceQuery.trim());
       }
       
       if (filterTimeRange !== "all") {
         params.set("time", filterTimeRange);
       }
 
-      if (filterStatus !== "all") {
+      if (filterStatus !== DASHBOARD_STATUS_FILTER.ALL) {
         params.set("status", filterStatus);
       }
       
@@ -265,19 +293,19 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
     }, 300); // 300ms 防抖
     
     return () => clearTimeout(timer);
-  }, [searchQuery, filterTimeRange, filterStatus, dateRange, router]);
+  }, [workOrderQuery, customerQuery, deviceQuery, filterTimeRange, filterStatus, dateRange, router]);
 
   // 搜索、时间、状态过滤
   useEffect(() => {
     let filtered = Array.isArray(tasks) ? tasks : [];
 
     // 统计卡片联动过滤：与卡片计数口径保持一致
-    if (filterStatus === "pending") {
+    if (filterStatus === DASHBOARD_STATUS_FILTER.PENDING) {
       filtered = filtered.filter(task => {
         const normalized = normalizeTicketStatus(task.status)
         return normalized === TicketStatus.CREATED || normalized === TicketStatus.WAREHOUSE_CONFIRMING
       });
-    } else if (filterStatus === "active") {
+    } else if (filterStatus === DASHBOARD_STATUS_FILTER.ACTIVE) {
       filtered = filtered.filter(task => {
         const normalized = normalizeTicketStatus(task.status)
         return normalized === TicketStatus.IN_REPAIR || normalized === TicketStatus.DELAYED
@@ -286,29 +314,15 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
 
     filtered = filtered.filter(filterTasksByTimeRange);
     
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase().trim();
-      filtered = filtered.filter(task => {
-        // 对于批次工单，搜索批次号、项目名称、联系信息，以及所有设备的序列号
-        if (task.isBatch) {
-          const batchMatches = (task.batchId || "").toLowerCase().includes(query) ||
-                               (task.projectName || "").toLowerCase().includes(query) ||
-                               (task.contactInfo || "").toLowerCase().includes(query);
-          const devicesMatch = task.devices && task.devices.some((device: any) => 
-            (device.deviceSerialNumber || "").toLowerCase().includes(query) ||
-            (device.fault || "").toLowerCase().includes(query)
-          );
-          return batchMatches || devicesMatch;
-        }
-        // 对于单独工单，搜索工单号、序列号、故障描述
-        return ((task as any).workOrderNumber || "").toLowerCase().includes(query) ||
-        (task?.deviceSerialNumber || "").toLowerCase().includes(query) ||
-               (task?.fault || "").toLowerCase().includes(query);
-      });
-    }
+    filtered = filtered.filter(task => matchesRepairListFilters(task, {
+      workOrderQuery,
+      customerQuery,
+      deviceQuery,
+      status: ALL_REPAIR_STATUS_FILTER,
+    }));
     
     setFilteredTasks(filtered);
-  }, [searchQuery, filterTimeRange, filterStatus, dateRange, tasks]);
+  }, [workOrderQuery, customerQuery, deviceQuery, filterTimeRange, filterStatus, dateRange, tasks]);
   
   // ⚠️ 曾经的 bug：这里的分支没有覆盖仓库确认中/仓库已确认/仓库待发货等新流程状态，
   // 且 ADMIN_REVIEW / PENDING_SHIPMENT 是已被 normalizeTicketStatus 归并掉的旧枚举值，永远不会命中，
@@ -493,20 +507,21 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
         </div>
       </div>
 
-      {/* Search Bar and Time Filter */}
-      <div className="flex flex-col md:flex-row gap-3">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
-          <Input
-            placeholder="搜索工单号、序列号或故障描述..."
-            className="pl-10 h-12 text-base shadow-md border-border/50 dark:border-border focus:border-primary/50 dark:focus:border-primary/40 bg-background dark:bg-background"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
-        <div className="flex gap-2">
+      {/* Multi-condition search bar and existing time filter */}
+      <WorkOrderFilterBar
+        workOrderQuery={workOrderQuery}
+        customerQuery={customerQuery}
+        deviceQuery={deviceQuery}
+        status={filterStatus}
+        statusOptions={DASHBOARD_STATUS_FILTER_OPTIONS}
+        onWorkOrderQueryChange={setWorkOrderQuery}
+        onCustomerQueryChange={setCustomerQuery}
+        onDeviceQueryChange={setDeviceQuery}
+        onStatusChange={setFilterStatus}
+        trailing={(
+          <>
           <Select value={filterTimeRange} onValueChange={setFilterTimeRange}>
-            <SelectTrigger className="w-[140px] md:w-[160px] h-12 shadow-md border-border/50 dark:border-border bg-background dark:bg-background">
+            <SelectTrigger className="h-10 min-w-0 flex-1 border-border/50 bg-background shadow-sm dark:border-border dark:bg-background">
               <Calendar className="h-4 w-4 mr-2" />
               <SelectValue placeholder="时间范围" />
             </SelectTrigger>
@@ -525,7 +540,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
                 <Button
                   variant="outline"
                   className={cn(
-                    "w-[180px] md:w-[200px] h-12 justify-start text-left font-normal shadow-md border-border/50 dark:border-border bg-background dark:bg-background",
+                    "h-10 min-w-[180px] justify-start border-border/50 bg-background text-left font-normal shadow-sm dark:border-border dark:bg-background",
                     !dateRange.from && !dateRange.to && "text-muted-foreground"
                   )}
                 >
@@ -564,16 +579,17 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
               </PopoverContent>
             </Popover>
           )}
-        </div>
-      </div>
+          </>
+        )}
+      />
 
       {/* Quick Stats —— 点击可联动过滤下方工单列表，再点一次取消筛选 */}
       <div className="grid grid-cols-2 gap-3 md:gap-4">
         <Card
-          onClick={() => setFilterStatus(prev => prev === "pending" ? "all" : "pending")}
+          onClick={() => setFilterStatus(prev => prev === DASHBOARD_STATUS_FILTER.PENDING ? DASHBOARD_STATUS_FILTER.ALL : DASHBOARD_STATUS_FILTER.PENDING)}
           className={cn(
             "gap-0 py-0 border-border/50 dark:border-border shadow-sm hover:shadow-md transition-shadow bg-gradient-to-br from-primary/5 to-primary/10 dark:from-primary/20 dark:to-primary/15 bg-card dark:bg-card cursor-pointer select-none",
-            filterStatus === "pending" && "ring-2 ring-primary border-primary"
+            filterStatus === DASHBOARD_STATUS_FILTER.PENDING && "ring-2 ring-primary border-primary"
           )}
         >
           <CardContent className="px-3 py-2.5 text-center">
@@ -584,15 +600,15 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
               </p>
             </div>
             <p className="text-sm font-medium text-muted-foreground">
-              待处理{filterStatus === "pending" && "（已筛选，点击取消）"}
+              待处理{filterStatus === DASHBOARD_STATUS_FILTER.PENDING && "（已筛选，点击取消）"}
             </p>
           </CardContent>
         </Card>
         <Card
-          onClick={() => setFilterStatus(prev => prev === "active" ? "all" : "active")}
+          onClick={() => setFilterStatus(prev => prev === DASHBOARD_STATUS_FILTER.ACTIVE ? DASHBOARD_STATUS_FILTER.ALL : DASHBOARD_STATUS_FILTER.ACTIVE)}
           className={cn(
             "gap-0 py-0 border-border/50 dark:border-border shadow-sm hover:shadow-md transition-shadow bg-gradient-to-br from-warning/5 to-warning/10 dark:from-warning/20 dark:to-warning/15 bg-card dark:bg-card cursor-pointer select-none",
-            filterStatus === "active" && "ring-2 ring-warning border-warning"
+            filterStatus === DASHBOARD_STATUS_FILTER.ACTIVE && "ring-2 ring-warning border-warning"
           )}
         >
           <CardContent className="px-3 py-2.5 text-center">
@@ -603,7 +619,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
               </p>
             </div>
             <p className="text-sm font-medium text-muted-foreground">
-              进行中（含已延期）{filterStatus === "active" && "（已筛选，点击取消）"}
+              进行中（含已延期）{filterStatus === DASHBOARD_STATUS_FILTER.ACTIVE && "（已筛选，点击取消）"}
             </p>
           </CardContent>
         </Card>
@@ -622,7 +638,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
           {/* Task List —— 紧凑列表模式 */}
           <Card className="gap-0 border-0 bg-transparent py-0 shadow-none overflow-visible">
             {filteredTasks.length > 0 ? (
-              <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+              <WorkOrderCardStack>
                 {filteredTasks.map((task, taskIdx) => {
                   const unread = task.isBatch ? getUnreadCount(task.batchId, task.rawData?.messageCount || 0) : 0
                   const isTerminal = isTerminalStatus(task.status)
@@ -636,13 +652,20 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
                   return (
                     <WorkOrderListRow
                       key={task.id ? `task-db-${task.id}` : `task-fallback-${taskIdx}`}
-                      className="h-full rounded-xl border border-border/60 bg-card shadow-sm hover:border-primary/40 last:border-b"
-                      title={task.isBatch ? `工单号：${task.batchId}` : `序列号：${task.deviceSerialNumber}`}
+                      className="h-full last:border-b"
+                      compact
+                      title={task.isBatch ? `工单号：${task.batchId}` : `工单号：${task.workOrderNumber || task.id}`}
                       isBatch={task.isBatch}
                       projectName={task.isBatch ? task.projectName : undefined}
+                      customerName={task.customerName || task.devices?.[0]?.customerName}
+                      reportedBy={task.reportedBy || task.devices?.[0]?.reportedBy}
+                      reportedByUsername={task.reportedByUsername || task.devices?.[0]?.reportedByUsername}
                       contactInfo={task.isBatch ? task.contactInfo : undefined}
                       deviceCount={task.isBatch ? task.deviceCount : undefined}
                       deviceSerials={task.isBatch && task.devices ? task.devices.map((d: any) => d.deviceSerialNumber) : undefined}
+                      deviceSerialNumber={task.deviceSerialNumber}
+                      deviceModel={task.deviceModel}
+                      deviceModels={task.isBatch && task.devices ? task.devices.map((d: any) => d.deviceModel) : undefined}
                       faultText={task.fault}
                       priorityIndicator={getPriorityIndicator(task.priority)}
                       statusNode={getStatusBadge(task.status)}
@@ -724,17 +747,17 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
                     />
                   )
                 })}
-              </div>
+              </WorkOrderCardStack>
             ) : (
               <CardContent className="rounded-xl border border-border/50 bg-card p-8 text-center">
                 <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
                   <AlertCircle className="h-8 w-8 text-muted-foreground" />
                 </div>
                 <p className="text-muted-foreground font-medium">
-                  {(searchQuery || filterTimeRange !== "all") ? "未找到匹配的工单" : "暂无待办维修任务"}
+                  {(workOrderQuery || customerQuery || deviceQuery || filterStatus !== DASHBOARD_STATUS_FILTER.ALL || filterTimeRange !== "all") ? "未找到匹配的工单" : "暂无待办维修任务"}
                 </p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {(searchQuery || filterTimeRange !== "all") ? "请尝试其他搜索关键词或调整时间范围" : "请先添加设备和维修数据"}
+                  {(workOrderQuery || customerQuery || deviceQuery || filterStatus !== DASHBOARD_STATUS_FILTER.ALL || filterTimeRange !== "all") ? "请尝试其他搜索关键词或调整筛选条件" : "请先添加设备和维修数据"}
                 </p>
               </CardContent>
             )}

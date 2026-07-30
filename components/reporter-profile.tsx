@@ -18,6 +18,7 @@ import { useRepairContext } from "@/context/RepairContext"
 import { useNotificationContext } from "@/context/NotificationContext"
 import { useTheme } from "next-themes"
 import { TicketStatus, normalizeTicketStatus } from "@/lib/enums"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 const menuItems = [
   { icon: FileText, label: "我的报告", badge: "" },
@@ -431,29 +432,29 @@ export default function ReporterProfile() {
                       <div className="flex items-center justify-between">
                         <span>人脸识别终端</span>
                         <span className="text-sm text-muted-foreground">
-                          {userRepairs.filter(r => r.deviceModel?.includes('FR')).length} 台
+                          {sumDeviceQuantity(userRepairs.filter(r => r.deviceModel?.includes('FR')))} 台
                         </span>
                       </div>
                       <div className="flex items-center justify-between">
                         <span>门禁控制器</span>
                         <span className="text-sm text-muted-foreground">
-                          {userRepairs.filter(r => r.deviceModel?.includes('200')).length} 台
+                          {sumDeviceQuantity(userRepairs.filter(r => r.deviceModel?.includes('200')))} 台
                         </span>
                       </div>
                       <div className="flex items-center justify-between">
                         <span>读卡器</span>
                         <span className="text-sm text-muted-foreground">
-                          {userRepairs.filter(r => r.deviceModel?.includes('R10')).length} 台
+                          {sumDeviceQuantity(userRepairs.filter(r => r.deviceModel?.includes('R10')))} 台
                         </span>
                       </div>
                       <div className="flex items-center justify-between">
                         <span>其他设备</span>
                         <span className="text-sm text-muted-foreground">
-                          {userRepairs.filter(r => 
+                          {sumDeviceQuantity(userRepairs.filter(r =>
                             !r.deviceModel?.includes('FR') && 
                             !r.deviceModel?.includes('200') && 
                             !r.deviceModel?.includes('R10')
-                          ).length} 台
+                          ))} 台
                         </span>
                       </div>
                     </div>

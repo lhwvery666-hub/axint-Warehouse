@@ -7,6 +7,7 @@ import { checkUserRole, isErrorResponse } from "@/lib/auth-utils";
 import { API_DEBUG_MESSAGES, API_ERROR_MESSAGES, API_SUCCESS_MESSAGES } from "@/lib/api-messages";
 import { prisma } from "@/lib/prisma";
 import { generateSequentialBatchId } from "@/lib/batch-number";
+import { sumDeviceQuantity } from "@/lib/device-quantity";
 
 // ==================== 类型定义 ====================
 
@@ -72,6 +73,7 @@ export async function POST(request: Request) {
         );
       }
     }
+    const deviceCount = sumDeviceQuantity(items)
 
     // ✅ 防呆校验：拦截同一批次内的重复序列号
     // 注意：PENDING_VERIFY / PENDING 是"标签磨损/无法辨识"的特殊占位值，
@@ -172,8 +174,8 @@ export async function POST(request: Request) {
       for (const item of items) {
         console.log(`🔧 [API] ${API_DEBUG_MESSAGES.processingDevice}:`, JSON.stringify(item, null, 2));
 
-        let insertFields: string[] = ["DeviceSN", "Status"];
-        let insertValues: string[] = ["@deviceSn", "@status"];
+        const insertFields: string[] = ["DeviceSN", "Status"];
+        const insertValues: string[] = ["@deviceSn", "@status"];
 
         // ✅ 每次循环都创建绑定到事务的 Request，保证原子性
         const insertRequest = new sql.Request(transaction);
@@ -316,7 +318,7 @@ export async function POST(request: Request) {
       // 所有设备均插入成功，提交事务
       await transaction.commit();
       transactionActive = false;
-      console.log(`✅ [API] 所有工单创建成功，共 ${createdTicketIds.length} 个，事务已提交`);
+      console.log(`✅ [API] 所有工单创建成功，共 ${deviceCount} 台，事务已提交`);
 
     } catch (txError: unknown) {
       // ✅ 安全回滚：立即置 transactionActive = false，防止二次 rollback 崩溃
@@ -360,7 +362,7 @@ export async function POST(request: Request) {
         .input("actionType", TicketActionType.BATCH_CREATED)
         .input("operatorId", Number(userIdCookie))
         .input("operatorName", operatorName)
-        .input("description", `创建批次工单（设备数量：${createdTicketIds.length}）`)
+        .input("description", `创建批次工单（设备数量：${deviceCount}）`)
         .input("createdAt", new Date())
         .query(`
           INSERT INTO Repair_Ticket_History (
@@ -413,11 +415,11 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      message: API_SUCCESS_MESSAGES.batchCreated(createdTicketIds.length),
+      message: API_SUCCESS_MESSAGES.batchCreated(deviceCount),
       data: {
         batchId,
         ticketIds: createdTicketIds,
-        count: createdTicketIds.length,
+        count: deviceCount,
       },
     });
 

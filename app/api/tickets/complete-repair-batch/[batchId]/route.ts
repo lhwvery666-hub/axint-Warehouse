@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, TicketStatus, TicketActionType, FinalOutcome, FINAL_OUTCOME_LABELS, TICKET_STATUS_LABELS, normalizeTicketStatus } from "@/lib/enums"
+import { DB_FIELDS, TicketStatus, TicketActionType, FinalOutcome, FINAL_OUTCOME_LABELS, TICKET_STATUS_LABELS, normalizeTicketStatus, UserRole } from "@/lib/enums"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 // POST /api/tickets/complete-repair-batch/[batchId]
 // 维修人员完成批次维修
@@ -9,6 +11,9 @@ export async function POST(
   request: Request,
   context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.TECHNICIAN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
     const resolvedParams =
       "then" in (context as any).params
@@ -67,7 +72,7 @@ export async function POST(
       .request()
       .input("batchId", batchId)
       .query(`
-        SELECT ${DB_FIELDS.ID}, ${DB_FIELDS.STATUS}, ${DB_FIELDS.DEVICE_SN}, RepairReportContent, ${DB_FIELDS.REPAIR_COST}
+        SELECT ${DB_FIELDS.ID}, ${DB_FIELDS.STATUS}, ${DB_FIELDS.DEVICE_SN}, ${DB_FIELDS.QUANTITY}, RepairReportContent, ${DB_FIELDS.REPAIR_COST}
         FROM Repair_Tickets
         WHERE ${DB_FIELDS.BATCH_ID} = @batchId
       `)
@@ -88,6 +93,7 @@ export async function POST(
       finalOutcome: string | null
       deviceSN: string | null
       repairCost: number
+      quantity: number | null
     }
 
     const deviceRows: DeviceRow[] = devicesResult.recordset.map((row: Record<string, unknown>) => {
@@ -106,8 +112,10 @@ export async function POST(
         deviceSN: (row[DB_FIELDS.DEVICE_SN] ?? row.DeviceSN ?? null) as string | null,
         finalOutcome,
         repairCost: Number(rawCost) || 0,
+        quantity: Number(row[DB_FIELDS.QUANTITY] ?? row.Quantity) || null,
       }
     })
+    const deviceCount = sumDeviceQuantity(deviceRows)
 
     // ── 防御性校验：批次必须处于"维修作业中"（Technician_Repairing），才允许提交完工结果 ──
     // 该状态代表现场已签字回传、维修人员已进入实际动手维修阶段。
@@ -132,7 +140,7 @@ export async function POST(
       return NextResponse.json(
         {
           success: false,
-          message: `还有 ${missingOutcome.length} 台设备未选择最终处理结果，请先在设备详情页完成选择。`,
+          message: `还有 ${sumDeviceQuantity(missingOutcome)} 台设备未选择最终处理结果，请先在设备详情页完成选择。`,
         },
         { status: 400 }
       )
@@ -209,12 +217,12 @@ export async function POST(
     }
 
     // 写入操作记录（使用 FinalOutcome 枚举，禁止魔法字符串）
-    const completedCount  = deviceRows.filter(d => d.finalOutcome === FinalOutcome.COMPLETED).length
-    const scrappedCount   = deviceRows.filter(d => d.finalOutcome === FinalOutcome.SCRAPPED).length
-    const returnCount     = deviceRows.filter(d => d.finalOutcome === FinalOutcome.RETURN_UNREPAIRED).length
+    const completedCount  = sumDeviceQuantity(deviceRows.filter(d => d.finalOutcome === FinalOutcome.COMPLETED))
+    const scrappedCount   = sumDeviceQuantity(deviceRows.filter(d => d.finalOutcome === FinalOutcome.SCRAPPED))
+    const returnCount     = sumDeviceQuantity(deviceRows.filter(d => d.finalOutcome === FinalOutcome.RETURN_UNREPAIRED))
 
     const description =
-      `维修人员完成整批设备维修，提交最终处理结果（共 ${deviceRows.length} 台）：` +
+      `维修人员完成整批设备维修，提交最终处理结果（共 ${deviceCount} 台）：` +
       [
         completedCount  > 0 ? `维修完成 ${completedCount} 台`  : "",
         scrappedCount   > 0 ? `入库处理 ${scrappedCount} 台`   : "",
@@ -260,7 +268,7 @@ export async function POST(
           .input("batchId",     batchId)
           .input("actionType",  TicketActionType.BUSINESS_REVIEW_SKIPPED)
           .input("operatorName", BUSINESS_REVIEW_SKIP_OPERATOR)
-          .input("description", `批次总费用为 0（免费维修），系统自动跳过商务审核，直接进入仓库发货，共 ${deviceRows.length} 台设备`)
+          .input("description", `批次总费用为 0（免费维修），系统自动跳过商务审核，直接进入仓库发货，共 ${deviceCount} 台设备`)
           .input("createdAt",   new Date())
 
         await skipHistReq.query(`
@@ -279,7 +287,7 @@ export async function POST(
       message: isFreeBatch ? `${description}（免费维修，已自动跳过商务审核，直接进入仓库发货）` : description,
       data: {
         batchId,
-        deviceCount: deviceRows.length,
+        deviceCount,
         completedCount,
         scrappedCount,
         returnCount,

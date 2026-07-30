@@ -4,11 +4,13 @@ import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
 import { TicketActionType, TicketStatus, UserRole } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 const batchIdSchema = z.string().trim().min(1).max(100)
 
 interface DeletedBatchRow {
   Id: number
+  quantity: number | null
   TicketId: string | null
   Status: string
 }
@@ -55,7 +57,7 @@ export async function DELETE(
       .input("cancelledStatus", sql.NVarChar(50), TicketStatus.CANCELLED)
       .query<DeletedBatchRow>(`
         DELETE [target]
-        OUTPUT deleted.[Id], deleted.[TicketId], deleted.[Status]
+        OUTPUT deleted.[Id], deleted.[Quantity] AS [quantity], deleted.[TicketId], deleted.[Status]
         FROM [dbo].[Repair_Tickets] AS [target]
         WHERE [target].[BatchId] = @batchId
           AND NOT EXISTS (
@@ -77,6 +79,7 @@ export async function DELETE(
         { status: 409 }
       )
     }
+    const deletedDeviceCount = sumDeviceQuantity(deleteResult.recordset)
 
     await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
@@ -85,7 +88,7 @@ export async function DELETE(
       .input("newStatus", sql.NVarChar(50), TicketStatus.DELETED)
       .input("operatorId", sql.Int, operatorId)
       .input("operatorName", sql.NVarChar(100), authResult.realName || authResult.username)
-      .input("description", sql.NVarChar(sql.MAX), `物理删除已取消批次，共 ${deleteResult.recordset.length} 台设备`)
+      .input("description", sql.NVarChar(sql.MAX), `物理删除已取消批次，共 ${deletedDeviceCount} 台设备`)
       .query(`
         INSERT INTO [dbo].[Repair_Ticket_History] (
           [BatchId], [ActionType], [OldStatus], [NewStatus],
@@ -102,8 +105,8 @@ export async function DELETE(
 
     return NextResponse.json({
       success: true,
-      message: `批次工单已删除，共删除 ${deleteResult.recordset.length} 台设备`,
-      data: { batchId, deletedCount: deleteResult.recordset.length },
+      message: `批次工单已删除，共删除 ${deletedDeviceCount} 台设备`,
+      data: { batchId, deletedCount: deletedDeviceCount },
     })
   } catch (error: unknown) {
     console.error("[Batch Delete API] 删除失败:", error)

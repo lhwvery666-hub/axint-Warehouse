@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
-import { DB_FIELDS, TicketStatus, TicketActionType, normalizeTicketStatus, TICKET_STATUS_LABELS, UserRole } from "@/lib/enums"
+import { z } from "zod"
+import { TicketStatus, TicketActionType, normalizeTicketStatus, UserRole } from "@/lib/enums"
 import { TICKET_QUERY_MESSAGES } from "@/lib/api-messages"
 import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
@@ -267,15 +268,6 @@ export async function GET(
       ModelName: ticket.ModelName
     })
 
-    // 辅助函数：安全获取字段值
-    const getField = <T>(field: keyof TicketRecord, defaultValue: T): T => {
-      const value = ticket[field]
-      if (value === null || value === undefined) {
-        return defaultValue
-      }
-      return value as T
-    }
-
     const getDateField = (field: keyof TicketRecord): string | undefined => {
       const value = ticket[field]
       if (value instanceof Date) {
@@ -401,7 +393,22 @@ export async function PUT(
   if (isErrorResponse(authResult)) return authResult
 
   try {
-    const body = await request.json().catch(() => ({}))
+    const parsedBody = z.record(z.string(), z.unknown()).safeParse(
+      await request.json().catch(() => null)
+    )
+    if (!parsedBody.success) {
+      return NextResponse.json(
+        { success: false, message: "请求参数无效" },
+        { status: 400 }
+      )
+    }
+    const body = parsedBody.data
+    if (Object.prototype.hasOwnProperty.call(body, "status")) {
+      return NextResponse.json(
+        { success: false, message: "通用资料更新接口不允许修改工单状态，请使用专用工作流动作" },
+        { status: 400 }
+      )
+    }
     
     // 兼容 Next.js 新版本中 params 可能为 Promise 的情况
     const resolvedParams = await Promise.resolve(context.params)
@@ -456,13 +463,6 @@ export async function PUT(
     // 构建更新数据对象（使用 Prisma 的 update 方法）
     const updateData: Record<string, unknown> = {}
 
-    // ===== 状态流转逻辑变量初始化 =====
-    // 状态变更只允许通过两种方式触发：
-    //   1. 前端显式传入 body.status（各工作流节点的专用操作）
-    //   2. 专用工作流 API（如 warehouse-confirm-batch、reporter-confirm、batch-repair-report 等）
-    //   3. 填写返厂快递单号时自动更新为 PENDING_FACTORY（新增）
-    let newStatus: string | null = null
-
     // 字段映射：前端字段名 -> Prisma 字段名
     const fieldMappings: Record<string, string> = {
       submitDate: "SubmitDate",
@@ -492,7 +492,6 @@ export async function PUT(
       returnDate: "ReturnDate",
       returnQuantity: "ReturnQuantity",
       returnTrackingNum: "ReturnTrackingNum",
-      status: "Status",
       // 照片字段
       deviceImages: "DevicePhotos",
       damageImages: "DamageImages",
@@ -504,8 +503,6 @@ export async function PUT(
     }
 
     // 记录哪些字段被更新了（用于自动状态流转和物料代码匹配）
-    let faultPointUpdated = false
-    let returnTrackingNumUpdated = false
     let productSNUpdated = false
     let modelNameUpdated = false
 
@@ -518,12 +515,6 @@ export async function PUT(
       const value = body[fieldName]
 
       // 特殊处理
-      if (fieldName === "faultPoint" && value !== null && value !== undefined && value !== "") {
-        faultPointUpdated = true
-      }
-      if (fieldName === "returnTrackingNum" && value !== null && value !== undefined && value !== "") {
-        returnTrackingNumUpdated = true
-      }
       if (fieldName === "productSN" && value !== null && value !== undefined && value !== currentTicket.ProductSN) {
         productSNUpdated = true
       }
@@ -559,8 +550,12 @@ export async function PUT(
         fieldName === "returnDate"
       ) {
         // 日期时间
-        const dateValue = value instanceof Date ? value : new Date(value)
-        if (!isNaN(dateValue.getTime())) {
+        const dateValue = value instanceof Date
+          ? value
+          : typeof value === "string" || typeof value === "number"
+            ? new Date(value)
+            : null
+        if (dateValue && !isNaN(dateValue.getTime())) {
           updateData[dbFieldName] = dateValue
         }
       } else if (fieldName === "deviceImages" || fieldName === "damageImages") {
@@ -582,19 +577,6 @@ export async function PUT(
       } else {
         // 字符串
         updateData[dbFieldName] = String(value).trim()
-      }
-    }
-
-    // 检查是否填写了返厂快递单号（在字段处理完成后）
-    if (body.factoryTrackingNum !== undefined && body.factoryTrackingNum !== null && body.factoryTrackingNum !== "") {
-      // 如果填写了返厂快递单号，且当前状态不是 PENDING_FACTORY，则自动更新状态
-      const normalizedCurrentStatus = normalizeTicketStatus(currentStatus)
-      if (normalizedCurrentStatus !== TicketStatus.PENDING_FACTORY) {
-        newStatus = TicketStatus.PENDING_FACTORY
-        // 使用 fieldMappings 中定义的数据库列名（确保一致性）
-        const statusDbField = fieldMappings.status
-        updateData[statusDbField] = TicketStatus.PENDING_FACTORY
-        console.log(`✅ [返厂申请] 检测到返厂快递单号填写，自动更新状态为 ${TicketStatus.PENDING_FACTORY}`)
       }
     }
 
@@ -647,150 +629,18 @@ export async function PUT(
       }
     }
 
-    // ===== 状态流转逻辑说明 =====
-    // ⚠️ 所有自动流转规则已禁用（遗留逻辑，与新工作流冲突）：
-    //
-    // ❌ 原规则1（已删除）：填写 FaultPoint 时自动跳转到 Admin_Review
-    //    → 与新流程冲突：维修人员保存报告后状态应保持 In_Repair，
-    //      必须通过"发送给现场人员"显式操作才能推进流程。
-    //
-    // ❌ 原规则2（已删除）：填写 repairCost/clientName 时从 Admin_Review 跳转到 Pending_Shipment
-    //    → 商务流转由专用商务审核 API 负责。
-    //
-    // ❌ 原规则3（已删除）：填写 ReturnTrackingNum 时自动标记为 Completed
-    //    → 仓库发货由专用 warehouse-shipping-batch API 负责。
-    //
-    // ✅ 新增规则：填写返厂快递单号（factoryTrackingNum）时，自动更新状态为 PENDING_FACTORY
-    //    → 这样批次会出现在仓库的"待发货批次"列表中
-
-    // 执行更新（使用 Prisma $executeRaw 配合 Prisma.sql 确保参数安全）
-    // 参考 batch-update 的实现方式，使用 Prisma.sql 模板
+    // 通用 PUT 只更新资料字段，不进行任何状态流转。
     if (Object.keys(updateData).length > 0) {
-      const updateFields: string[] = []
-
-      for (const [key, value] of Object.entries(updateData)) {
-        if (value === null) {
-          updateFields.push(`[${key}] = NULL`)
-        } else if (typeof value === "string") {
-          // 转义单引号，防止 SQL 注入
-          const escapedValue = value.replace(/'/g, "''")
-          updateFields.push(`[${key}] = N'${escapedValue}'`)
-        } else if (value instanceof Date) {
-          updateFields.push(`[${key}] = '${value.toISOString()}'`)
-        } else if (typeof value === "number") {
-          updateFields.push(`[${key}] = ${value}`)
-        } else if (typeof value === "boolean") {
-          updateFields.push(`[${key}] = ${value ? 1 : 0}`)
-        }
-      }
-
-      // 使用 Prisma.sql 模板构建 SQL（字段名来自白名单 fieldMappings，值是类型安全的）
+      const updateFields = Object.entries(updateData).map(([key, value]) =>
+        value === null
+          ? Prisma.sql`${Prisma.raw(`[${key}]`)} = NULL`
+          : Prisma.sql`${Prisma.raw(`[${key}]`)} = ${value}`
+      )
       await prisma.$executeRaw(Prisma.sql`
         UPDATE Repair_Tickets
-        SET ${Prisma.raw(updateFields.join(", "))}
+        SET ${Prisma.join(updateFields)}
         WHERE Id = ${actualTicketId}
       `)
-    }
-
-    // 记录状态变更历史（如果有状态变更）或填写返厂快递单号
-    const finalStatus = (body.status as string) || newStatus || currentStatus
-    const statusChanged = finalStatus !== currentStatus
-    const factoryTrackingNumUpdated = body.factoryTrackingNum !== undefined && 
-                                       body.factoryTrackingNum !== null && 
-                                       body.factoryTrackingNum !== ""
-    
-    // 如果状态变更或填写了返厂快递单号，都需要写入操作记录
-    if (statusChanged || factoryTrackingNumUpdated) {
-      try {
-        // 获取用户信息用于操作记录
-        const cookieStore = await import("next/headers").then(m => m.cookies())
-        const userIdCookie = cookieStore.get("userId")?.value
-        
-        if (!userIdCookie) {
-          throw new Error("未找到用户ID，无法记录操作历史")
-        }
-        
-        const userIdNum = parseInt(userIdCookie, 10)
-        if (isNaN(userIdNum)) {
-          throw new Error(`无效的用户ID：${userIdCookie}`)
-        }
-        
-        // 查询用户信息
-        const userResult = await prisma.$queryRaw<Array<{ RealName?: string; Username?: string }>>(Prisma.sql`
-          SELECT TOP 1 RealName, Username FROM Users WHERE UserID = ${userIdNum}
-        `)
-        
-        if (userResult.length === 0) {
-          throw new Error(`用户不存在：UserID=${userIdNum}`)
-        }
-        
-        const operatorName = userResult[0].RealName || userResult[0].Username
-        if (!operatorName) {
-          throw new Error(`用户信息不完整：UserID=${userIdNum}，RealName 和 Username 均为空`)
-        }
-        
-        const operatorId = userIdNum
-        
-        // 获取批次ID（如果有）
-        const batchResult = await prisma.$queryRaw<Array<{ BatchId?: string }>>(Prisma.sql`
-          SELECT TOP 1 BatchId FROM Repair_Tickets WHERE Id = ${actualTicketId}
-        `)
-        const batchId = batchResult[0]?.BatchId || null
-        
-        // 判断是否是返厂申请（状态变更为 PENDING_FACTORY 或填写了返厂快递单号）
-        const normalizedFinalStatus = normalizeTicketStatus(finalStatus)
-        const isRMARequest = normalizedFinalStatus === TicketStatus.PENDING_FACTORY || factoryTrackingNumUpdated
-        
-        // 构建操作描述
-        let description: string
-        if (factoryTrackingNumUpdated && statusChanged) {
-          // 填写快递单号并更新状态
-          description = `返厂维修申请已提交（快递单号：${body.factoryTrackingNum}），状态已更新为待返厂`
-        } else if (factoryTrackingNumUpdated) {
-          // 只填写快递单号，状态未变化（可能已经是 PENDING_FACTORY）
-          description = `填写返厂快递单号：${body.factoryTrackingNum}`
-        } else {
-          // 普通状态变更（使用中文标签）
-          const currentStatusLabel = TICKET_STATUS_LABELS[normalizeTicketStatus(currentStatus) as TicketStatus] || currentStatus
-          const finalStatusLabel = TICKET_STATUS_LABELS[normalizeTicketStatus(finalStatus) as TicketStatus] || finalStatus
-          description = `状态变更：${currentStatusLabel} → ${finalStatusLabel}`
-        }
-        
-        // 构建操作记录数据
-        const historyData: {
-          ticketId: string
-          batchId: string | null
-          actionType: string
-          oldStatus: string | null
-          newStatus: string
-          operatorName: string
-          description: string
-          operatorId: number
-          delayTo?: null
-          delayReason?: null
-        } = {
-          ticketId: actualTicketId.toString(),
-          batchId: batchId,
-          actionType: isRMARequest ? TicketActionType.RMA_REQUEST : TicketActionType.STATUS_CHANGE,
-          oldStatus: currentStatus || null,
-          newStatus: finalStatus,
-          operatorName: operatorName,
-          description: description,
-          operatorId: operatorId,
-          delayTo: null,
-          delayReason: null
-        }
-        
-        await prisma.repair_Ticket_History.create({
-          data: historyData
-        })
-        
-        console.log(`✅ [操作记录] 已写入：${description}`)
-      } catch (historyError: unknown) {
-        const errorMessage = historyError instanceof Error ? historyError.message : "记录状态变更历史失败"
-        console.error("记录状态变更历史失败:", errorMessage)
-        // 操作记录失败不影响主流程，只记录错误日志
-      }
     }
 
     return NextResponse.json({
@@ -798,10 +648,10 @@ export async function PUT(
       message: TICKET_QUERY_MESSAGES.updateSuccess,
       data: {
         updatedFields: Object.keys(updateData).length,
-        statusChanged: statusChanged,
+        statusChanged: false,
         oldStatus: currentStatus,
-        newStatus: finalStatus,
-        autoStatusChange: newStatus ? `状态自动流转: ${currentStatus} -> ${newStatus}` : null,
+        newStatus: currentStatus,
+        autoStatusChange: null,
         materialCodeAutoFilled: productSNUpdated || modelNameUpdated,
       },
     })

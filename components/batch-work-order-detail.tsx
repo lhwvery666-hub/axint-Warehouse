@@ -1559,6 +1559,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                   deviceModel: device.modelName || "",
                   category: batchInfo?.category || "",
                   subCategory: batchInfo?.subCategory || "",
+                  quantity: device.quantity,
                   deviceImages: device.deviceImages || undefined
                 }))
               }}
@@ -1614,6 +1615,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                   faultDescription: d.problem,
                   category: batchInfo.category || "",
                   subCategory: batchInfo.subCategory || "",
+                  quantity: d.quantity,
                   deviceImages: d.deviceImages || undefined
                 }))
               } : undefined}

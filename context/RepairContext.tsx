@@ -10,15 +10,19 @@ export interface RepairTicket {
   batchId?: string | null; // 批次ID - 用于批次工单分组
   projectName?: string; // 项目名称
   projectLocation?: string; // 项目名称（后端原始字段名，兼容旧渲染代码）
+  customerName?: string; // 客户名称
   contactInfo?: string; // 联系信息
   deviceId: number;
   deviceName: string;
   deviceModel: string;
+  quantity?: number;
   problem: string;
   status: string; // 支持新旧状态；⚠️ 除少数兼容旧值外，其余状态保留后端原始小写值（如 warehouse_confirming/technician_repairing 等），下游请用 normalizeTicketStatus 归一化后再比较
   priority: "low" | "medium" | "high" | "critical";
   location: string;
   reportedBy: string;
+  reportedByUsername?: string;
+  reportedByUserId?: string;
   reportedAt: string;
   assignedTo?: string;
   completedAt?: string;
@@ -159,6 +163,7 @@ export function RepairProvider({ children }: { children: ReactNode }) {
               // 这里同时写入两个键，保证下游无论读哪个字段名都能取到值
               projectName: ticket.projectLocation || ticket.projectName || "", // 项目名称
               projectLocation: ticket.projectLocation || ticket.projectName || "",
+              customerName: ticket.customerName || ticket.projectName || "", // 客户名称（兼容旧接口字段）
               contactInfo: ticket.contactInfo || "", // 联系信息
               deviceId: ticket.deviceSerialNumber
                 ? parseInt(ticket.deviceSerialNumber.slice(-6), 36) || 0
@@ -170,6 +175,8 @@ export function RepairProvider({ children }: { children: ReactNode }) {
               priority: "medium" as const,
               location: ticket.projectLocation || "",
               reportedBy: ticket.reportedBy || "",
+              reportedByUsername: ticket.reportedByUsername || "",
+              reportedByUserId: ticket.reportedByUserId || "",
               reportedAt: ticket.reportedAt || new Date().toISOString(),
               deviceSerialNumber: ticket.deviceSerialNumber || "",
               productSN: ticket.productSN || ticket.deviceSerialNumber || "", // ProductSN 字段

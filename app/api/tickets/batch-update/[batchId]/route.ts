@@ -4,6 +4,7 @@ import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
 import { z } from "zod"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 const imageFieldSchema = z.union([
   z.array(z.string().trim().min(1).max(2048)).max(20),
@@ -105,6 +106,7 @@ interface ExistingDevice {
   faultDescription: string | null
   materialCode: string | null
   repairCost: string | null
+  quantity: number
   // 3W1H 工作台字段
   warrantyStatusOverride: string | null
   faultCategory: string | null
@@ -176,6 +178,7 @@ function buildDeviceUpdateFields(
 
   const newSn    = (device.serialNumber as string) || SPECIAL_VALUES.PENDING_VERIFY
   const newModel = (device.modelName    as string) || DEFAULT_VALUES.GENERIC_MODEL
+  const newQuantity = Number(device.quantity) > 0 ? Number(device.quantity) : 1
 
   // ── 基础设备字段（始终覆盖写入）──────────────────────────────────────────────
   const updateFields: string[] = [
@@ -184,6 +187,7 @@ function buildDeviceUpdateFields(
     `${DB_FIELDS.DEVICE_NAME}   = ${device.deviceName   ? `N'${(device.deviceName   as string).replace(/'/g, "''")}'` : "NULL"}`,
     `${DB_FIELDS.PROBLEM}       = N'${((device.faultDescription as string) || "").replace(/'/g, "''")}'`,
     `${DB_FIELDS.MATERIAL_CODE} = ${device.materialCode ? `N'${(device.materialCode as string).replace(/'/g, "''")}'` : "NULL"}`,
+    `${DB_FIELDS.QUANTITY}      = ${newQuantity}`,
   ]
 
   // ⚠️ 曾经的 bug：不同代码路径写入的"无序列号"占位值不统一（"PENDING"/"PENDING_VERIFY"/"待验证"/空），
@@ -201,6 +205,7 @@ function buildDeviceUpdateFields(
   if (norm(device.faultDescription)    !== norm(existing.faultDescription)) changedLabels.push("故障描述")
   if (norm(device.materialCode)        !== norm(existing.materialCode))    changedLabels.push("物料编码")
   if (norm(device.deviceName)          !== norm(existing.deviceName))      changedLabels.push("设备名称")
+  if (newQuantity                      !== existing.quantity)              changedLabels.push(`数量: ${existing.quantity} → ${newQuantity}`)
 
   // ── Rule 1：设备身份变更 → 回退至「待仓库确认」────────────────────────────────
   // 归一化后再比较，避免历史脏数据/大小写差异导致该守卫规则误判或漏判
@@ -479,6 +484,7 @@ export async function PUT(
           ${Prisma.raw(DB_FIELDS.DEVICE_NAME)},
           ${Prisma.raw(DB_FIELDS.PROBLEM)},
           ${Prisma.raw(DB_FIELDS.MATERIAL_CODE)},
+          ${Prisma.raw(DB_FIELDS.QUANTITY)},
           WarrantyStatusOverride,
           FaultCategory,
           RepairAction,
@@ -505,6 +511,7 @@ export async function PUT(
             deviceName:       (row.DeviceName   as string | null) ?? null,
             faultDescription: (row.Problem      as string | null) ?? null,
             materialCode:     (row.MaterialCode as string | null) ?? null,
+            quantity:         Number(row.Quantity ?? row[DB_FIELDS.QUANTITY]) || 1,
             repairCost: hasRepairCost
               ? (row.RepairCost != null ? String(row.RepairCost) : null)
               : null,
@@ -548,11 +555,14 @@ export async function PUT(
       }
 
       // 4. 处理设备信息（三分支：数量相同 / 减少 / 增加）
-      const deviceCount   = devices.length
+      const deviceRowCount = devices.length
+      const deviceCount = sumDeviceQuantity(
+        devices.map((device) => ({ quantity: Number(device.quantity) || 1 }))
+      )
       const existingCount = existingDeviceIds.length
 
       const allDeviceChangeSummaries: string[] = []
-      const rollbackEvents: { deviceId: number; rollback: { newStatus: string; reason: string } }[] = []
+      const rollbackEvents: { deviceId: number; quantity: number; rollback: { newStatus: string; reason: string } }[] = []
 
       /** 执行单台已有设备的 UPDATE（复用于三个分支） */
       const processExistingDevice = async (device: Record<string, unknown>, deviceId: number) => {
@@ -566,7 +576,7 @@ export async function PUT(
           allDeviceChangeSummaries.push(`设备${deviceId}：${changedLabels.join("、")}`)
         }
         if (statusRollback) {
-          rollbackEvents.push({ deviceId, rollback: statusRollback })
+          rollbackEvents.push({ deviceId, quantity: Number(device.quantity) || 1, rollback: statusRollback })
         }
 
         await tx.$executeRaw(Prisma.sql`
@@ -576,15 +586,15 @@ export async function PUT(
         `)
       }
 
-      if (deviceCount === existingCount) {
-        for (let i = 0; i < deviceCount; i++) {
+      if (deviceRowCount === existingCount) {
+        for (let i = 0; i < deviceRowCount; i++) {
           await processExistingDevice(devices[i], existingDeviceIds[i])
         }
-      } else if (deviceCount < existingCount) {
-        for (let i = 0; i < deviceCount; i++) {
+      } else if (deviceRowCount < existingCount) {
+        for (let i = 0; i < deviceRowCount; i++) {
           await processExistingDevice(devices[i], existingDeviceIds[i])
         }
-        for (let i = deviceCount; i < existingCount; i++) {
+        for (let i = deviceRowCount; i < existingCount; i++) {
           await tx.$executeRaw(Prisma.sql`
             DELETE FROM Repair_Tickets
             WHERE ${Prisma.raw(DB_FIELDS.ID)} = ${existingDeviceIds[i]}
@@ -595,7 +605,7 @@ export async function PUT(
         for (let i = 0; i < existingCount; i++) {
           await processExistingDevice(devices[i], existingDeviceIds[i])
         }
-        for (let i = existingCount; i < deviceCount; i++) {
+        for (let i = existingCount; i < deviceRowCount; i++) {
           const device = devices[i]
           await tx.$executeRaw(Prisma.sql`
             INSERT INTO Repair_Tickets (
@@ -628,7 +638,7 @@ export async function PUT(
               ${category     || null},
               ${subCategory  || null},
               ${(device.materialCode as string) || null},
-              ${1},
+              ${Number(device.quantity) || 1},
               ${projectName     || null},
               ${contactInfo     || null},
               ${projectLocation || null},
@@ -687,7 +697,8 @@ export async function PUT(
         })
       }
 
-      return { currentStatus, deviceCount, rollbackCount: rollbackEvents.length, description }
+      const rollbackCount = rollbackEvents.reduce((sum, event) => sum + event.quantity, 0)
+      return { currentStatus, deviceCount, rollbackCount, description }
     })
 
     console.log(

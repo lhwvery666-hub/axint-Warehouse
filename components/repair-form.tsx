@@ -27,6 +27,7 @@ import { useAuth } from "@/context/auth-context"
 import { FORM_LABELS, FORM_PLACEHOLDERS, FORM_ERRORS, TOAST_MESSAGES, INFO_MESSAGES, BUTTON_LABELS } from "@/lib/form-labels"
 import { UserRole, WarrantyStatus, FaultCategory, RepairAction } from "@/lib/enums"
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 interface RepairFormProps {
   taskId: string | null
@@ -53,6 +54,7 @@ interface RepairFormProps {
       deviceModel?: string
       category?: string
       subCategory?: string
+      quantity?: number | null
       // 预填充时可能带有已保存的设备照片（JSON 字符串或字符串数组）
       deviceImages?: string | string[]
     }>
@@ -229,6 +231,10 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       devicePhotoFiles: [],
     }
   ])
+  const totalDeviceQuantity = useMemo(
+    () => sumDeviceQuantity(deviceInputs.map((device) => ({ quantity: device.deviceQuantity }))),
+    [deviceInputs]
+  )
 
   // 预填充初始数据
   useEffect(() => {
@@ -240,7 +246,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
         modelSelected: device.deviceModel || "",
         serialNumber: device.serialNumber || "",
         isSnPendingVerify: false,
-        deviceQuantity: 1,
+        deviceQuantity: device.quantity || 1,
         checkingSn: false,
         snValid: null,
         snError: null,
@@ -857,7 +863,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
         
         toast({
           title: "✅ 工单更新成功",
-          description: `已更新 ${deviceInputs.length} 台设备`,
+          description: `已更新 ${totalDeviceQuantity} 台设备`,
         })
 
         // 延迟1秒后返回
@@ -1084,7 +1090,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       setIsSubmitted(true)
       
       // 显示提交结果
-      if (devicesToSubmit.length === 1) {
+      if (totalDeviceQuantity === 1) {
         alert("工单创建成功！")
       } else {
         alert(`✅ 批次工单创建成功！\n\n批次号：${batchId}\n设备数量：${successCount}台\n\n这些设备已关联到同一个批次工单中，可以统一管理。`)
@@ -1175,19 +1181,19 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
 
       <div className="p-4 md:p-6 space-y-5 md:space-y-6">
         {/* 批次工单提示 */}
-        {deviceInputs.length > 1 && (
+        {totalDeviceQuantity > 1 && (
           <Card className="border-blue-200 bg-gradient-to-r from-blue-50 to-blue-100/50">
             <CardContent className="p-4">
               <div className="flex items-start gap-3">
                 <div className="flex-shrink-0 w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold text-lg">
-                  {deviceInputs.length}
+                  {totalDeviceQuantity}
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-blue-900 text-base mb-1">
                     批次工单模式
                   </h3>
                   <p className="text-sm text-blue-800">
-                    您正在创建一个包含 <span className="font-bold">{deviceInputs.length}台设备</span> 的批次工单。提交后，所有设备将统一管理，共享相同的批次号、项目信息和快递信息。
+                    您正在创建一个包含 <span className="font-bold">{totalDeviceQuantity}台设备</span> 的批次工单。提交后，所有设备将统一管理，共享相同的批次号、项目信息和快递信息。
                   </p>
                 </div>
               </div>
@@ -1204,9 +1210,9 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <CardTitle className="text-base md:text-lg font-medium">设备信息</CardTitle>
-                {deviceInputs.length > 1 && (
+                {totalDeviceQuantity > 1 && (
                   <Badge variant="default" className="bg-blue-600">
-                    批次工单 ({deviceInputs.length}台)
+                    批次工单 ({totalDeviceQuantity}台)
                   </Badge>
                 )}
               </div>
@@ -1234,11 +1240,11 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
                 </Button>
               </div>
             </div>
-            {deviceInputs.length > 1 && (
+            {totalDeviceQuantity > 1 && (
               <CardDescription className="text-xs mt-2 flex items-start gap-2">
                 <Info className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
                 <span className="text-blue-800">
-                  您正在创建一个包含 <span className="font-semibold">{deviceInputs.length}台设备</span> 的批次工单。这些设备将共享相同的项目信息、联系人和快递信息，提交后会生成一个统一的批次号。
+                  您正在创建一个包含 <span className="font-semibold">{totalDeviceQuantity}台设备</span> 的批次工单。这些设备将共享相同的项目信息、联系人和快递信息，提交后会生成一个统一的批次号。
                 </span>
               </CardDescription>
             )}
@@ -2570,10 +2576,10 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
           {isSubmitting ? (
             <span className="flex items-center gap-2">
               <span className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
-                  {deviceInputs.length === 1 ? "提交工单..." : `提交批次工单... (${deviceInputs.length}台设备)`}
+                  {totalDeviceQuantity === 1 ? "提交工单..." : `提交批次工单... (${totalDeviceQuantity}台设备)`}
             </span>
           ) : (
-                deviceInputs.length === 1 ? "提交工单" : `提交批次工单 (${deviceInputs.length}台设备)`
+                totalDeviceQuantity === 1 ? "提交工单" : `提交批次工单 (${totalDeviceQuantity}台设备)`
           )}
         </Button>
           </div>

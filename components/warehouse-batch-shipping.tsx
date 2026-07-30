@@ -28,6 +28,7 @@ import { toast } from "sonner"
 import { TicketStatus, TICKET_STATUS_LABELS, normalizeTicketStatus, UserRole, OperationLogType, REPAIR_ACTION_LABELS, RepairAction, FINAL_OUTCOME_LABELS, FinalOutcome } from "@/lib/enums"
 import { TicketChat } from "@/components/TicketChat"
 import { useAuth } from "@/context/auth-context"
+import { sumDeviceQuantity } from "@/lib/device-quantity"
 
 interface Device {
   id: string
@@ -87,6 +88,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isSavingDates, setIsSavingDates] = useState(false)
   const [manufactureDates, setManufactureDates] = useState<Record<string, Date | null>>({})
+  const totalDeviceQuantity = batchInfo?.deviceCount ?? sumDeviceQuantity(devices)
 
   // ── 返厂快递信息 ──────────────────────────────────────────────────────────────
   const [factoryTrackingInput, setFactoryTrackingInput] = useState("")
@@ -229,21 +231,27 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
         )
       )
       const successCount = results.filter(r => r.success).length
+      const successQuantity = sumDeviceQuantity(
+        devicesToUpdate.filter((_, index) => results[index]?.success)
+      )
       const failCount = results.length - successCount
+      const failedQuantity = sumDeviceQuantity(
+        devicesToUpdate.filter((_, index) => !results[index]?.success)
+      )
       const didRevertAny = results.some(r => r.didRevert)
 
       if (successCount > 0) {
         if (didRevertAny) {
           toast.success(
             failCount > 0
-              ? `出厂日期已保存 ${successCount} 台（${failCount} 台失败），批次状态已回退至仓库确认中，请重新完成确认流程`
-              : `出厂日期已保存（共 ${successCount} 台），批次状态已回退至仓库确认中，请重新完成确认流程`
+              ? `出厂日期已保存 ${successQuantity} 台（${failedQuantity} 台失败），批次状态已回退至仓库确认中，请重新完成确认流程`
+              : `出厂日期已保存（共 ${successQuantity} 台），批次状态已回退至仓库确认中，请重新完成确认流程`
           )
         } else {
           toast.success(
             failCount > 0
-              ? `出厂日期已保存 ${successCount} 台（${failCount} 台失败），操作已记录`
-              : `出厂日期已保存（共 ${successCount} 台），操作已记录`
+              ? `出厂日期已保存 ${successQuantity} 台（${failedQuantity} 台失败），操作已记录`
+              : `出厂日期已保存（共 ${successQuantity} 台），操作已记录`
           )
         }
         setIsEditDateMode(false)
@@ -280,7 +288,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
           shippingType,
           returnDate: returnDate?.toISOString(),
           returnTrackingNum: returnTrackingNum.trim(),
-          returnQuantity: parseInt(returnQuantity) || batchInfo?.deviceCount || devices.length
+          returnQuantity: parseInt(returnQuantity) || totalDeviceQuantity
         })
       })
 
@@ -317,7 +325,10 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
         const saves = await Promise.all(
           devicesToUpdate.map(d => saveManufactureDateForDevice(d.id, manufactureDates[d.id]!))
         )
-        console.log(`[确认发货] 出厂日期已保存 ${saves.filter(r => r).length} 台`)
+        const savedQuantity = sumDeviceQuantity(
+          devicesToUpdate.filter((_, index) => saves[index]?.success)
+        )
+        console.log(`[确认发货] 出厂日期已保存 ${savedQuantity} 台`)
       }
 
       const response = await fetch(`/api/tickets/warehouse-shipping-batch/${batchId}`, {
@@ -327,7 +338,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
           shippingType,
           returnDate: returnDate?.toISOString(),
           returnTrackingNum: returnTrackingNum.trim(),
-          returnQuantity: parseInt(returnQuantity) || batchInfo?.deviceCount || devices.length
+          returnQuantity: parseInt(returnQuantity) || totalDeviceQuantity
         }),
       })
 
@@ -335,8 +346,8 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
       if (result.success) {
         toast.success(
           shippingType === "return"
-            ? `批次设备已发回客户，共 ${batchInfo?.deviceCount || devices.length} 台`
-            : `批次设备已入库，共 ${batchInfo?.deviceCount || devices.length} 台`
+            ? `批次设备已发回客户，共 ${totalDeviceQuantity} 台`
+            : `批次设备已入库，共 ${totalDeviceQuantity} 台`
         )
         onCompleted?.()
       } else {
@@ -924,7 +935,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                     id="returnQuantity"
                     type="number"
                     min="1"
-                    max={batchInfo?.deviceCount || devices.length}
+                    max={totalDeviceQuantity}
                     value={returnQuantity}
                     onChange={(e) => setReturnQuantity(e.target.value)}
                     placeholder="请输入发货数量"
@@ -954,7 +965,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
               <AlertDescription className="text-blue-800">
                 <p className="font-medium mb-1">产品入库</p>
                 <p className="text-sm">
-                  批次中的 {batchInfo?.deviceCount || devices.length} 台设备将被标记为"已入库"，不发回客户。设备将存储在仓库中，可随时查询。
+                  批次中的 {totalDeviceQuantity} 台设备将被标记为"已入库"，不发回客户。设备将存储在仓库中，可随时查询。
                 </p>
               </AlertDescription>
             </Alert>
