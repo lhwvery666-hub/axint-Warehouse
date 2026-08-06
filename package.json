@@ -7,7 +7,7 @@
     "dev": "next dev",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit --pretty false --incremental false",
-    "test": "tsx --test lib/__tests__/workflow-utils.test.ts lib/__tests__/ticket-workflow-actions.test.ts lib/__tests__/session.test.ts lib/__tests__/repair-list-filters.test.ts",
+    "test": "tsx --test lib/__tests__/workflow-utils.test.ts lib/__tests__/ticket-workflow-actions.test.ts lib/__tests__/session.test.ts lib/__tests__/repair-list-filters.test.ts lib/__tests__/pagination.test.ts lib/__tests__/device-import.test.ts lib/__tests__/device-identity-permissions.test.ts",
     "audit:api-auth": "tsx scripts/audit-api-auth.ts",
     "audit:schema": "tsx scripts/audit-runtime-schema.ts",
     "stress:ui:audit": "tsx scripts/manage-ui-stress-tickets.ts audit",

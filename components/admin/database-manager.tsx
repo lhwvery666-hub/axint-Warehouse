@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { 
   Card, 
   CardContent, 
@@ -26,6 +26,21 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/context/auth-context";
+import {
+  DEFAULT_DEVICE_IMPORT_PURPOSE,
+  DEVICE_IMPORT_PURPOSE_LABELS,
+  DEVICE_IMPORT_PURPOSES,
+  MAX_DEVICE_IMPORT_FILE_SIZE_BYTES,
+  type DeviceImportPurpose,
+  type DeviceImportMode,
+} from "@/lib/device-import";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface Statistics {
   deviceNameStats: Array<{ name: string; count: number }>;
@@ -33,6 +48,59 @@ interface Statistics {
   repairStats: Array<{ status: string; count: number }>;
   totalDevices: number;
   totalRepairs: number;
+}
+
+interface ImportPreviewStats {
+  totalRows: number;
+  validRecords: number;
+  skippedRows: number;
+  identicalDuplicateRows: number;
+  conflictingDuplicateRows: number;
+  existingDevices: number;
+  existingDevicesPreserved: number;
+  newDevices: number;
+  newDevicesUsingDefaultStatus: number;
+  newDevicesWithoutInventoryStatus: number;
+  modelsToAdd: number;
+}
+
+interface ImportExecutionStats {
+  totalRows: number;
+  validRecords: number;
+  skippedRows: number;
+  identicalDuplicateRows: number;
+  conflictingDuplicateRows: number;
+  modelsAdded: number;
+  modelsSkipped: number;
+  devicesInserted: number;
+  devicesUpdated: number;
+  devicesPreserved: number;
+  devicesProcessed: number;
+}
+
+interface ImportApiEvent {
+  success: boolean;
+  message: string;
+  data: {
+    stage: "parsing" | "validating" | "preview" | "importing" | "complete" | "error";
+    progress?: number;
+    total?: number;
+    percentage?: number;
+    preview?: ImportPreviewStats;
+    stats?: ImportExecutionStats;
+  };
+}
+
+function isImportApiEvent(value: unknown): value is ImportApiEvent {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.success !== "boolean" || typeof candidate.message !== "string") return false;
+  if (!candidate.data || typeof candidate.data !== "object") return false;
+  return typeof (candidate.data as Record<string, unknown>).stage === "string";
+}
+
+function getClientErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "网络错误或服务器错误";
 }
 
 export default function DatabaseManager() {
@@ -46,8 +114,10 @@ export default function DatabaseManager() {
   const [excelImportResult, setExcelImportResult] = useState<{
     success: boolean;
     message: string;
-    stats?: any;
+    stats?: ImportExecutionStats;
   } | null>(null);
+  const [deviceImportPurpose, setDeviceImportPurpose] =
+    useState<DeviceImportPurpose>(DEFAULT_DEVICE_IMPORT_PURPOSE);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── Danger Zone 状态 ──
@@ -63,12 +133,7 @@ export default function DatabaseManager() {
     percentage: 0
   });
 
-  // 加载统计信息
-  useEffect(() => {
-    loadStatistics();
-  }, []);
-
-  const loadStatistics = async () => {
+  const loadStatistics = useCallback(async () => {
     setIsLoading(true);
     try {
       // 添加时间戳防止缓存
@@ -103,6 +168,81 @@ export default function DatabaseManager() {
     } finally {
       setIsLoading(false);
     }
+  }, []);
+
+  // 加载统计信息
+  useEffect(() => {
+    void loadStatistics();
+  }, [loadStatistics]);
+
+  const sendExcelImportRequest = async (
+    file: File,
+    mode: DeviceImportMode
+  ): Promise<ImportApiEvent> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("mode", mode);
+    formData.append("purpose", deviceImportPurpose);
+
+    const response = await fetch("/api/import/excel-stream", {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      let message = `请求失败（HTTP ${response.status}）`;
+      try {
+        const body: unknown = await response.json();
+        if (body && typeof body === "object") {
+          const candidateMessage = (body as Record<string, unknown>).message;
+          if (typeof candidateMessage === "string") message = candidateMessage;
+        }
+      } catch {
+        // 非 JSON 错误响应保持标准化提示。
+      }
+      throw new Error(message);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("无法读取导入响应流");
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let terminalEvent: ImportApiEvent | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const blocks = buffer.split("\n\n");
+      buffer = blocks.pop() || "";
+
+      for (const block of blocks) {
+        const line = block.split("\n").find((item) => item.startsWith("data: "));
+        if (!line) continue;
+        const parsed: unknown = JSON.parse(line.slice(6));
+        if (!isImportApiEvent(parsed)) throw new Error("服务器返回了无效的导入事件");
+
+        const eventData = parsed.data;
+        const progress = eventData.progress ?? 0;
+        const total = eventData.total ?? 0;
+        const percentage = eventData.percentage
+          ?? (total > 0 ? Math.floor((progress / total) * 100) : 0);
+        setImportProgress({
+          stage: eventData.stage,
+          message: parsed.message,
+          progress,
+          total,
+          percentage,
+        });
+
+        if (["preview", "complete", "error"].includes(eventData.stage)) {
+          terminalEvent = parsed;
+        }
+      }
+      if (done) break;
+    }
+
+    if (!terminalEvent) throw new Error("导入请求未返回完成状态");
+    return terminalEvent;
   };
 
 
@@ -111,9 +251,15 @@ export default function DatabaseManager() {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // 验证文件类型
-    if (!file.name.endsWith('.xlsx') && !file.name.endsWith('.xls')) {
-      alert("只支持 .xlsx 或 .xls 格式的 Excel 文件");
+    const normalizedFileName = file.name.toLocaleLowerCase("en-US");
+    if (!normalizedFileName.endsWith(".xlsx") && !normalizedFileName.endsWith(".xls")) {
+      setExcelImportResult({ success: false, message: "只支持 .xlsx 或 .xls 格式的 Excel 文件" });
+      event.target.value = "";
+      return;
+    }
+    if (file.size > MAX_DEVICE_IMPORT_FILE_SIZE_BYTES) {
+      setExcelImportResult({ success: false, message: "Excel 文件不能超过 10MB" });
+      event.target.value = "";
       return;
     }
 
@@ -122,85 +268,63 @@ export default function DatabaseManager() {
     setImportProgress({ stage: '', message: '准备上传...', progress: 0, total: 0, percentage: 0 });
 
     try {
-      const formData = new FormData();
-      formData.append('file', file);
+      const previewEvent = await sendExcelImportRequest(file, "preview");
+      if (!previewEvent.success || previewEvent.data.stage === "error") {
+        setExcelImportResult({ success: false, message: previewEvent.message });
+        return;
+      }
 
-      const response = await fetch('/api/import/excel-stream', {
-        method: 'POST',
-        body: formData,
+      const preview = previewEvent.data.preview;
+      if (!preview) throw new Error("预检结果缺少统计数据");
+      const recordOnly = deviceImportPurpose === "record_only";
+      const confirmed = window.confirm(
+        [
+          "Excel 预检通过，尚未写入数据库。",
+          `导入方式：${DEVICE_IMPORT_PURPOSE_LABELS[deviceImportPurpose]}`,
+          `有效设备：${preview.validRecords.toLocaleString()} 台`,
+          recordOnly
+            ? `已有设备：${preview.existingDevicesPreserved.toLocaleString()} 台（资料和状态保持不变）`
+            : `更新已有：${preview.existingDevices.toLocaleString()} 台（缺失状态/库位时保留原值）`,
+          recordOnly
+            ? `新增建档：${preview.newDevicesWithoutInventoryStatus.toLocaleString()} 台（库存状态保持为空）`
+            : `新增设备：${preview.newDevices.toLocaleString()} 台`,
+          ...(recordOnly
+            ? []
+            : [
+                `新增且缺少状态：${preview.newDevicesUsingDefaultStatus.toLocaleString()} 台（将使用“${DEVICE_IMPORT_PURPOSE_LABELS[deviceImportPurpose]}”）`,
+              ]),
+          `资料冲突重复行：${preview.conflictingDuplicateRows.toLocaleString()} 行${recordOnly ? "（保留首次出现，后续重复行跳过）" : ""}`,
+          `新增型号：${preview.modelsToAdd.toLocaleString()} 个`,
+          "",
+          "确认执行原子导入吗？",
+        ].join("\n")
+      );
+      if (!confirmed) {
+        setExcelImportResult({ success: false, message: "已取消导入，数据库未发生变化" });
+        return;
+      }
+
+      const executeEvent = await sendExcelImportRequest(file, "execute");
+      if (!executeEvent.success || executeEvent.data.stage !== "complete") {
+        setExcelImportResult({ success: false, message: executeEvent.message });
+        return;
+      }
+      setExcelImportResult({
+        success: true,
+        message: executeEvent.message,
+        stats: executeEvent.data.stats,
       });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (!reader) {
-        throw new Error('无法读取响应流');
-      }
-
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = JSON.parse(line.slice(6));
-            
-            // 更新进度
-            if (data.stage === 'error') {
-              setExcelImportResult({
-                success: false,
-                message: data.message,
-              });
-              setIsImportingExcel(false);
-              return;
-            } else if (data.stage === 'complete') {
-              setExcelImportResult({
-                success: true,
-                message: data.message,
-                stats: data.stats,
-              });
-              // 刷新统计信息
-              loadStatistics();
-              // 清空文件输入
-              if (fileInputRef.current) {
-                fileInputRef.current.value = '';
-              }
-            } else {
-              // 更新进度条
-              const percentage = data.percentage || 
-                (data.total > 0 ? Math.floor((data.progress / data.total) * 100) : 0);
-              
-              setImportProgress({
-                stage: data.stage || '',
-                message: data.message || '',
-                progress: data.progress || 0,
-                total: data.total || 0,
-                percentage
-              });
-            }
-          }
-        }
-      }
-    } catch (error: any) {
+      await loadStatistics();
+    } catch (error: unknown) {
       console.error('Excel 导入错误:', error);
       setExcelImportResult({
         success: false,
-        message: `导入失败: ${error.message || '网络错误或服务器错误'}`,
+        message: `导入失败：${getClientErrorMessage(error)}`,
       });
     } finally {
       setIsImportingExcel(false);
       setImportProgress({ stage: '', message: '', progress: 0, total: 0, percentage: 0 });
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
 
@@ -236,7 +360,25 @@ export default function DatabaseManager() {
               </CardDescription>
             </div>
             <div className="flex items-center gap-4">
-              <div className="flex gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="min-w-40">
+                  <Select
+                    value={deviceImportPurpose}
+                    onValueChange={(value) => setDeviceImportPurpose(value as DeviceImportPurpose)}
+                    disabled={isImportingExcel}
+                  >
+                    <SelectTrigger aria-label="设备导入方式">
+                      <SelectValue placeholder="选择设备导入方式" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {DEVICE_IMPORT_PURPOSES.map((purpose) => (
+                        <SelectItem key={purpose} value={purpose}>
+                          {DEVICE_IMPORT_PURPOSE_LABELS[purpose]}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
                 <Button 
                   onClick={triggerFileSelect} 
                   variant="default" 
@@ -338,8 +480,13 @@ export default function DatabaseManager() {
                         <div>• 总行数: {excelImportResult.stats.totalRows}</div>
                         <div>• 有效记录: {excelImportResult.stats.validRecords}</div>
                         <div>• 跳过行数: {excelImportResult.stats.skippedRows}</div>
+                        <div>• 相同重复行: {excelImportResult.stats.identicalDuplicateRows}</div>
+                        <div>• 冲突重复行: {excelImportResult.stats.conflictingDuplicateRows}</div>
                         <div>• 新增规格型号: {excelImportResult.stats.modelsAdded}</div>
                         <div>• 已存在规格型号: {excelImportResult.stats.modelsSkipped}</div>
+                        <div>• 新增设备: {excelImportResult.stats.devicesInserted}</div>
+                        <div>• 更新设备: {excelImportResult.stats.devicesUpdated}</div>
+                        <div>• 保持不变的已有设备: {excelImportResult.stats.devicesPreserved}</div>
                         <div>• 处理设备数: {excelImportResult.stats.devicesProcessed}</div>
                       </div>
                     )}
@@ -663,11 +810,11 @@ export default function DatabaseManager() {
                       variant: "destructive",
                     });
                   }
-                } catch (err: any) {
+                } catch (err: unknown) {
                   setShowClearDialog(false);
                   toast({
                     title: "❌ 网络错误",
-                    description: err.message || "请求失败，请检查服务状态",
+                    description: getClientErrorMessage(err),
                     variant: "destructive",
                   });
                 } finally {

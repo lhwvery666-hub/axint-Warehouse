@@ -15,7 +15,16 @@ const REQUIRED_COLUMNS: Readonly<Record<string, readonly string[]>> = {
     "UploadedByRole",
     "CreatedAt",
   ],
-  Repair_Tickets: ["FactoryTrackingNum", "FactoryShipDate", "ArrivalDate", "ReportTime"],
+  Repair_Tickets: [
+    "FactoryTrackingNum",
+    "FactoryShipDate",
+    "ArrivalDate",
+    "ReportTime",
+    "Category",
+    "SubCategory",
+    "ModelName",
+    "DeviceName",
+  ],
   Repair_Ticket_History: [
     "HistoryID",
     "TicketID",
@@ -31,6 +40,28 @@ const REQUIRED_COLUMNS: Readonly<Record<string, readonly string[]>> = {
     "OperatorId",
     "OperatorName",
     "Description",
+  ],
+  Device_Inventory: [
+    "SerialNumber",
+    "MaterialCode",
+    "DeviceName",
+    "ModelName",
+    "Location",
+    "Status",
+    "CreatedAt",
+    "UpdatedAt",
+  ],
+  Product_Catalog: [
+    "Category",
+    "SubCategory",
+    "ModelName",
+    "ModelCode",
+    "Description",
+    "Manufacturer",
+    "DefaultWarrantyMonths",
+    "IsActive",
+    "CreatedAt",
+    "UpdatedAt",
   ],
 }
 
@@ -51,7 +82,9 @@ async function main(): Promise<void> {
           'Batch_Number_Sequence',
           'Batch_Stamp_Attachments',
           'Repair_Tickets',
-          'Repair_Ticket_History'
+          'Repair_Ticket_History',
+          'Device_Inventory',
+          'Product_Catalog'
         )
     `)
     const availableColumns = new Map<string, Set<string>>()
@@ -86,7 +119,11 @@ async function main(): Promise<void> {
       return
     }
 
-    console.log("Runtime schema audit passed (4 tables, 32 required columns).")
+    const requiredColumnCount = Object.values(REQUIRED_COLUMNS)
+      .reduce((total, columns) => total + columns.length, 0)
+    console.log(
+      `Runtime schema audit passed (${Object.keys(REQUIRED_COLUMNS).length} tables, ${requiredColumnCount} required columns).`
+    )
   } finally {
     await closeDbConnection()
   }
