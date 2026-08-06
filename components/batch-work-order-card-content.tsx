@@ -49,7 +49,8 @@ export function BatchWorkOrderCardContent({
   createdAt,
   trailing,
 }: BatchWorkOrderCardContentProps) {
-  const customer = customerName || projectName || projectLocation || "未填写客户"
+  const customer = customerName || projectName || "未填写客户"
+  const project = projectLocation || (projectName !== customer ? projectName : "") || "未填写项目"
   const reporter = reportedBy || reportedByUsername || "未填写用户"
   const serialSummary = summarizeAggregatedValues(deviceSerials, "未填写 SN")
   const modelSummary = summarizeAggregatedValues(deviceModels, category || "未填写型号")
@@ -69,19 +70,26 @@ export function BatchWorkOrderCardContent({
             <p className="truncate text-muted-foreground">用户：{reporter}</p>
           </div>
         )}
-        device={(
+        project={(
+          <p className="truncate text-sm"><span className="text-muted-foreground">项目：</span>{project}</p>
+        )}
+        model={(
           <div className="space-y-1 text-sm">
-            <p className="truncate"><span className="text-muted-foreground">SN：</span>{serialSummary}</p>
-            <p className="truncate text-muted-foreground">型号：{modelSummary}</p>
+            <p className="truncate"><span className="text-muted-foreground">型号：</span>{modelSummary}</p>
           </div>
         )}
+        serial={(
+          <p className="truncate text-sm"><span className="text-muted-foreground">SN：</span>{serialSummary}</p>
+        )}
         status={(
-          <div className="flex items-center justify-between gap-3">
-            <div className="space-y-1">
-              <div>{statusNode}</div>
-              {statusDetails && <div className="text-xs text-muted-foreground">{statusDetails}</div>}
-              <div className="text-xs text-muted-foreground">{createdAt}</div>
-            </div>
+          <div className="space-y-1">
+            <div>{statusNode}</div>
+            {statusDetails && <div className="text-xs text-muted-foreground">{statusDetails}</div>}
+          </div>
+        )}
+        meta={(
+          <div className="flex items-center justify-between gap-3 xl:justify-end">
+            <div className="whitespace-nowrap text-xs text-muted-foreground">{createdAt}</div>
             {trailing}
           </div>
         )}

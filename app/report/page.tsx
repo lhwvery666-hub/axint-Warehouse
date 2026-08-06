@@ -14,6 +14,7 @@ import { RepairStatusTimeline } from "@/components/repair-status-timeline"
 import { WorkOrderListRow } from "@/components/work-order-list-row"
 import { WorkOrderCardStack } from "@/components/work-order-card-stack"
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar"
+import { WorkOrderPagination } from "@/components/work-order-pagination"
 import { format, isAfter, isBefore, parseISO, subDays, subMonths } from "date-fns"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/context/auth-context"
@@ -30,6 +31,7 @@ import {
   getTimeFilterTargetDate
 } from "@/lib/workflow-utils"
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters } from "@/lib/repair-list-filters"
+import { clampPage, DEFAULT_WORK_ORDER_PAGE_SIZE, paginateItems } from "@/lib/pagination"
 
 const REPORT_STATUS_FILTER_OPTIONS = [
   { value: AggregatedStatus.PENDING_RECEIVE, label: "待接单" },
@@ -69,6 +71,7 @@ export default function ReportPage() {
   const [deviceQuery, setDeviceQuery] = useState("")
   const [filterStatus, setFilterStatus] = useState<string>(ALL_REPAIR_STATUS_FILTER)
   const [filterTimeRange, setFilterTimeRange] = useState<string>("all")
+  const [currentPage, setCurrentPage] = useState(1)
   const [dateRange, setDateRange] = useState<{
     from: Date | undefined;
     to: Date | undefined;
@@ -145,6 +148,7 @@ export default function ReportPage() {
                 deviceSerialNumber: ticket.deviceSerialNumber || "",
                 productSN: ticket.productSN || ticket.deviceSerialNumber || "",
                 location: ticket.projectLocation || "",
+                projectName: ticket.projectName || ticket.projectLocation || "",
                 projectLocation: ticket.projectLocation || "",
                 fault: ticket.problem || "",
                 status: ticket.status || "Pending",  // ← 保留原始 DB 状态
@@ -232,7 +236,7 @@ export default function ReportPage() {
                 deviceCount: totalQuantity, // 设备数量（使用 Quantity 字段之和）
                 devices: batchTasks, // 批次中的所有设备
                 // 修改显示内容：显示客户信息而不是设备信息
-                projectName: firstTask.location, // 项目名称
+                projectName: firstTask.projectName || firstTask.projectLocation || firstTask.location, // 项目名称
                 contactPerson: contactPerson, // 联系人姓名
                 contactPhone: contactPhone, // 联系电话
                 deviceSerialNumber: `${totalQuantity}个设备`, // 显示设备数量
@@ -391,6 +395,16 @@ export default function ReportPage() {
       status: ALL_REPAIR_STATUS_FILTER,
     }))
 
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [workOrderQuery, customerQuery, deviceQuery, filterStatus, filterTimeRange, dateRange])
+
+  useEffect(() => {
+    setCurrentPage((page) => clampPage(page, filteredTasks.length))
+  }, [filteredTasks.length])
+
+  const paginatedTasks = paginateItems(filteredTasks, currentPage)
+
   return (
     <>
       {view === "tasks" && (
@@ -497,14 +511,15 @@ export default function ReportPage() {
             {/* 任务列表 —— 紧凑列表模式 */}
             <Card className="overflow-visible border-0 bg-transparent py-0 shadow-none">
               {filteredTasks.length > 0 ? (
-                <WorkOrderCardStack>
-                  {filteredTasks.map((task, taskIndex) => {
+                <>
+                  <WorkOrderCardStack>
+                    {paginatedTasks.map((task, taskIndex) => {
                     // 确保 key 永远不为空
                     const taskKey = task.id
                       || task.workOrderNumber
                       || task.batchId
                       || task.deviceSerialNumber
-                      || `task-fallback-${taskIndex}`
+                      || `task-fallback-${(currentPage - 1) * DEFAULT_WORK_ORDER_PAGE_SIZE + taskIndex}`
 
                     // 计算当前聚合状态，用于决定按钮
                     const aggStatus = getAggregatedStatus(task.status)
@@ -522,8 +537,8 @@ export default function ReportPage() {
                         key={taskKey}
                         title={task.isBatch ? `工单号：${task.batchId}` : `工单号：${task.workOrderNumber || task.id}`}
                         isBatch={task.isBatch}
-                        projectName={task.isBatch ? (task.projectName || task.location) : undefined}
-                        customerName={task.customerName || task.projectName || task.location}
+                        projectName={task.projectName || task.projectLocation || task.location}
+                        customerName={task.customerName}
                         reportedBy={task.reportedBy || task.contactPerson}
                         reportedByUsername={task.reportedByUsername}
                         contactInfo={task.contactPerson}
@@ -590,8 +605,14 @@ export default function ReportPage() {
                         }
                       />
                     )
-                  })}
-                </WorkOrderCardStack>
+                    })}
+                  </WorkOrderCardStack>
+                  <WorkOrderPagination
+                    currentPage={currentPage}
+                    totalItems={filteredTasks.length}
+                    onPageChange={setCurrentPage}
+                  />
+                </>
               ) : (
                 <CardContent className="rounded-xl border border-border/50 bg-card p-8 text-center">
                   <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">

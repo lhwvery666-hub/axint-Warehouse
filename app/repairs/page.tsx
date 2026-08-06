@@ -197,23 +197,28 @@ export default function RepairsPage() {
                   )}
                   customer={(
                     <div className="space-y-1 text-sm">
-                      <p className="truncate"><span className="text-muted-foreground">客户：</span>{repair.customerName || repair.projectName || repair.projectLocation || "未填写客户"}</p>
+                      <p className="truncate"><span className="text-muted-foreground">客户：</span>{repair.customerName || "未填写客户"}</p>
                       <p className="truncate text-muted-foreground">用户：{repair.reportedBy || repair.reportedByUsername || "未填写用户"}</p>
                     </div>
                   )}
-                  device={(
+                  project={(
+                    <p className="truncate text-sm"><span className="text-muted-foreground">项目：</span>{repair.projectName || repair.projectLocation || "未填写项目"}</p>
+                  )}
+                  model={(
                     <div className="space-y-1 text-sm">
-                      <p className="truncate"><span className="text-muted-foreground">SN：</span>{repair.deviceSerialNumber || "未填写"}</p>
-                      <p className="truncate text-muted-foreground">型号：{repair.deviceModel || repair.deviceName || "未填写"}</p>
+                      <p className="truncate"><span className="text-muted-foreground">型号：</span>{repair.deviceModel || repair.deviceName || "未填写"}</p>
                       <p className="truncate text-xs text-muted-foreground">故障：{repair.problem || "未填写"}</p>
                     </div>
                   )}
+                  serial={(
+                    <p className="truncate text-sm"><span className="text-muted-foreground">SN：</span>{repair.deviceSerialNumber || "未填写"}</p>
+                  )}
                   status={(
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="space-y-1">
-                        {getStatusBadge(repair.status)}
-                        <p className="text-xs text-muted-foreground">{repair.reportedAt}</p>
-                      </div>
+                    <div>{getStatusBadge(repair.status)}</div>
+                  )}
+                  meta={(
+                    <div className="flex items-center justify-between gap-3 xl:justify-end">
+                      <p className="whitespace-nowrap text-xs text-muted-foreground">{repair.reportedAt}</p>
                       <Button
                         variant="outline"
                         size="sm"

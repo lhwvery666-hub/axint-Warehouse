@@ -11,7 +11,10 @@ import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils
 interface TicketDbRow {
   Id: number | string | null
   DeviceSN: string | null
+  DeviceName: string | null
   ModelName: string | null
+  ProjectName: string | null
+  ClientName: string | null
   ProjectLocation: string | null
   FaultDescription: string | null
   ReportByUserID: number | string | null
@@ -27,7 +30,6 @@ interface TicketDbRow {
   ContactInfo: string | null
   SenderAddress: string | null
   Problem: string | null
-  CustomerName: string | null
   SignedReportPhoto: string | null
   Quantity: number | null
   // ── 关键节点时间字段（用于前端时间范围筛选按状态维度动态切换） ──
@@ -65,6 +67,7 @@ interface MappedTicket {
   productSN: string
   deviceName: string
   deviceModel: string
+  projectName: string
   projectLocation: string
   problem: string
   status: TicketStatus
@@ -143,12 +146,13 @@ export async function GET() {
       // 将原始列名映射到标准字段名
       mappedRecords = rawResult.recordset.map((row: Record<string, unknown>, idx: number): TicketDbRow => {
         const mapped: TicketDbRow = {
-          Id: null, DeviceSN: null, ModelName: null, ProjectLocation: null,
+          Id: null, DeviceSN: null, DeviceName: null, ModelName: null,
+          ProjectName: null, ClientName: null, ProjectLocation: null,
           FaultDescription: null, ReportByUserID: null, CourierCompany: null,
           CourierNumber: null, Status: null, ReportTime: null, SubmitDate: null,
           CreatedAt: null, ProductSN: null,
           WorkOrderNumber: null, BatchId: null, ContactInfo: null, SenderAddress: null,
-          Problem: null, CustomerName: null, SignedReportPhoto: null, Quantity: null,
+          Problem: null, SignedReportPhoto: null, Quantity: null,
           WarehouseShippedAt: null, BusinessReviewedAt: null, TechnicianCompletedAt: null,
           UpdatedAt: null,
         }
@@ -167,8 +171,19 @@ export async function GET() {
             if (idx < 3) console.log(`🔍 映射 Id: actualCol="${actualCol}", mapped.Id=${mapped.Id}`)
           } else if (lowerCol === 'devicesn' || lowerCol === 'device_sn') {
             mapped.DeviceSN = (row[actualCol] as string | null) ?? null
+          } else if (lowerCol === 'devicename' || lowerCol === 'device_name') {
+            mapped.DeviceName = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'modelname' || lowerCol === 'model_name') {
             mapped.ModelName = (row[actualCol] as string | null) ?? null
+          } else if (lowerCol === 'projectname' || lowerCol === 'project_name') {
+            mapped.ProjectName = (row[actualCol] as string | null) ?? null
+          } else if (
+            lowerCol === 'clientname' ||
+            lowerCol === 'client_name' ||
+            lowerCol === 'customername' ||
+            lowerCol === 'customer_name'
+          ) {
+            mapped.ClientName = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'projectlocation' || lowerCol === 'project_location') {
             mapped.ProjectLocation = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'faultdescription' || lowerCol === 'fault_description') {
@@ -199,13 +214,6 @@ export async function GET() {
             mapped.SenderAddress = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'problem') {
             mapped.Problem = (row[actualCol] as string | null) ?? null
-          } else if (
-            lowerCol === 'customername' ||
-            lowerCol === 'customer_name' ||
-            lowerCol === 'projectname' ||
-            lowerCol === 'project_name'
-          ) {
-            mapped.CustomerName = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'signedreportphoto' || lowerCol === 'signed_report_photo') {
             mapped.SignedReportPhoto = (row[actualCol] as string | null) ?? null
           } else if (lowerCol === 'quantity') {
@@ -420,8 +428,9 @@ export async function GET() {
         batchId: row.BatchId ?? null,
         deviceSerialNumber: row.DeviceSN ?? "",
         productSN: row.ProductSN ?? row.DeviceSN ?? "",
-        deviceName: deviceInfo.deviceName || (row.ModelName ?? ""),
-        deviceModel: deviceInfo.modelName || (row.ModelName ?? ""),
+        deviceName: row.DeviceName || deviceInfo.deviceName || (row.ModelName ?? ""),
+        deviceModel: row.ModelName || deviceInfo.modelName || "",
+        projectName: row.ProjectLocation ?? "",
         projectLocation: row.ProjectLocation ?? "",
         problem: row.FaultDescription ?? row.Problem ?? "",
         status: mappedStatus,
@@ -435,7 +444,7 @@ export async function GET() {
         delayReason: delayInfo?.delayReason ?? null,
         contactInfo: row.ContactInfo ?? "",
         senderAddress: row.SenderAddress ?? "",
-        customerName: row.CustomerName ?? "",
+        customerName: row.ClientName ?? row.ProjectName ?? "",
         signedReportPhoto: row.SignedReportPhoto ?? null,
         quantity: row.Quantity ?? 1,
         warehouseShippedAt: row.WarehouseShippedAt ? new Date(row.WarehouseShippedAt as string).toISOString() : null,

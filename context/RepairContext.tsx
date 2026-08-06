@@ -159,11 +159,9 @@ export function RepairProvider({ children }: { children: ReactNode }) {
               id: ticket.id || "",
               workOrderNumber: ticket.workOrderNumber || "",
               batchId: ticket.batchId || null, // 🔥 批次ID - 关键字段！
-              // ⚠️ 后端 /api/tickets 实际返回的字段名是 projectLocation，没有 projectName
-              // 这里同时写入两个键，保证下游无论读哪个字段名都能取到值
-              projectName: ticket.projectLocation || ticket.projectName || "", // 项目名称
+              projectName: ticket.projectName || ticket.projectLocation || "", // 项目名称
               projectLocation: ticket.projectLocation || ticket.projectName || "",
-              customerName: ticket.customerName || ticket.projectName || "", // 客户名称（兼容旧接口字段）
+              customerName: ticket.customerName || "", // 客户名称
               contactInfo: ticket.contactInfo || "", // 联系信息
               deviceId: ticket.deviceSerialNumber
                 ? parseInt(ticket.deviceSerialNumber.slice(-6), 36) || 0

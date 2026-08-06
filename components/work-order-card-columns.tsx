@@ -5,9 +5,11 @@ import { cn } from "@/lib/utils"
 interface WorkOrderCardColumnsProps {
   workOrder: ReactNode
   customer: ReactNode
-  device: ReactNode
+  project: ReactNode
+  model: ReactNode
+  serial: ReactNode
   status: ReactNode
-  meta?: ReactNode
+  meta: ReactNode
   compact?: boolean
   className?: string
 }
@@ -15,7 +17,9 @@ interface WorkOrderCardColumnsProps {
 export function WorkOrderCardColumns({
   workOrder,
   customer,
-  device,
+  project,
+  model,
+  serial,
   status,
   meta,
   compact = false,
@@ -24,16 +28,20 @@ export function WorkOrderCardColumns({
   return (
     <div
       className={cn(
-        "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:items-center",
-        compact ? "lg:grid-cols-2 xl:grid-cols-2" : meta ? "xl:grid-cols-5" : "xl:grid-cols-4",
+        "grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:items-center",
+        compact
+          ? "xl:[grid-template-columns:minmax(0,1.1fr)_minmax(0,1.15fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.15fr)_minmax(0,.9fr)_minmax(0,1.15fr)]"
+          : "xl:[grid-template-columns:minmax(0,1.15fr)_minmax(0,1.2fr)_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,.9fr)_minmax(0,1.2fr)]",
         className,
       )}
     >
       <div className="min-w-0">{workOrder}</div>
       <div className="min-w-0">{customer}</div>
-      <div className="min-w-0">{device}</div>
+      <div className="min-w-0">{project}</div>
+      <div className="min-w-0">{model}</div>
+      <div className="min-w-0">{serial}</div>
       <div className="min-w-0">{status}</div>
-      {meta && <div className="min-w-0">{meta}</div>}
+      <div className="min-w-0">{meta}</div>
     </div>
   )
 }

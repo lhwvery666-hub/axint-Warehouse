@@ -17,8 +17,10 @@
   html,
   body {
     width: 100%;
+    min-width: 0 !important;
     margin: 0 !important;
     padding: 0 !important;
+    overflow: visible !important;
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
@@ -37,8 +39,37 @@
 
   .print-content {
     width: calc(100% / var(--report-print-scale));
+    max-width: none !important;
     zoom: var(--report-print-scale);
     margin: 0 auto !important;
+    overflow: visible !important;
+  }
+
+  .print-content,
+  .print-content *,
+  .info-table,
+  .detail-table,
+  .info-table th,
+  .info-table td,
+  .detail-table th,
+  .detail-table td {
+    box-sizing: border-box !important;
+  }
+
+  .info-table,
+  .detail-table {
+    width: 100% !important;
+    max-width: 100% !important;
+    table-layout: fixed !important;
+  }
+
+  .info-table th,
+  .info-table td,
+  .detail-table th,
+  .detail-table td {
+    min-width: 0 !important;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   
   .report-header,

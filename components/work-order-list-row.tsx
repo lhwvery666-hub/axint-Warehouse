@@ -106,7 +106,7 @@ export function WorkOrderListRow({
           <div className="space-y-1 text-xs">
             <p className="truncate">
               <span className="text-muted-foreground">客户：</span>
-              {customerName || projectName || "未填写客户"}
+              {customerName || "未填写客户"}
             </p>
             <p className="truncate text-muted-foreground">
               用户：{reportedBy || reportedByUsername || contactInfo || "未填写用户"}
@@ -114,19 +114,32 @@ export function WorkOrderListRow({
             </p>
           </div>
         )}
-        device={(
+        project={(
+          <p className="truncate text-xs">
+            <span className="text-muted-foreground">项目：</span>
+            {projectName || "未填写项目"}
+          </p>
+        )}
+        model={(
           <div className="space-y-1 text-xs">
-            <p className="flex min-w-0 items-center gap-1">
-              <Package className="h-3 w-3 shrink-0 text-muted-foreground" />
-              <span className="truncate">SN：{serialSummary}</span>
+            <p className="truncate">
+              <span className="text-muted-foreground">型号：</span>
+              {modelSummary}
             </p>
-            <p className="truncate text-muted-foreground">型号：{modelSummary}</p>
             {faultText && (
               <p className="flex min-w-0 items-center gap-1 text-muted-foreground">
                 <AlertCircle className="h-3 w-3 shrink-0" />
                 <span className="truncate">{faultText}</span>
               </p>
             )}
+          </div>
+        )}
+        serial={(
+          <div className="space-y-1 text-xs">
+            <p className="flex min-w-0 items-center gap-1">
+              <Package className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <span className="truncate">SN：{serialSummary}</span>
+            </p>
           </div>
         )}
         status={(

@@ -23,8 +23,10 @@ import { zhCN } from "date-fns/locale";
 import BusinessBatchReview from "@/components/business-batch-review";
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar";
 import { WorkOrderCardStack } from "@/components/work-order-card-stack";
+import { WorkOrderPagination } from "@/components/work-order-pagination";
 import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
+import { clampPage, paginateItems } from "@/lib/pagination";
 
 interface BatchTicket {
   batchId: string;
@@ -54,6 +56,7 @@ export default function BusinessRepairsPage() {
   const [customerQuery, setCustomerQuery] = useState("");
   const [deviceQuery, setDeviceQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState(ALL_REPAIR_STATUS_FILTER);
+  const [currentPage, setCurrentPage] = useState(1);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
 
   const loadBatches = useCallback(async () => {
@@ -95,6 +98,15 @@ export default function BusinessRepairsPage() {
     deviceQuery,
     status: filterStatus,
   }));
+  const paginatedBatches = paginateItems(filteredBatches, currentPage);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [workOrderQuery, customerQuery, deviceQuery, filterStatus]);
+
+  useEffect(() => {
+    setCurrentPage((page) => clampPage(page, filteredBatches.length));
+  }, [filteredBatches.length]);
 
   // ⚠️ 曾经的 bug：直接用原始字符串 status 与 TicketStatus 枚举做 switch 比较，一旦大小写/格式不完全
   // 一致就全部落到 default 分支。修复：先用 normalizeTicketStatus 归一化后再匹配，并补充仓库已确认状态。
@@ -253,8 +265,9 @@ export default function BusinessRepairsPage() {
             </p>
           </div>
         ) : (
-          <WorkOrderCardStack>
-            {filteredBatches.map((batch) => (
+          <>
+            <WorkOrderCardStack>
+              {paginatedBatches.map((batch) => (
               <Card
                 key={`batch-${batch.batchId}`}
                 className="cursor-pointer"
@@ -276,8 +289,14 @@ export default function BusinessRepairsPage() {
                   trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
                 />
               </Card>
-            ))}
-          </WorkOrderCardStack>
+              ))}
+            </WorkOrderCardStack>
+            <WorkOrderPagination
+              currentPage={currentPage}
+              totalItems={filteredBatches.length}
+              onPageChange={setCurrentPage}
+            />
+          </>
         )}
       </div>
     </div>

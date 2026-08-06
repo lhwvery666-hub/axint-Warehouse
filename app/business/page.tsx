@@ -30,8 +30,10 @@ import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar";
 import { WorkOrderCardStack } from "@/components/work-order-card-stack";
+import { WorkOrderPagination } from "@/components/work-order-pagination";
 import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
 import { ALL_REPAIR_STATUS_FILTER, matchesFinancialFollowupFilters, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
+import { clampPage, paginateItems } from "@/lib/pagination";
 
 interface BatchTicket {
   batchId: string;
@@ -75,6 +77,7 @@ export default function BusinessDashboard() {
   const [customerQuery, setCustomerQuery] = useState("");
   const [deviceQuery, setDeviceQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState(ALL_REPAIR_STATUS_FILTER);
+  const [currentPage, setCurrentPage] = useState(1);
 
   // ── 待审核批次（待审核批次 Tab 使用） ─────────────────────────────────────────
   const [pendingBatches, setPendingBatches] = useState<BatchTicket[]>([]);
@@ -206,6 +209,34 @@ export default function BusinessDashboard() {
     }
   };
 
+  const filteredBatches = allBatches.filter((batch) => matchesRepairListFilters(batch, {
+    workOrderQuery,
+    customerQuery,
+    deviceQuery,
+    status: filterStatus,
+  }));
+  const filteredFollowupBatches = followupBatches.filter((batch) =>
+    matchesFinancialFollowupFilters(batch, followupFilters),
+  );
+  const activeFilteredCount = activeTab === "overview"
+    ? filteredBatches.length
+    : activeTab === "pending"
+      ? pendingBatches.length
+      : activeTab === "followup"
+        ? filteredFollowupBatches.length
+        : 0;
+  const paginatedBatches = paginateItems(filteredBatches, currentPage);
+  const paginatedPendingBatches = paginateItems(pendingBatches, currentPage);
+  const paginatedFollowupBatches = paginateItems(filteredFollowupBatches, currentPage);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [activeTab, workOrderQuery, customerQuery, deviceQuery, filterStatus, followupFilters]);
+
+  useEffect(() => {
+    setCurrentPage((page) => clampPage(page, activeFilteredCount));
+  }, [activeFilteredCount]);
+
   // ── 加载 / 权限守卫 ───────────────────────────────────────────────────────────
   if (status === "loading" || !isAuthorized) {
     return (
@@ -242,16 +273,6 @@ export default function BusinessDashboard() {
       </div>
     );
   }
-
-  const filteredBatches = allBatches.filter((batch) => matchesRepairListFilters(batch, {
-    workOrderQuery,
-    customerQuery,
-    deviceQuery,
-    status: filterStatus,
-  }));
-  const filteredFollowupBatches = followupBatches.filter((batch) =>
-    matchesFinancialFollowupFilters(batch, followupFilters),
-  );
 
   return (
     <div className="flex-1 overflow-auto">
@@ -371,8 +392,9 @@ export default function BusinessDashboard() {
                 </p>
               </div>
             ) : (
-              <WorkOrderCardStack>
-                {filteredBatches.map((batch) => (
+              <>
+                <WorkOrderCardStack>
+                  {paginatedBatches.map((batch) => (
                   <Card
                     key={`batch-${batch.batchId}`}
                     className="cursor-pointer"
@@ -394,8 +416,14 @@ export default function BusinessDashboard() {
                       trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
                     />
                   </Card>
-                ))}
-              </WorkOrderCardStack>
+                  ))}
+                </WorkOrderCardStack>
+                <WorkOrderPagination
+                  currentPage={currentPage}
+                  totalItems={filteredBatches.length}
+                  onPageChange={setCurrentPage}
+                />
+              </>
             )}
           </TabsContent>
 
@@ -412,8 +440,9 @@ export default function BusinessDashboard() {
                 <p className="text-muted-foreground">暂无待审核的批次工单</p>
               </div>
             ) : (
-              <WorkOrderCardStack>
-                {pendingBatches.map((batch) => (
+              <>
+                <WorkOrderCardStack>
+                  {paginatedPendingBatches.map((batch) => (
                   <Card
                     key={`pending-${batch.batchId}`}
                     className="cursor-pointer"
@@ -439,8 +468,14 @@ export default function BusinessDashboard() {
                       trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
                     />
                   </Card>
-                ))}
-              </WorkOrderCardStack>
+                  ))}
+                </WorkOrderCardStack>
+                <WorkOrderPagination
+                  currentPage={currentPage}
+                  totalItems={pendingBatches.length}
+                  onPageChange={setCurrentPage}
+                />
+              </>
             )}
           </TabsContent>
 
@@ -498,8 +533,9 @@ export default function BusinessDashboard() {
                 </p>
               </div>
             ) : (
-              <WorkOrderCardStack>
-                {filteredFollowupBatches.map((batch) => (
+              <>
+                <WorkOrderCardStack>
+                  {paginatedFollowupBatches.map((batch) => (
                   <Card
                     key={`followup-${batch.batchId}`}
                     className="cursor-pointer"
@@ -532,8 +568,14 @@ export default function BusinessDashboard() {
                       trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
                     />
                   </Card>
-                ))}
-              </WorkOrderCardStack>
+                  ))}
+                </WorkOrderCardStack>
+                <WorkOrderPagination
+                  currentPage={currentPage}
+                  totalItems={filteredFollowupBatches.length}
+                  onPageChange={setCurrentPage}
+                />
+              </>
             )}
           </TabsContent>
         </Tabs>

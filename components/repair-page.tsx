@@ -22,9 +22,11 @@ import { toast } from "sonner"
 import { WorkOrderListRow } from "@/components/work-order-list-row"
 import { WorkOrderCardStack } from "@/components/work-order-card-stack"
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar"
+import { WorkOrderPagination } from "@/components/work-order-pagination"
 import { resolveTimeFilterPool, getTimeFilterTargetDate } from "@/lib/workflow-utils"
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, matchesRepairTimeRange, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
+import { clampPage, paginateItems } from "@/lib/pagination"
 
 // ==================== 类型定义 ====================
 /**
@@ -133,6 +135,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
   const [deviceQuery, setDeviceQuery] = useState("")
   const [filterStatus, setFilterStatus] = useState<string>(ALL_REPAIR_STATUS_FILTER)
   const [filterTimeRange, setFilterTimeRange] = useState<string>("all")
+  const [currentPage, setCurrentPage] = useState(1)
   const [dateRange, setDateRange] = useState<{
     from: Date | undefined;
     to: Date | undefined;
@@ -390,6 +393,18 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
       status: filterStatus,
     }))
 
+  // 联合筛选条件变化时从第一页重新展示，避免停留在已经不存在的页码。
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [workOrderQuery, customerQuery, deviceQuery, filterStatus, filterTimeRange, dateRange])
+
+  // 数据刷新或筛选结果减少时，把当前页约束到仍然有效的范围内。
+  useEffect(() => {
+    setCurrentPage((page) => clampPage(page, filteredTasks.length))
+  }, [filteredTasks.length])
+
+  const paginatedTasks = paginateItems(filteredTasks, currentPage)
+
   // 报告人员使用专门的报告页面，不再在这里处理
   if (userRole === UserRole.REPORTER) {
     return null;
@@ -540,8 +555,9 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
             {/* 任务列表 —— 紧凑列表模式 */}
             <Card className="overflow-visible border-0 bg-transparent py-0 shadow-none">
               {filteredTasks.length > 0 ? (
-                <WorkOrderCardStack>
-                  {filteredTasks.map((task) => {
+                <>
+                  <WorkOrderCardStack>
+                    {paginatedTasks.map((task) => {
                     const unread = task.isBatch ? getUnreadCount(task.batchId, task.rawData?.messageCount || 0) : 0
                     const isTerminal = isTerminalStatus(task.status)
                     const needsSupplement = !isTerminal && (
@@ -556,7 +572,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                         key={task.id}
                         title={task.isBatch ? `工单号：${task.batchId}` : `工单号：${task.workOrderNumber || task.id}`}
                         isBatch={task.isBatch}
-                        projectName={task.isBatch ? task.projectName : undefined}
+                        projectName={task.projectName || task.projectLocation}
                         customerName={task.customerName || task.devices?.[0]?.customerName}
                         reportedBy={task.reportedBy || task.devices?.[0]?.reportedBy}
                         reportedByUsername={task.reportedByUsername || task.devices?.[0]?.reportedByUsername}
@@ -591,8 +607,14 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                         }}
                       />
                     )
-                  })}
-                </WorkOrderCardStack>
+                    })}
+                  </WorkOrderCardStack>
+                  <WorkOrderPagination
+                    currentPage={currentPage}
+                    totalItems={filteredTasks.length}
+                    onPageChange={setCurrentPage}
+                  />
+                </>
               ) : (
                 <CardContent className="rounded-xl border border-border/50 bg-card p-8 text-center">
                   <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">

@@ -17,7 +17,9 @@ import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-co
 import { WorkOrderCardStack } from "@/components/work-order-card-stack";
 import { TicketStatus } from "@/lib/enums";
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar";
+import { WorkOrderPagination } from "@/components/work-order-pagination";
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
+import { clampPage, paginateItems } from "@/lib/pagination";
 
 interface PendingBatch {
   batchId: string;
@@ -51,6 +53,7 @@ export default function WarehouseDashboard() {
   const [customerQuery, setCustomerQuery] = useState("");
   const [deviceQuery, setDeviceQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState(ALL_REPAIR_STATUS_FILTER);
+  const [currentPage, setCurrentPage] = useState(1);
 
   const loadPendingBatches = useCallback(async () => {
     setLoading(true);
@@ -140,6 +143,27 @@ export default function WarehouseDashboard() {
   const filteredShippingBatches = filterWarehouseBatches(shippingBatches);
   const filteredCompletedBatches = filterWarehouseBatches(completedBatches);
   const filteredAllBatches = filterWarehouseBatches(allBatches);
+  const activeFilteredCount = activeTab === "pending"
+    ? filteredPendingBatches.length
+    : activeTab === "shipping"
+      ? filteredShippingBatches.length
+      : activeTab === "completed"
+        ? filteredCompletedBatches.length
+        : activeTab === "all"
+          ? filteredAllBatches.length
+          : 0;
+  const paginatedPendingBatches = paginateItems(filteredPendingBatches, currentPage);
+  const paginatedShippingBatches = paginateItems(filteredShippingBatches, currentPage);
+  const paginatedCompletedBatches = paginateItems(filteredCompletedBatches, currentPage);
+  const paginatedAllBatches = paginateItems(filteredAllBatches, currentPage);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [activeTab, workOrderQuery, customerQuery, deviceQuery, filterStatus]);
+
+  useEffect(() => {
+    setCurrentPage((page) => clampPage(page, activeFilteredCount));
+  }, [activeFilteredCount]);
   const hasActiveFilters = Boolean(
     workOrderQuery.trim() ||
     customerQuery.trim() ||
@@ -293,8 +317,9 @@ export default function WarehouseDashboard() {
                   </p>
                 </div>
               ) : (
-                <WorkOrderCardStack>
-                  {filteredPendingBatches.map((batch, index) => {
+                <>
+                  <WorkOrderCardStack>
+                    {paginatedPendingBatches.map((batch, index) => {
                     // 调试：打印batch信息
                     if (index === 0) {
                       console.log('[Warehouse Dashboard] 第一个批次数据:', batch)
@@ -328,8 +353,14 @@ export default function WarehouseDashboard() {
                         />
                       </Card>
                     )
-                  })}
-                </WorkOrderCardStack>
+                    })}
+                  </WorkOrderCardStack>
+                  <WorkOrderPagination
+                    currentPage={currentPage}
+                    totalItems={filteredPendingBatches.length}
+                    onPageChange={setCurrentPage}
+                  />
+                </>
               )}
             </CardContent>
           </Card>
@@ -361,8 +392,9 @@ export default function WarehouseDashboard() {
                   </p>
                 </div>
               ) : (
-                <WorkOrderCardStack>
-                  {filteredShippingBatches.map((batch) => {
+                <>
+                  <WorkOrderCardStack>
+                    {paginatedShippingBatches.map((batch) => {
                     const uniqueKey = `shipping-${batch.batchId}`
                     const isRmaBatch = batch.status === TicketStatus.PENDING_FACTORY
                       || batch.status === "pending_factory"
@@ -396,8 +428,14 @@ export default function WarehouseDashboard() {
                         />
                       </Card>
                     )
-                  })}
-                </WorkOrderCardStack>
+                    })}
+                  </WorkOrderCardStack>
+                  <WorkOrderPagination
+                    currentPage={currentPage}
+                    totalItems={filteredShippingBatches.length}
+                    onPageChange={setCurrentPage}
+                  />
+                </>
               )}
             </CardContent>
           </Card>
@@ -429,8 +467,9 @@ export default function WarehouseDashboard() {
                   </p>
                 </div>
               ) : (
-                <WorkOrderCardStack>
-                  {filteredCompletedBatches.map((batch) => {
+                <>
+                  <WorkOrderCardStack>
+                    {paginatedCompletedBatches.map((batch) => {
                     const uniqueKey = `completed-${batch.batchId}`
                     return (
                       <Card key={uniqueKey} className="cursor-pointer" onClick={() => {
@@ -458,8 +497,14 @@ export default function WarehouseDashboard() {
                         />
                       </Card>
                     )
-                  })}
-                </WorkOrderCardStack>
+                    })}
+                  </WorkOrderCardStack>
+                  <WorkOrderPagination
+                    currentPage={currentPage}
+                    totalItems={filteredCompletedBatches.length}
+                    onPageChange={setCurrentPage}
+                  />
+                </>
               )}
             </CardContent>
           </Card>
@@ -491,8 +536,9 @@ export default function WarehouseDashboard() {
                   </p>
                 </div>
               ) : (
-                <WorkOrderCardStack>
-                  {filteredAllBatches.map((batch) => {
+                <>
+                  <WorkOrderCardStack>
+                    {paginatedAllBatches.map((batch) => {
                     const uniqueKey = `all-${batch.batchId}`
                     // 根据状态确定查看模式和Badge
                     const getStatusInfo = (status: string) => {
@@ -535,8 +581,14 @@ export default function WarehouseDashboard() {
                         />
                       </Card>
                     )
-                  })}
-                </WorkOrderCardStack>
+                    })}
+                  </WorkOrderCardStack>
+                  <WorkOrderPagination
+                    currentPage={currentPage}
+                    totalItems={filteredAllBatches.length}
+                    onPageChange={setCurrentPage}
+                  />
+                </>
               )}
             </CardContent>
           </Card>

@@ -17,10 +17,12 @@ import { useAuth } from "@/context/auth-context"
 import { WorkOrderListRow } from "@/components/work-order-list-row"
 import { WorkOrderCardStack } from "@/components/work-order-card-stack"
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar"
+import { WorkOrderPagination } from "@/components/work-order-pagination"
 import { getPendingStatusesForRole, calculateProgress, getCurrentStep, resolveTimeFilterPool, getTimeFilterTargetDate } from "@/lib/workflow-utils"
 import { TicketStatus, UserRole, normalizeTicketStatus, isTerminalStatus, TICKET_STATUS_LABELS } from "@/lib/enums"
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters } from "@/lib/repair-list-filters"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
+import { clampPage, DEFAULT_WORK_ORDER_PAGE_SIZE, paginateItems } from "@/lib/pagination"
 import WorkflowProgress from "@/components/workflow-progress"
 
 interface DashboardProps {
@@ -55,6 +57,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
     // 将工单数据转换为组件需要的格式
   const [tasks, setTasks] = useState<any[]>([]);
   const [filteredTasks, setFilteredTasks] = useState<any[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
   
   // 从 URL 参数恢复联合筛选状态；q 为旧版综合搜索参数的兼容入口
   const [workOrderQuery, setWorkOrderQuery] = useState(() => {
@@ -323,6 +326,16 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
     
     setFilteredTasks(filtered);
   }, [workOrderQuery, customerQuery, deviceQuery, filterTimeRange, filterStatus, dateRange, tasks]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [workOrderQuery, customerQuery, deviceQuery, filterTimeRange, filterStatus, dateRange]);
+
+  useEffect(() => {
+    setCurrentPage((page) => clampPage(page, filteredTasks.length));
+  }, [filteredTasks.length]);
+
+  const paginatedTasks = paginateItems(filteredTasks, currentPage);
   
   // ⚠️ 曾经的 bug：这里的分支没有覆盖仓库确认中/仓库已确认/仓库待发货等新流程状态，
   // 且 ADMIN_REVIEW / PENDING_SHIPMENT 是已被 normalizeTicketStatus 归并掉的旧枚举值，永远不会命中，
@@ -635,11 +648,12 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
             </Button>
           </div>
 
-          {/* Task List —— 紧凑列表模式 */}
+          {/* Task List —— 单列五栏模式 */}
           <Card className="gap-0 border-0 bg-transparent py-0 shadow-none overflow-visible">
             {filteredTasks.length > 0 ? (
-              <WorkOrderCardStack>
-                {filteredTasks.map((task, taskIdx) => {
+              <>
+                <WorkOrderCardStack>
+                  {paginatedTasks.map((task, taskIdx) => {
                   const unread = task.isBatch ? getUnreadCount(task.batchId, task.rawData?.messageCount || 0) : 0
                   const isTerminal = isTerminalStatus(task.status)
                   const needsSupplement = !task.isBatch && !isTerminal && (
@@ -651,12 +665,11 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
 
                   return (
                     <WorkOrderListRow
-                      key={task.id ? `task-db-${task.id}` : `task-fallback-${taskIdx}`}
+                      key={task.id ? `task-db-${task.id}` : `task-fallback-${(currentPage - 1) * DEFAULT_WORK_ORDER_PAGE_SIZE + taskIdx}`}
                       className="h-full last:border-b"
-                      compact
                       title={task.isBatch ? `工单号：${task.batchId}` : `工单号：${task.workOrderNumber || task.id}`}
                       isBatch={task.isBatch}
-                      projectName={task.isBatch ? task.projectName : undefined}
+                      projectName={task.projectName || task.projectLocation}
                       customerName={task.customerName || task.devices?.[0]?.customerName}
                       reportedBy={task.reportedBy || task.devices?.[0]?.reportedBy}
                       reportedByUsername={task.reportedByUsername || task.devices?.[0]?.reportedByUsername}
@@ -746,8 +759,14 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
                       }
                     />
                   )
-                })}
-              </WorkOrderCardStack>
+                  })}
+                </WorkOrderCardStack>
+                <WorkOrderPagination
+                  currentPage={currentPage}
+                  totalItems={filteredTasks.length}
+                  onPageChange={setCurrentPage}
+                />
+              </>
             ) : (
               <CardContent className="rounded-xl border border-border/50 bg-card p-8 text-center">
                 <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
