@@ -4,6 +4,10 @@ import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
 import { TicketActionType, TicketStatus, UserRole } from "@/lib/enums"
 import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import {
+  canEditDeviceClassification,
+  canEditDeviceIdentity,
+} from "@/lib/device-identity-permissions"
 
 const batchIdSchema = z.string().trim().min(1).max(100)
 const newDeviceSchema = z.object({
@@ -40,6 +44,10 @@ interface BatchGuardRow {
   ReportByUserID: number | null
   ProjectName: string | null
   ContactInfo: string | null
+  DeviceName: string | null
+  ModelName: string | null
+  Category: string | null
+  SubCategory: string | null
 }
 
 async function rollback(transaction: sql.Transaction | null): Promise<null> {
@@ -98,7 +106,7 @@ export async function GET(
           [CancelRequestReason], [ManufactureDate], [ArrivalDate], [WarrantyStatus],
           [WarrantyStatusOverride], [DevicePhotos], [RevisionRequestedBy],
           [RevisionRequestReason], [RevisionRequestDate], [FactoryTrackingNum],
-          [FactoryShipDate]
+          [FactoryShipDate], [ReceivedDate]
         FROM [dbo].[Repair_Tickets]
         WHERE [BatchId] = @batchId ${reporterPredicate}
         ORDER BY [Id] ASC;
@@ -116,6 +124,8 @@ export async function GET(
       deviceSerialNumber: row.DeviceSN,
       modelName: row.ModelName,
       deviceName: row.DeviceName,
+      category: row.Category,
+      subCategory: row.SubCategory,
       status: row.Status,
       problem: row.Problem,
       materialCode: row.MaterialCode,
@@ -175,6 +185,7 @@ export async function GET(
           revisionRequestDate: first.RevisionRequestDate || null,
           factoryTrackingNum: first.FactoryTrackingNum || null,
           factoryShipDate: first.FactoryShipDate || null,
+          customerReturnDate: first.ReceivedDate || first.ArrivalDate || null,
         },
         devices,
       },
@@ -295,7 +306,12 @@ export async function PUT(
   request: Request,
   context: { params: Promise<{ batchId: string }> }
 ) {
-  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER])
+  const authResult = await checkUserRole([
+    UserRole.ADMIN,
+    UserRole.REPORTER,
+    UserRole.TECHNICIAN,
+    UserRole.WAREHOUSE,
+  ])
   if (isErrorResponse(authResult)) return authResult
 
   let transaction: sql.Transaction | null = null
@@ -309,6 +325,34 @@ export async function PUT(
     const { deviceId, updates } = parsedBody.data
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ success: false, message: "没有需要更新的字段" }, { status: 400 })
+    }
+    const isIdentityOnlyEditor =
+      authResult.normalizedRole === UserRole.TECHNICIAN ||
+      authResult.normalizedRole === UserRole.WAREHOUSE
+    if (isIdentityOnlyEditor) {
+      const allowedFields = authResult.normalizedRole === UserRole.WAREHOUSE
+        ? new Set(["deviceName", "modelName", "category", "subCategory"])
+        : new Set(["deviceName", "modelName"])
+      if (Object.keys(updates).some((field) => !allowedFields.has(field))) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: authResult.normalizedRole === UserRole.WAREHOUSE
+              ? "仓库人员只能完善设备分类、产品名称和型号"
+              : "维修人员只能修改产品名称和型号",
+          },
+          { status: 403 }
+        )
+      }
+      if (updates.deviceName !== undefined && (updates.deviceName === null || !updates.deviceName.trim())) {
+        return NextResponse.json({ success: false, message: "产品名称不能为空" }, { status: 400 })
+      }
+      if (updates.category !== undefined && (updates.category === null || !updates.category.trim())) {
+        return NextResponse.json({ success: false, message: "一级分类不能为空" }, { status: 400 })
+      }
+      if (updates.subCategory !== undefined && (updates.subCategory === null || !updates.subCategory.trim())) {
+        return NextResponse.json({ success: false, message: "二级分类不能为空" }, { status: 400 })
+      }
     }
     if (authResult.normalizedRole === UserRole.REPORTER && updates.manufactureDate !== undefined) {
       return NextResponse.json({ success: false, message: "现场人员无权修改出厂日期" }, { status: 403 })
@@ -324,11 +368,22 @@ export async function PUT(
     const guardResult = await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
       .query<BatchGuardRow>(`
-        SELECT [Id], [Status], [ReportByUserID], [ProjectName], [ContactInfo]
+        SELECT [Id], [Status], [ReportByUserID], [ProjectName], [ContactInfo],
+               [DeviceName], [ModelName], [Category], [SubCategory]
         FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BatchId] = @batchId;
       `)
-    if (!canEditBatchRows(guardResult.recordset, authResult.normalizedRole, userId)) {
+    const targetRow = guardResult.recordset.find((row) => row.Id === deviceId)
+    const changesClassification = updates.category !== undefined || updates.subCategory !== undefined
+    const canEdit = isIdentityOnlyEditor
+      ? Boolean(
+          targetRow
+          && canEditDeviceIdentity(authResult.normalizedRole, targetRow.Status)
+          && (!changesClassification
+            || canEditDeviceClassification(authResult.normalizedRole, targetRow.Status))
+        )
+      : canEditBatchRows(guardResult.recordset, authResult.normalizedRole, userId)
+    if (!canEdit) {
       transaction = await rollback(transaction)
       return NextResponse.json(
         { success: false, message: "您无权修改该批次或当前状态不允许编辑设备" },
@@ -340,6 +395,9 @@ export async function PUT(
     const updateRequest = new sql.Request(transaction)
       .input("deviceId", sql.Int, deviceId)
       .input("batchId", sql.NVarChar(100), batchId)
+    if (isIdentityOnlyEditor && targetRow) {
+      updateRequest.input("expectedStatus", sql.NVarChar(50), targetRow.Status)
+    }
     const addField = (column: string, parameter: string, type: sql.ISqlType, value: unknown) => {
       fields.push(`[${column}] = @${parameter}`)
       updateRequest.input(parameter, type, value)
@@ -360,12 +418,15 @@ export async function PUT(
     )
     fields.push("[UpdatedAt] = GETUTCDATE()")
 
+    const statusPredicate = isIdentityOnlyEditor
+      ? "[Status] = @expectedStatus"
+      : "[Status] IN ('Created', 'Warehouse_Confirming')"
     const updateResult = await updateRequest.query(`
       UPDATE [dbo].[Repair_Tickets]
       SET ${fields.join(", ")}
       WHERE [Id] = @deviceId
         AND [BatchId] = @batchId
-        AND [Status] IN ('Created', 'Warehouse_Confirming');
+        AND ${statusPredicate};
     `)
     if (updateResult.rowsAffected[0] !== 1) {
       transaction = await rollback(transaction)
@@ -375,12 +436,29 @@ export async function PUT(
       )
     }
 
+    const changeDescriptions: string[] = []
+    if (updates.deviceName !== undefined) {
+      changeDescriptions.push(`产品名称：${targetRow?.DeviceName || "未填写"} → ${updates.deviceName || "未填写"}`)
+    }
+    if (updates.modelName !== undefined) {
+      changeDescriptions.push(`型号：${targetRow?.ModelName || "未填写"} → ${updates.modelName}`)
+    }
+    if (updates.category !== undefined) {
+      changeDescriptions.push(`一级分类：${targetRow?.Category || "未填写"} → ${updates.category}`)
+    }
+    if (updates.subCategory !== undefined) {
+      changeDescriptions.push(`二级分类：${targetRow?.SubCategory || "未填写"} → ${updates.subCategory}`)
+    }
+    const description = changeDescriptions.length > 0
+      ? `编辑设备 ${deviceId}；${changeDescriptions.join("；")}`
+      : `编辑设备 ${deviceId}`
+
     await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
       .input("actionType", sql.NVarChar(50), TicketActionType.BATCH_UPDATED)
       .input("operatorId", sql.Int, userId)
       .input("operatorName", sql.NVarChar(100), authResult.realName || authResult.username)
-      .input("description", sql.NVarChar(sql.MAX), `编辑设备 ${deviceId}`)
+      .input("description", sql.NVarChar(sql.MAX), description)
       .query(`
         INSERT INTO [dbo].[Repair_Ticket_History] (
           [BatchId], [ActionType], [OperatorId], [OperatorName], [Description], [CreatedAt]

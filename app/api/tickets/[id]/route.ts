@@ -38,6 +38,7 @@ interface TicketRecord extends Record<string, unknown> {
   ContactInfo?: string
   ProjectName?: string
   Category?: string
+  SubCategory?: string
   Quantity?: number
   FullSpec?: string
   FaultPoint?: string
@@ -117,7 +118,7 @@ export async function GET(
         [ReportByUserID], [ExpressCompany], [CourierCompany], [TrackingNumber],
         [CourierNumber], [Status], [ReportTime], [CreatedAt], [DeviceName], [MaterialCode],
         [DevicePhotos], [DamageImages], [SubmitDate], [TrackingNumber_In],
-        [SenderAddress], [ContactInfo], [ProjectName], [Category], [Quantity],
+        [SenderAddress], [ContactInfo], [ProjectName], [Category], [SubCategory], [Quantity],
         [FullSpec], [FaultPoint], [IsChargeable], [IsOutsourced],
         [FactoryRepairDate], [FactoryTrackingNum], [SupplierName], [RepairCost],
         [ClientName], [IsInvoiced], [FactoryReceivedDate], [ReceivedDate],
@@ -306,8 +307,8 @@ export async function GET(
       batchId: (ticket.BatchId as string) || null,
       deviceSerialNumber: (ticket.DeviceSN as string) || "",
       productSN: (ticket.DeviceSN as string) || "",  // productSN 和 deviceSN 是同一列
-      deviceName: deviceInfo.deviceName || (ticket.DeviceName as string) || "",
-      deviceModel: deviceInfo.modelName || (ticket.ModelName as string) || "",
+      deviceName: (ticket.DeviceName as string) || deviceInfo.deviceName || (ticket.ModelName as string) || "",
+      deviceModel: (ticket.ModelName as string) || deviceInfo.modelName || "",
       projectLocation: (ticket.ProjectLocation as string) || "",
       problem: (ticket.Problem as string) || "",
       status: mappedStatus, // 使用映射后的状态值
@@ -328,8 +329,10 @@ export async function GET(
       trackingNumberIn: (ticket.TrackingNumber_In as string) || "",
       senderAddress: (ticket.SenderAddress as string) || "",
       contactInfo: (ticket.ContactInfo as string) || "",
-      projectName: (ticket.ProjectName as string) || "",
+      customerName: (ticket.ClientName as string) || (ticket.ProjectName as string) || "",
+      projectName: (ticket.ProjectLocation as string) || "",
       category: (ticket.Category as string) || "",
+      subCategory: (ticket.SubCategory as string) || "",
       modelName: (ticket.ModelName as string) || "",
       quantity: (ticket.Quantity as number) || 1,
       faultDescription: (ticket.Problem as string) || "",

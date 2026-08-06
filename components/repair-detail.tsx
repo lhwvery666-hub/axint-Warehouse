@@ -63,8 +63,10 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
     trackingNumberIn: "",
     senderAddress: "",
     contactInfo: "",
+    customerName: "",
     projectName: "",
     category: "",
+    subCategory: "",
     modelName: "",
     quantity: 1,
     productSN: "",
@@ -232,8 +234,10 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
               trackingNumberIn?: string
               senderAddress?: string
               contactInfo?: string
+              customerName?: string
               projectName?: string
               category?: string
+              subCategory?: string
               modelName?: string
               quantity?: number
               faultDescription?: string
@@ -339,6 +343,7 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
               contactInfo: ticket.contactInfo,
               projectName: ticket.projectName,
               category: ticket.category,
+              subCategory: ticket.subCategory,
               modelName: ticket.modelName,
               faultDescription: ticket.faultDescription,
               problem: ticket.problem
@@ -352,8 +357,10 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
               trackingNumberIn: ticket.trackingNumberIn || ticket.trackingNumber || "", // 发出快递单号：优先用新字段，否则用旧字段
               senderAddress: ticket.senderAddress || "", // 寄件人地址（暂时没有旧字段映射）
               contactInfo: ticket.contactInfo || contactInfoFromOld, // 联系人及电话：优先用新字段，否则从报告人和电话组合
-              projectName: ticket.projectName || ticket.projectLocation || "", // 项目/客户名称：优先用新字段，否则用项目地点
+              customerName: ticket.customerName || ticket.clientName || "",
+              projectName: ticket.projectName || ticket.projectLocation || "",
               category: ticket.category || "", // 产品名称/大类
+              subCategory: ticket.subCategory || "",
               modelName: ticket.modelName || ticket.deviceModel || "",
               quantity: ticket.quantity || 1,
               productSN: ticket.productSN || ticket.deviceSerialNumber || "",
@@ -1562,13 +1569,20 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                           <Label className="text-sm text-muted-foreground">联系人及电话</Label>
                           <p className="font-medium mt-1">{repairData.contactInfo || "待录入"}</p>
                         </div>
-                        <div className="md:col-span-2">
-                          <Label className="text-sm text-muted-foreground">项目/客户名称</Label>
+                        <div>
+                          <Label className="text-sm text-muted-foreground">客户名称</Label>
+                          <p className="font-medium mt-1">{repairData.customerName || "待录入"}</p>
+                        </div>
+                        <div>
+                          <Label className="text-sm text-muted-foreground">项目名称</Label>
                           <p className="font-medium mt-1">{repairData.projectName || "待录入"}</p>
                         </div>
                         <div>
-                          <Label className="text-sm text-muted-foreground">产品名称/大类</Label>
-                          <p className="font-medium mt-1">{repairData.category || "待录入"}</p>
+                          <Label className="text-sm text-muted-foreground">设备分类</Label>
+                          <p className="font-medium mt-1">
+                            {repairData.category || "待录入"}
+                            {repairData.subCategory && ` / ${repairData.subCategory}`}
+                          </p>
                         </div>
                         <div>
                           <Label className="text-sm text-muted-foreground">型号</Label>

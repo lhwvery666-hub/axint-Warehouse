@@ -1,7 +1,7 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { ArrowLeft, Package, Calendar as CalendarIcon, CheckCircle, AlertCircle, Info, MessageSquare, Activity, Eye, ImageOff, ChevronDown, ChevronUp } from "lucide-react"
+import { useCallback, useEffect, useState } from "react"
+import { ArrowLeft, Package, Calendar as CalendarIcon, CheckCircle, AlertCircle, Info, MessageSquare, Activity, ImageOff, ChevronDown, ChevronUp, Pencil, Loader2 } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -10,6 +10,14 @@ import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Calendar } from "@/components/ui/calendar"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import {
   Table,
   TableBody,
@@ -28,6 +36,7 @@ import { TicketStatus, UserRole, OperationLogType, OPERATION_LOG_TYPE_LABELS, TI
 import { TicketChat } from "@/components/TicketChat"
 import { useAuth } from "@/context/auth-context"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
+import { canEditDeviceClassification } from "@/lib/device-identity-permissions"
 
 interface Device {
   id: string
@@ -99,14 +108,16 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
   const [operationLogs, setOperationLogs] = useState<OperationLog[]>([])
   // 展开查看现场信息的设备ID（null 表示未展开）
   const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null)
+  const [editingClassificationDevice, setEditingClassificationDevice] = useState<Device | null>(null)
+  const [classificationForm, setClassificationForm] = useState({
+    category: "",
+    subCategory: "",
+    modelName: "",
+    deviceName: "",
+  })
+  const [isSavingClassification, setIsSavingClassification] = useState(false)
 
-  // 加载批次设备数据
-  useEffect(() => {
-    fetchBatchDevices()
-    fetchOperationLogs()
-  }, [batchId])
-
-  const fetchBatchDevices = async () => {
+  const fetchBatchDevices = useCallback(async () => {
     try {
       setLoading(true)
       const response = await fetch(`/api/tickets/batch-devices/${batchId}`)
@@ -141,10 +152,10 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
     } finally {
       setLoading(false)
     }
-  }
+  }, [batchId])
 
   // 获取批次操作记录
-  const fetchOperationLogs = async () => {
+  const fetchOperationLogs = useCallback(async () => {
     try {
       const response = await fetch(`/api/tickets/batch-operation-logs/${batchId}`)
       const result = await response.json()
@@ -154,6 +165,68 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
       }
     } catch (err: unknown) {
       console.error("获取操作记录失败:", err)
+    }
+  }, [batchId])
+
+  // 加载批次设备数据
+  useEffect(() => {
+    void fetchBatchDevices()
+    void fetchOperationLogs()
+  }, [fetchBatchDevices, fetchOperationLogs])
+
+  const openClassificationEditor = (device: Device) => {
+    setEditingClassificationDevice(device)
+    setClassificationForm({
+      category: device.category || "",
+      subCategory: device.subCategory || "",
+      modelName: device.modelName || "",
+      deviceName: device.deviceName || "",
+    })
+  }
+
+  const handleSaveClassification = async () => {
+    if (!editingClassificationDevice) return
+
+    const category = classificationForm.category.trim()
+    const subCategory = classificationForm.subCategory.trim()
+    const modelName = classificationForm.modelName.trim()
+    const deviceName = classificationForm.deviceName.trim()
+    if (!category || !subCategory || !modelName) {
+      toast.error("请完整填写一级分类、二级分类和型号")
+      return
+    }
+
+    setIsSavingClassification(true)
+    try {
+      const response = await fetch(`/api/tickets/batch-devices/${batchId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deviceId: Number(editingClassificationDevice.id),
+          updates: {
+            category,
+            subCategory,
+            modelName,
+            ...(deviceName ? { deviceName } : {}),
+          },
+        }),
+      })
+      const result = await response.json().catch(() => null) as {
+        success?: boolean
+        message?: string
+      } | null
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.message || "保存设备分类失败")
+      }
+
+      toast.success("设备分类和型号已完善")
+      setEditingClassificationDevice(null)
+      await Promise.all([fetchBatchDevices(), fetchOperationLogs()])
+    } catch (saveError: unknown) {
+      const message = saveError instanceof Error ? saveError.message : "保存设备分类失败"
+      toast.error(message)
+    } finally {
+      setIsSavingClassification(false)
     }
   }
 
@@ -271,7 +344,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
           <AlertDescription className="text-blue-800">
             <p className="font-medium mb-1">仓库确认流程说明</p>
             <p className="text-sm">
-              请核对批次中所有设备的信息，并为每台设备填写<span className="font-semibold">出厂日期</span>。确认后，工单状态将变更为"待维修检查"，维修人员即可开始处理。
+              请核对每台设备的分类、型号和出厂日期。现场选择“通用”的设备，可在此手动完善为准确分类；确认后维修人员将直接看到修正结果。
             </p>
           </AlertDescription>
         </Alert>
@@ -331,16 +404,17 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
             })()}
           </div>
           <CardDescription>
-            请核对设备信息并为每台待确认设备填写出厂日期。已推进流程的设备无需重复操作
+            请逐台核对一级分类、二级分类、型号和出厂日期；分类修正只更新设备资料，不会提前改变工单状态
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="rounded-md border">
-            <Table>
+          <div className="overflow-x-auto rounded-md border">
+            <Table className="min-w-[1500px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>序号</TableHead>
                   <TableHead>设备序列号</TableHead>
+                  <TableHead>设备分类</TableHead>
                   <TableHead>产品型号</TableHead>
                   <TableHead>物料名称</TableHead>
                   <TableHead>数量</TableHead>
@@ -349,6 +423,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                   <TableHead>到货日期 *</TableHead>
                   <TableHead>出厂日期 *</TableHead>
                   <TableHead>现场信息</TableHead>
+                  <TableHead className="text-right">分类完善</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -360,6 +435,10 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                     <TableRow key={device.id} className={!needsConfirm ? "bg-muted/40" : undefined}>
                       <TableCell className="font-medium">{index + 1}</TableCell>
                       <TableCell className="font-mono text-sm">{device.deviceSerialNumber}</TableCell>
+                      <TableCell>
+                        <p className="font-medium">{device.category || "未分类"}</p>
+                        <p className="text-xs text-muted-foreground">{device.subCategory || "未填写二级分类"}</p>
+                      </TableCell>
                       <TableCell>{device.modelName || "-"}</TableCell>
                       <TableCell>{device.deviceName || "-"}</TableCell>
                       <TableCell>{device.quantity || 1} 台</TableCell>
@@ -500,6 +579,21 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                             </>
                           )}
                         </Button>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {allowEdit && canEditDeviceClassification(user?.role, device.status) ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => openClassificationEditor(device)}
+                          >
+                            <Pencil className="mr-1 h-3.5 w-3.5" />
+                            完善分类/型号
+                          </Button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">当前阶段已锁定</span>
+                        )}
                       </TableCell>
                     </TableRow>
                   )
@@ -714,6 +808,98 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
           </CardContent>
         </Card>
       </div>
+
+      <Dialog
+        open={Boolean(editingClassificationDevice)}
+        onOpenChange={(open) => {
+          if (!open && !isSavingClassification) setEditingClassificationDevice(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>完善设备分类和型号</DialogTitle>
+            <DialogDescription>
+              按实物铭牌手动修正当前设备。保存后，维修工程师将在后续工单中直接看到这些信息。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-2 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="warehouse-device-category">一级分类 *</Label>
+              <Input
+                id="warehouse-device-category"
+                value={classificationForm.category}
+                onChange={(event) => setClassificationForm((current) => ({
+                  ...current,
+                  category: event.target.value,
+                }))}
+                placeholder="例如：控制器"
+                maxLength={200}
+                disabled={isSavingClassification}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="warehouse-device-subcategory">二级分类 *</Label>
+              <Input
+                id="warehouse-device-subcategory"
+                value={classificationForm.subCategory}
+                onChange={(event) => setClassificationForm((current) => ({
+                  ...current,
+                  subCategory: event.target.value,
+                }))}
+                placeholder="请输入准确的二级分类"
+                maxLength={200}
+                disabled={isSavingClassification}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="warehouse-device-model">型号 *</Label>
+              <Input
+                id="warehouse-device-model"
+                value={classificationForm.modelName}
+                onChange={(event) => setClassificationForm((current) => ({
+                  ...current,
+                  modelName: event.target.value,
+                }))}
+                placeholder="请输入铭牌型号"
+                maxLength={200}
+                disabled={isSavingClassification}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="warehouse-device-name">产品名称</Label>
+              <Input
+                id="warehouse-device-name"
+                value={classificationForm.deviceName}
+                onChange={(event) => setClassificationForm((current) => ({
+                  ...current,
+                  deviceName: event.target.value,
+                }))}
+                placeholder="可选：填写标准产品名称"
+                maxLength={200}
+                disabled={isSavingClassification}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setEditingClassificationDevice(null)}
+              disabled={isSavingClassification}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              onClick={handleSaveClassification}
+              disabled={isSavingClassification}
+            >
+              {isSavingClassification && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              保存分类信息
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

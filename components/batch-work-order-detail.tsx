@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
   Table,
@@ -35,6 +37,7 @@ import { toBeijingTime } from "@/lib/utils"
 import { toast } from "sonner"
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
+import { canEditDeviceIdentity } from "@/lib/device-identity-permissions"
 
 interface BatchWorkOrderDetailProps {
   batchId: string
@@ -47,6 +50,8 @@ interface Device {
   productSN?: string | null
   modelName: string
   deviceName: string
+  category?: string | null
+  subCategory?: string | null
   status: string
   problem: string
   materialCode: string
@@ -77,6 +82,7 @@ interface BatchInfo {
   senderAddress?: string
   trackingNumber?: string
   expressCompany?: string
+  customerReturnDate?: string | null
 }
 
 interface OperationLog {
@@ -103,6 +109,9 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
   
   // 编辑工单对话框（现场人员统一编辑整个批次）
   const [isEditBatchDialogOpen, setIsEditBatchDialogOpen] = useState(false)
+  const [editingIdentityDevice, setEditingIdentityDevice] = useState<Device | null>(null)
+  const [identityForm, setIdentityForm] = useState({ deviceName: "", modelName: "" })
+  const [isSavingIdentity, setIsSavingIdentity] = useState(false)
 
   // 签字凭证上传状态（现场人员在 PENDING_REPORTER_CONFIRM 阶段使用）
   const [signatureFile, setSignatureFile] = useState<File | null>(null)
@@ -323,6 +332,52 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
       toast.error(errorMessage)
     } finally {
       setIsDeleting(false)
+    }
+  }
+
+  const openDeviceIdentityEditor = (device: Device) => {
+    setEditingIdentityDevice(device)
+    setIdentityForm({
+      deviceName: device.deviceName || "",
+      modelName: device.modelName || "",
+    })
+  }
+
+  const handleSaveDeviceIdentity = async () => {
+    if (!editingIdentityDevice) return
+    const deviceName = identityForm.deviceName.trim()
+    const modelName = identityForm.modelName.trim()
+    if (!deviceName || !modelName) {
+      toast.error("产品名称和型号不能为空")
+      return
+    }
+
+    setIsSavingIdentity(true)
+    try {
+      const response = await fetch(`/api/tickets/batch-devices/${batchId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deviceId: Number(editingIdentityDevice.id),
+          updates: { deviceName, modelName },
+        }),
+      })
+      const result = await response.json().catch(() => null) as {
+        success?: boolean
+        message?: string
+      } | null
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.message || "保存失败")
+      }
+
+      toast.success("产品名称和型号已更新")
+      setEditingIdentityDevice(null)
+      await Promise.all([fetchBatchDevices(), fetchOperationLogs()])
+    } catch (saveError: unknown) {
+      const message = saveError instanceof Error ? saveError.message : "保存失败"
+      toast.error(message)
+    } finally {
+      setIsSavingIdentity(false)
     }
   }
 
@@ -695,6 +750,18 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                 <p className="font-medium">{batchInfo.deviceCount} 台</p>
               </div>
             </div>
+
+            <div className="flex items-start gap-3">
+              <Calendar className="w-5 h-5 text-muted-foreground mt-0.5" />
+              <div>
+                <p className="text-sm text-muted-foreground">客户寄回日期</p>
+                <p className="font-medium">
+                  {batchInfo.customerReturnDate
+                    ? format(toBeijingTime(batchInfo.customerReturnDate), "yyyy-MM-dd", { locale: zhCN })
+                    : "未填写"}
+                </p>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -886,15 +953,19 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                 <TableRow>
                   <TableHead>序号</TableHead>
                   <TableHead>设备序列号</TableHead>
+                  <TableHead>设备分类</TableHead>
                   <TableHead>产品型号</TableHead>
-                  {/* 物料名称仅内部人员可见 */}
-                  {user?.role !== UserRole.REPORTER && <TableHead>物料名称</TableHead>}
+                  {/* 产品名称仅内部人员可见 */}
+                  {user?.role !== UserRole.REPORTER && <TableHead>产品名称</TableHead>}
                   <TableHead>出厂日期</TableHead>
                   <TableHead>保修状态</TableHead>
                   <TableHead>状态</TableHead>
                   <TableHead>故障描述</TableHead>
                   {/* 处理结果仅技师可见 */}
                   {user?.role === UserRole.TECHNICIAN && <TableHead>处理结果</TableHead>}
+                  {(user?.role === UserRole.TECHNICIAN || user?.role === UserRole.WAREHOUSE) && (
+                    <TableHead className="text-right">操作</TableHead>
+                  )}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -912,8 +983,14 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                       <TableCell className="font-mono">
                         {formatSerialNumber(device.deviceSerialNumber)}
                       </TableCell>
+                      <TableCell>
+                        <p className="font-medium">{device.category || "未分类"}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {device.subCategory || "未填写二级分类"}
+                        </p>
+                      </TableCell>
                       <TableCell>{device.modelName || "-"}</TableCell>
-                      {/* 物料名称仅内部人员可见 */}
+                      {/* 产品名称仅内部人员可见 */}
                       {user?.role !== UserRole.REPORTER && <TableCell>{device.deviceName || "-"}</TableCell>}
                       <TableCell>
                         {device.manufactureDate ? (
@@ -978,15 +1055,36 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                           )}
                         </TableCell>
                       )}
+                      {(user?.role === UserRole.TECHNICIAN || user?.role === UserRole.WAREHOUSE) && (
+                        <TableCell className="text-right">
+                          {canEditDeviceIdentity(user.role, device.status) ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                openDeviceIdentityEditor(device)
+                              }}
+                            >
+                              <Edit className="mr-1 h-3.5 w-3.5" />
+                              修改名称/型号
+                            </Button>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">当前阶段已锁定</span>
+                          )}
+                        </TableCell>
+                      )}
                     </TableRow>
                   ))
                 ) : (
                   <TableRow>
                     <TableCell
                       colSpan={
-                        user?.role === UserRole.REPORTER ? 7
-                        : user?.role === UserRole.TECHNICIAN ? 9
-                        : 8
+                        user?.role === UserRole.REPORTER ? 8
+                        : user?.role === UserRole.TECHNICIAN ? 11
+                        : user?.role === UserRole.WAREHOUSE ? 10
+                        : 9
                       }
                       className="text-center text-muted-foreground py-8"
                     >
@@ -1474,6 +1572,64 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={Boolean(editingIdentityDevice)}
+        onOpenChange={(open) => {
+          if (!open && !isSavingIdentity) setEditingIdentityDevice(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>修改产品名称和型号</DialogTitle>
+            <DialogDescription>
+              仅更正当前工单设备信息，不会修改设备 SN、数量或工作流状态。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="device-identity-name">产品名称</Label>
+              <Input
+                id="device-identity-name"
+                value={identityForm.deviceName}
+                onChange={(event) => setIdentityForm((current) => ({
+                  ...current,
+                  deviceName: event.target.value,
+                }))}
+                maxLength={200}
+                disabled={isSavingIdentity}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="device-identity-model">型号</Label>
+              <Input
+                id="device-identity-model"
+                value={identityForm.modelName}
+                onChange={(event) => setIdentityForm((current) => ({
+                  ...current,
+                  modelName: event.target.value,
+                }))}
+                maxLength={200}
+                disabled={isSavingIdentity}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setEditingIdentityDevice(null)}
+              disabled={isSavingIdentity}
+            >
+              取消
+            </Button>
+            <Button type="button" onClick={handleSaveDeviceIdentity} disabled={isSavingIdentity}>
+              {isSavingIdentity && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* 修改工单对话框 */}
       <Dialog open={isRecreateDialogOpen} onOpenChange={setIsRecreateDialogOpen}>
         <DialogContent className="sm:max-w-[98vw] md:max-w-[95vw] lg:max-w-[90vw] max-h-[95vh] flex flex-col p-0">
@@ -1522,8 +1678,8 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                   faultDescription: device.faultPoint || device.problem || "",
                   deviceName: device.deviceName || "",
                   deviceModel: device.modelName || "",
-                  category: batchInfo?.category || "",
-                  subCategory: batchInfo?.subCategory || "",
+                  category: device.category || batchInfo?.category || "",
+                  subCategory: device.subCategory || batchInfo?.subCategory || "",
                   quantity: device.quantity,
                   deviceImages: device.deviceImages || undefined
                 }))
@@ -1578,8 +1734,8 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                   serialNumber: d.deviceSerialNumber,
                   deviceModel: d.modelName,
                   faultDescription: d.problem,
-                  category: batchInfo.category || "",
-                  subCategory: batchInfo.subCategory || "",
+                  category: d.category || batchInfo.category || "",
+                  subCategory: d.subCategory || batchInfo.subCategory || "",
                   quantity: d.quantity,
                   deviceImages: d.deviceImages || undefined
                 }))
