@@ -84,6 +84,17 @@ export default function ReportPage() {
   // 获取最新的工单数据
   const [tasks, setTasks] = useState<any[]>([])
   const [loadingTasks, setLoadingTasks] = useState(true)
+  const [refreshVersion, setRefreshVersion] = useState(0)
+
+  useEffect(() => {
+    const refreshVisibleList = () => setRefreshVersion((version) => version + 1)
+    window.addEventListener("pageshow", refreshVisibleList)
+    window.addEventListener("focus", refreshVisibleList)
+    return () => {
+      window.removeEventListener("pageshow", refreshVisibleList)
+      window.removeEventListener("focus", refreshVisibleList)
+    }
+  }, [])
   
   // 从数据库 API 加载工单数据
   useEffect(() => {
@@ -96,7 +107,7 @@ export default function ReportPage() {
         const userId = user?.id || null
         
         // 从 API 获取所有工单
-        const response = await fetch('/api/tickets')
+        const response = await fetch('/api/tickets', { cache: 'no-store' })
         
         if (!response.ok) {
           throw new Error(`获取工单列表失败 (HTTP ${response.status})`)
@@ -267,7 +278,7 @@ export default function ReportPage() {
     if (view === "tasks") {
       loadTickets()
     }
-  }, [view, user?.id, user?.role]) // 当视图或用户身份变化时重新加载
+  }, [view, user?.id, user?.role, refreshVersion]) // 返回页面或窗口重新获得焦点时也加载最新状态
 
   // 流程步骤定义（用于卡片底部的迷你流程指示器）
   // 正确顺序：待接单 → 检测中（仓库填出厂日期） → 待签字 → 维修作业中 → 待审核 → 待发货 → 已完成
@@ -557,11 +568,6 @@ export default function ReportPage() {
                           </Badge>
                         )}
                         reportedAt={task.reportedAt}
-                        delayedText={
-                          task.expectedCompletionDate && aggStatus === AggregatedStatus.ABNORMAL
-                            ? `延期至 ${format(new Date(task.expectedCompletionDate), "yyyy-MM-dd")}`
-                            : undefined
-                        }
                         pendingSnText={needsSupplement ? "待补录 SN" : undefined}
                         onClick={() => {
                           if (task.isBatch) {

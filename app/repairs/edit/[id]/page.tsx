@@ -2,17 +2,17 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { safeParseRepairReportContent } from '@/lib/json-utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
 import { useAuth } from '@/context/auth-context';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, Save, Send, Edit, Lock, Info } from 'lucide-react';
 import { WorkflowSteps } from '@/components/workflow-steps';
 import { UserRole, TicketStatus, normalizeTicketStatus } from '@/lib/enums';
+import { TicketAction } from '@/lib/ticket-workflow-actions';
+import { isSequentialBatchId } from '@/lib/batch-number-format';
 
 // 已发送给现场人员的状态（锁定编辑）
 const SENT_STATUSES = new Set([
@@ -45,6 +45,30 @@ interface BatchDevice {
   improvements: string;
 }
 
+interface BatchInfo {
+  status: string;
+  workOrderNumber: string;
+  receiveDate: string;
+  projectName: string;
+  projectLocation: string;
+  customerAddress: string;
+  contactInfo: string;
+}
+
+interface SingleTicketInfo {
+  repairNumber: string;
+  receiveDate: string;
+  customerName: string;
+  projectName: string;
+  isOutOfWarranty: string;
+  contactInfo: string;
+}
+
+interface ApiResponse {
+  success?: boolean;
+  message?: string;
+}
+
 export default function EditRepairReportPage() {
   const params = useParams();
   const router = useRouter();
@@ -54,12 +78,13 @@ export default function EditRepairReportPage() {
   const [isBatchMode, setIsBatchMode] = useState(false);
   const [isEmbedMode, setIsEmbedMode] = useState(false);
   // 单设备模式
-  const [ticketInfo, setTicketInfo] = useState<any>(null);
+  const [ticketInfo, setTicketInfo] = useState<SingleTicketInfo | null>(null);
   const [items, setItems] = useState<RepairItem[]>([]);
   // 批次模式
-  const [batchInfo, setBatchInfo] = useState<any>(null);
+  const [batchInfo, setBatchInfo] = useState<BatchInfo | null>(null);
   const [devices, setDevices] = useState<BatchDevice[]>([]);
   const [remarks, setRemarks] = useState('');
+  const [savedSnapshot, setSavedSnapshot] = useState('');
 
   // ── 锁定状态：发送流程后报告不可直接编辑 ──
   // isSentToReporter: 状态已超过 IN_REPAIR（流程已发出）
@@ -88,17 +113,19 @@ export default function EditRepairReportPage() {
     const fetchData = async () => {
       try {
         const id = params.id as string;
-        const batchIdPattern = /^WO\d{6,}/i;
-        const isBatch = batchIdPattern.test(id);
+        const isBatch = isSequentialBatchId(id);
         setIsBatchMode(isBatch);
 
         if (isBatch) {
           const response = await fetch(`/api/tickets/batch-repair-report/${id}`);
           const result = await response.json();
           if (result.success && result.data) {
-            setBatchInfo(result.data.batchInfo);
-            setDevices(result.data.devices);
-            setRemarks(result.data.remarks || '');
+            const loadedDevices = result.data.devices as BatchDevice[];
+            const loadedRemarks = String(result.data.remarks || '');
+            setBatchInfo(result.data.batchInfo as BatchInfo);
+            setDevices(loadedDevices);
+            setRemarks(loadedRemarks);
+            setSavedSnapshot(JSON.stringify({ devices: loadedDevices, remarks: loadedRemarks }));
             // 判断是否已发送（状态超过 IN_REPAIR）
             const ns = normalizeTicketStatus(result.data.batchInfo?.status || '');
             setIsSentToReporter(ns !== null && SENT_STATUSES.has(ns));
@@ -107,9 +134,12 @@ export default function EditRepairReportPage() {
           const response = await fetch(`/api/tickets/${id}/repair-report`);
           const result = await response.json();
           if (result.success && result.data) {
-            setTicketInfo(result.data);
-            setItems(Array.isArray(result.data.items) ? result.data.items : []);
-            setRemarks(result.data.remarks || '');
+            const loadedItems = Array.isArray(result.data.items) ? result.data.items as RepairItem[] : [];
+            const loadedRemarks = String(result.data.remarks || '');
+            setTicketInfo(result.data as SingleTicketInfo);
+            setItems(loadedItems);
+            setRemarks(loadedRemarks);
+            setSavedSnapshot(JSON.stringify({ items: loadedItems, remarks: loadedRemarks }));
           }
         }
       } catch (error) {
@@ -122,13 +152,13 @@ export default function EditRepairReportPage() {
     if (params.id) fetchData();
   }, [params.id]);
 
-  const handleItemChange = (index: number, field: keyof RepairItem, value: any) => {
+  const handleItemChange = <K extends keyof RepairItem>(index: number, field: K, value: RepairItem[K]) => {
     const newItems = [...items];
     newItems[index] = { ...newItems[index], [field]: value };
     setItems(newItems);
   };
 
-  const handleDeviceChange = (index: number, field: keyof BatchDevice, value: any) => {
+  const handleDeviceChange = <K extends keyof BatchDevice>(index: number, field: K, value: BatchDevice[K]) => {
     const newDevices = [...devices];
     newDevices[index] = { ...newDevices[index], [field]: value };
     setDevices(newDevices);
@@ -145,43 +175,22 @@ export default function EditRepairReportPage() {
     setItems(items.filter((_, i) => i !== index));
   };
 
-  /**
-   * handleSave
-   * @param sendToReporter  true = 发送流程（改变状态，允许现场签字）
-   *                        false = 仅保存内容（状态不变）
-   * @param isRevision      true = 已发送后的修改（需要日志 + 回退状态）
-   */
-  const handleSave = async (sendToReporter: boolean = false, isRevision: boolean = false) => {
+  const handleSave = async (): Promise<boolean> => {
     setSaving(true);
     try {
       if (isBatchMode) {
         const response = await fetch(`/api/tickets/batch-repair-report/${params.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ devices, remarks, sendToReporter, isRevision }),
+          body: JSON.stringify({ devices, remarks }),
         });
 
-        const result = await response.json();
+        const result = await response.json() as ApiResponse;
         if (result.success) {
-          alert(result.message || '保存成功！');
-
-          if (sendToReporter && result.sentToReporter) {
-            // 发送成功：标记为已锁定
-            setIsSentToReporter(true);
-            setIsEditingAfterSend(false);
-            if (isEmbedMode) {
-              window.parent.postMessage({ type: 'REPAIR_REPORT_SAVED' }, window.location.origin);
-              setTimeout(() => {
-                window.parent.postMessage({ type: 'CLOSE_EDIT_AND_OPEN_PRINT' }, window.location.origin);
-              }, 500);
-            } else {
-              router.push(`/repairs/print/${params.id}`);
-            }
-          } else if (isRevision) {
-            // 修改已提交报告：保存后退出修改模式，状态已回退到 IN_REPAIR
-            setIsEditingAfterSend(false);
-            setIsSentToReporter(false); // 状态已回退，解锁
-          }
+          setSavedSnapshot(JSON.stringify({ devices, remarks }));
+          setIsEditingAfterSend(false);
+          alert(result.message || '信息已保存，流程状态未改变');
+          return true;
         } else {
           alert('保存失败：' + (result.message || '未知错误'));
         }
@@ -193,17 +202,12 @@ export default function EditRepairReportPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ items, remarks, totalCost }),
         });
-        const result = await response.json();
+        const result = await response.json() as ApiResponse;
         if (result.success) {
-          alert('保存成功！');
-          if (isEmbedMode) {
-            window.parent.postMessage({ type: 'REPAIR_REPORT_SAVED' }, window.location.origin);
-            setTimeout(() => {
-              window.parent.postMessage({ type: 'CLOSE_EDIT_AND_OPEN_PRINT' }, window.location.origin);
-            }, 500);
-          } else {
-            router.push(`/repairs/print/${params.id}`);
-          }
+          setSavedSnapshot(JSON.stringify({ items, remarks }));
+          setIsEditingAfterSend(false);
+          alert('信息已保存，流程状态未改变');
+          return true;
         } else {
           alert('保存失败：' + result.message);
         }
@@ -211,6 +215,60 @@ export default function EditRepairReportPage() {
     } catch (error) {
       console.error('保存失败:', error);
       alert('保存失败，请重试');
+    } finally {
+      setSaving(false);
+    }
+    return false;
+  };
+
+  const handleSendFlow = async () => {
+    const currentSnapshot = isBatchMode
+      ? JSON.stringify({ devices, remarks })
+      : JSON.stringify({ items, remarks });
+    if (savedSnapshot !== currentSnapshot) {
+      alert('当前有未保存的信息，请先点击“保存信息”，再发送流程');
+      return;
+    }
+    const allReportsComplete = isBatchMode
+      ? devices.every((device) => device.repairContent.trim().length > 0)
+      : items.length > 0 && items.every((item) => item.repairContent.trim().length > 0);
+    if (!allReportsComplete) {
+      alert('请先完整填写并保存所有设备的维修内容');
+      return;
+    }
+
+    const anchorId = isBatchMode ? devices[0]?.id : String(params.id);
+    if (!anchorId) {
+      alert('未找到可发送的工单设备');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const response = await fetch(`/api/tickets/${anchorId}/workflow-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: TicketAction.SEND_REPORT_FOR_SIGN }),
+      });
+      const result = await response.json() as ApiResponse;
+      if (!result.success) {
+        alert('发送失败：' + (result.message || '未知错误'));
+        return;
+      }
+      setIsSentToReporter(true);
+      setIsEditingAfterSend(false);
+      alert(result.message || '流程已发送至现场确认');
+      if (isEmbedMode) {
+        window.parent.postMessage({ type: 'REPAIR_REPORT_SAVED' }, window.location.origin);
+        setTimeout(() => {
+          window.parent.postMessage({ type: 'CLOSE_EDIT_AND_OPEN_PRINT' }, window.location.origin);
+        }, 500);
+      } else {
+        router.push(`/repairs/print/${params.id}`);
+      }
+    } catch (error) {
+      console.error('发送流程失败:', error);
+      alert('发送流程失败，请重试');
     } finally {
       setSaving(false);
     }
@@ -247,6 +305,10 @@ export default function EditRepairReportPage() {
   const totalCost = isBatchMode
     ? devices.reduce((sum, d) => sum + (Number(d.repairCost) || 0), 0)
     : items.reduce((sum, item) => sum + (Number(item.repairCost) || 0), 0);
+  const currentSnapshot = isBatchMode
+    ? JSON.stringify({ devices, remarks })
+    : JSON.stringify({ items, remarks });
+  const hasUnsavedChanges = savedSnapshot !== '' && savedSnapshot !== currentSnapshot;
 
   // 表单是否锁定：已发送且未进入修改模式
   const isFormLocked = isSentToReporter && !isEditingAfterSend;
@@ -263,10 +325,10 @@ export default function EditRepairReportPage() {
           <AlertDescription>
             <div className="flex items-center justify-between">
               <div>
-                <strong className="text-amber-900">🔒 维修报告已发送，等待现场人员签字确认</strong>
+                <strong className="text-amber-900">维修报告已发送，等待现场人员签字确认</strong>
                 <p className="text-amber-700 text-sm mt-1">
-                  报告内容已锁定。如需修改（通常仅限金额调整），点击右侧"修改报告"按钮——
-                  修改内容将被记录，且流程将回退至维修阶段，需重新发送。
+                  报告内容已锁定。如需修正信息，点击右侧“修改报告”。保存修改只更新资料，
+                  不会自动回退或改变当前流程状态。
                 </p>
               </div>
               <Button
@@ -285,10 +347,10 @@ export default function EditRepairReportPage() {
         <Alert className="mb-6 border-orange-300 bg-orange-50">
           <Edit className="h-4 w-4 text-orange-600" />
           <AlertDescription>
-            <strong className="text-orange-900">✏️ 修改模式：正在修改已发送的报告</strong>
+            <strong className="text-orange-900">修改模式：正在修改已发送的报告</strong>
             <p className="text-orange-700 text-sm mt-1">
-              保存后，本次修改内容（含金额变动）将被系统记录，流程自动回退至"维修检查中"，
-              现场签字流程需重新发起。
+              点击“保存信息”只记录本次修改，不会改变流程状态。如确需重新发起签字，
+              应通过独立的流程操作处理。
             </p>
           </AlertDescription>
         </Alert>
@@ -299,7 +361,7 @@ export default function EditRepairReportPage() {
             <strong className="text-blue-900">维修人员操作提示：</strong>
             <span className="text-blue-700 ml-2">
               先在维修工作台保存诊断信息，再填写本报告内容。
-              全部完成后点击"<strong>发送流程</strong>"——流程将流转至现场人员签字确认，
+              全部完成后点击“<strong>发送流程</strong>”——流程将流转至现场人员签字确认，
               签字后报告将被锁定。
             </span>
           </AlertDescription>
@@ -409,7 +471,7 @@ export default function EditRepairReportPage() {
                           维修费用（元）
                           {isEditingAfterSend && (
                             <span className="ml-1 text-xs text-orange-600 font-normal">
-                              ⚠️ 修改金额将被记录
+                              修改金额将被记录
                             </span>
                           )}
                         </label>
@@ -482,7 +544,7 @@ export default function EditRepairReportPage() {
                 </div>
               ))}
               {items.length === 0 && (
-                <div className="text-center py-8 text-gray-500">暂无维修项目，请点击"添加项目"按钮</div>
+                <div className="text-center py-8 text-gray-500">暂无维修项目，请点击“添加项目”按钮</div>
               )}
             </div>
           </CardContent>
@@ -521,7 +583,7 @@ export default function EditRepairReportPage() {
           {/* 锁定状态下不显示任何保存按钮 */}
           {!isFormLocked && (
             <>
-              {/* 修改模式：保存并记录修改 */}
+                  {/* 修改模式：只保存资料，不隐式回退状态 */}
               {isEditingAfterSend ? (
                 <>
                   <Button
@@ -532,7 +594,7 @@ export default function EditRepairReportPage() {
                     取消修改
                   </Button>
                   <Button
-                    onClick={() => handleSave(false, true)}
+                    onClick={handleSave}
                     disabled={saving}
                     variant="outline"
                     size="lg"
@@ -541,7 +603,7 @@ export default function EditRepairReportPage() {
                     {saving ? (
                       <><Save className="w-4 h-4 mr-2 animate-pulse" />保存中...</>
                     ) : (
-                      <><Save className="w-4 h-4 mr-2" />保存修改记录</>
+                      <><Save className="w-4 h-4 mr-2" />保存信息</>
                     )}
                   </Button>
                 </>
@@ -549,7 +611,7 @@ export default function EditRepairReportPage() {
                 <>
                   {/* 普通模式：保存 + 发送流程 */}
                   <Button
-                    onClick={() => handleSave(false)}
+                    onClick={handleSave}
                     disabled={saving}
                     variant="outline"
                     size="lg"
@@ -557,12 +619,13 @@ export default function EditRepairReportPage() {
                     {saving ? (
                       <><Save className="w-4 h-4 mr-2 animate-pulse" />保存中...</>
                     ) : (
-                      <><Save className="w-4 h-4 mr-2" />保存</>
+                      <><Save className="w-4 h-4 mr-2" />保存信息</>
                     )}
                   </Button>
                   <Button
-                    onClick={() => handleSave(true)}
-                    disabled={saving}
+                    onClick={handleSendFlow}
+                    disabled={saving || hasUnsavedChanges}
+                    title={hasUnsavedChanges ? '请先保存当前修改' : '将已保存的报告发送至现场确认'}
                     size="lg"
                     className="bg-primary hover:bg-primary/90"
                   >

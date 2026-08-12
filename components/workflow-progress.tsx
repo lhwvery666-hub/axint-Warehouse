@@ -110,14 +110,14 @@ export default function WorkflowProgress({ ticket, showDetails = true }: Workflo
         {!progress.canProceed && (
           <div className="p-3 bg-yellow-50 dark:bg-yellow-950 border border-yellow-200 dark:border-yellow-800 rounded-md">
             <p className="text-sm text-yellow-700 dark:text-yellow-300">
-              ⚠️ 请完成所有必填字段后才能流转到下一步
+              请完成所有必填字段后才能流转到下一步
             </p>
           </div>
         )}
         {progress.canProceed && progress.nextStep && (
           <div className="p-3 bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 rounded-md">
             <p className="text-sm text-green-700 dark:text-green-300">
-              ✅ 所有必填字段已填写完成，可以流转到下一步：{progress.nextStep.label}
+              所有必填字段已填写完成，可以流转到下一步：{progress.nextStep.label}
             </p>
           </div>
         )}

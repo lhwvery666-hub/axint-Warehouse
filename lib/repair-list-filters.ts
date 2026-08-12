@@ -2,10 +2,52 @@ import { TicketStatus, normalizeTicketStatus } from "@/lib/enums"
 
 export const ALL_REPAIR_STATUS_FILTER = "all"
 
+export const REPAIR_SUMMARY_FILTER = {
+  ALL: "all",
+  PENDING: "pending",
+  ACTIVE: "active",
+  COMPLETED: "completed",
+  BUSINESS_AND_SHIPPING: "business-and-shipping",
+} as const
+
+export type RepairSummaryFilter =
+  typeof REPAIR_SUMMARY_FILTER[keyof typeof REPAIR_SUMMARY_FILTER]
+
+const PENDING_SUMMARY_STATUSES = new Set<TicketStatus>([
+  TicketStatus.CREATED,
+  TicketStatus.WAREHOUSE_CONFIRMING,
+])
+
+const ACTIVE_SUMMARY_STATUSES = new Set<TicketStatus>([
+  TicketStatus.IN_REPAIR,
+  TicketStatus.PENDING_REPORTER_CONFIRM,
+  TicketStatus.TECHNICIAN_REPAIRING,
+  TicketStatus.PENDING_FACTORY,
+  TicketStatus.FACTORY_FINISHED,
+  TicketStatus.WARRANTY_CHECKING,
+  TicketStatus.IN_WARRANTY_REPAIR,
+  TicketStatus.IN_WARRANTY_REPLACE,
+  TicketStatus.OUT_WARRANTY_REPORT,
+  TicketStatus.CUSTOMER_CONFIRM,
+  TicketStatus.OUT_WARRANTY_REPAIR,
+  TicketStatus.PENDING_PAYMENT,
+])
+
+const BUSINESS_AND_SHIPPING_SUMMARY_STATUSES = new Set<TicketStatus>([
+  TicketStatus.BUSINESS_REVIEW,
+  TicketStatus.WAREHOUSE_SHIPPING,
+])
+
+export function parseRepairSummaryFilter(
+  value: string | null | undefined,
+): RepairSummaryFilter {
+  return Object.values(REPAIR_SUMMARY_FILTER).includes(value as RepairSummaryFilter)
+    ? value as RepairSummaryFilter
+    : REPAIR_SUMMARY_FILTER.ALL
+}
+
 export const REPAIR_STATUS_FILTER_OPTIONS = [
-  { value: TicketStatus.CREATED, label: "待处理" },
   { value: TicketStatus.WAREHOUSE_CONFIRMING, label: "待仓库确认" },
-  { value: TicketStatus.WAREHOUSE_CONFIRMED, label: "仓库已确认" },
   { value: TicketStatus.IN_REPAIR, label: "维修检查中" },
   { value: TicketStatus.PENDING_REPORTER_CONFIRM, label: "待现场确认" },
   { value: TicketStatus.TECHNICIAN_REPAIRING, label: "维修作业中" },
@@ -13,7 +55,6 @@ export const REPAIR_STATUS_FILTER_OPTIONS = [
   { value: TicketStatus.WAREHOUSE_SHIPPING, label: "待仓库发货" },
   { value: TicketStatus.COMPLETED, label: "已完成" },
   { value: TicketStatus.UNREPAIRABLE, label: "无法维修" },
-  { value: TicketStatus.DELAYED, label: "已延期" },
 ] as const
 
 export interface RepairListFilterRecord {
@@ -65,6 +106,48 @@ export interface FinancialFollowupFilters {
   pendingShipment: boolean
   unpaid: boolean
   notInvoiced: boolean
+}
+
+/**
+ * Match the repair dashboard's four summary cards against canonical workflow
+ * statuses. A grouped batch must belong to exactly one card, so its displayed
+ * top-level status wins; nested device statuses are only a compatibility
+ * fallback when the grouped record has no status of its own.
+ */
+export function matchesRepairSummaryFilter(
+  task: RepairListFilterRecord,
+  filter: RepairSummaryFilter,
+): boolean {
+  if (filter === REPAIR_SUMMARY_FILTER.ALL) return true
+
+  const statusValues = [
+    task.status,
+    ...(task.statuses?.split("|") ?? []),
+    ...(task.devices ?? []).flatMap((device) => [
+      device.status,
+      ...(device.statuses?.split("|") ?? []),
+    ]),
+  ]
+
+  const normalizedStatus = statusValues
+    .map((status) => normalizeTicketStatus(status ?? null))
+    .find((status): status is TicketStatus => status !== null)
+
+  if (!normalizedStatus) return false
+
+  if (filter === REPAIR_SUMMARY_FILTER.PENDING) {
+    return PENDING_SUMMARY_STATUSES.has(normalizedStatus)
+  }
+
+  if (filter === REPAIR_SUMMARY_FILTER.ACTIVE) {
+    return ACTIVE_SUMMARY_STATUSES.has(normalizedStatus)
+  }
+
+  if (filter === REPAIR_SUMMARY_FILTER.COMPLETED) {
+    return normalizedStatus === TicketStatus.COMPLETED
+  }
+
+  return BUSINESS_AND_SHIPPING_SUMMARY_STATUSES.has(normalizedStatus)
 }
 
 function normalizeSearchValue(value: string | number | null | undefined): string {

@@ -145,6 +145,15 @@ export async function PUT(
       )
     }
 
+    // The delay workflow is retired. Keep an explicit response for stale clients
+    // instead of silently accepting or translating the old action.
+    if (body.action === "delay") {
+      return NextResponse.json(
+        { success: false, message: "延期功能已下线，请按当前维修流程处理" },
+        { status: 410 }
+      )
+    }
+
     const pool = await getDbConnection()
     transaction = new sql.Transaction(pool)
     await transaction.begin()
@@ -153,8 +162,6 @@ export async function PUT(
     let updated: UpdatedTicketRow | undefined
     let actionType = TicketActionType.STATUS_CHANGE
     let description = "更新工单状态"
-    let historyDelayTo: Date | null = null
-    let historyDelayReason: string | null = null
 
     const supplementSN = body.action === "supplementSN" || body.supplementSN === true
     if (supplementSN) {
@@ -303,53 +310,6 @@ export async function PUT(
         ? TicketActionType.CANCEL_APPROVED
         : TicketActionType.CANCEL_REJECTED
       description = approved ? "取消申请已批准" : "取消申请已拒绝"
-    } else if (body.action === "delay") {
-      if (role !== UserRole.TECHNICIAN) {
-        transaction = await rollback(transaction)
-        return NextResponse.json(
-          { success: false, message: "只有维修工程师可以申请延期" },
-          { status: 403 }
-        )
-      }
-      if (!body.delayTo || !body.delayReason) {
-        transaction = await rollback(transaction)
-        return NextResponse.json(
-          { success: false, message: "延期日期和原因不能为空" },
-          { status: 400 }
-        )
-      }
-      const delayDate = new Date(body.delayTo)
-      if (delayDate.getTime() <= Date.now()) {
-        transaction = await rollback(transaction)
-        return NextResponse.json(
-          { success: false, message: "延期日期必须晚于当前时间" },
-          { status: 400 }
-        )
-      }
-
-      const updateResult = await new sql.Request(transaction)
-        .input("ticketId", sql.Int, ticketId)
-        .input("expectedStatus", sql.NVarChar(50), TicketStatus.IN_REPAIR)
-        .input("legacyExpectedStatus", sql.NVarChar(50), TicketStatus.PROCESSING)
-        .input("newStatus", sql.NVarChar(50), TicketStatus.DELAYED)
-        .query<UpdatedTicketRow>(`
-          UPDATE [dbo].[Repair_Tickets]
-          SET [Status] = @newStatus, [UpdatedAt] = GETUTCDATE()
-          OUTPUT inserted.[Id], inserted.[TicketId], inserted.[BatchId],
-                 inserted.[DeviceSN], deleted.[Status] AS [OldStatus],
-                 inserted.[Status] AS [NewStatus]
-          WHERE [Id] = @ticketId
-            AND [Status] IN (@expectedStatus, @legacyExpectedStatus);
-        `)
-      updated = updateResult.recordset[0]
-      if (updateResult.rowsAffected[0] !== 1 || !updated) {
-        transaction = await rollback(transaction)
-        return conflict("只有维修检查中的工单可以申请延期")
-      }
-      actionType = TicketActionType.DELAY
-      description = `申请延期至 ${body.delayTo}：${body.delayReason}`
-      historyDelayTo = delayDate
-      historyDelayReason = body.delayReason
     } else {
       const hasWarehouseFields = [
         body.receivedDate,
@@ -369,7 +329,6 @@ export async function PUT(
         }
 
         const trackingNumber = body.returnTrackingNum?.replace(/\s+/g, "") || null
-        const completesTicket = Boolean(trackingNumber)
         const updateResult = await new sql.Request(transaction)
           .input("ticketId", sql.Int, ticketId)
           .input("receivedDate", sql.DateTime2, body.receivedDate ? new Date(body.receivedDate) : null)
@@ -377,8 +336,6 @@ export async function PUT(
           .input("returnDate", sql.DateTime2, body.returnDate ? new Date(body.returnDate) : null)
           .input("returnQuantity", sql.Int, body.returnQuantity ?? null)
           .input("returnTrackingNum", sql.NVarChar(200), trackingNumber)
-          .input("operatorName", sql.NVarChar(100), authResult.realName || authResult.username)
-          .input("newStatus", sql.NVarChar(50), completesTicket ? TicketStatus.COMPLETED : null)
           .query<UpdatedTicketRow>(`
             UPDATE [dbo].[Repair_Tickets]
             SET [ReceivedDate] = COALESCE(@receivedDate, [ReceivedDate]),
@@ -386,28 +343,20 @@ export async function PUT(
                 [ReturnDate] = COALESCE(@returnDate, [ReturnDate]),
                 [ReturnQuantity] = COALESCE(@returnQuantity, [ReturnQuantity]),
                 [ReturnTrackingNum] = COALESCE(@returnTrackingNum, [ReturnTrackingNum]),
-                [Status] = COALESCE(@newStatus, [Status]),
-                [WarehouseShippedAt] = CASE WHEN @newStatus = 'Completed' THEN GETUTCDATE() ELSE [WarehouseShippedAt] END,
-                [WarehouseShippedBy] = CASE WHEN @newStatus = 'Completed' THEN @operatorName ELSE [WarehouseShippedBy] END,
                 [UpdatedAt] = GETUTCDATE()
             OUTPUT inserted.[Id], inserted.[TicketId], inserted.[BatchId],
                    inserted.[DeviceSN], deleted.[Status] AS [OldStatus],
                    inserted.[Status] AS [NewStatus]
             WHERE [Id] = @ticketId
-              AND (
-                (@newStatus IS NULL AND [Status] NOT IN ('Completed', 'Cancelled', 'Scrapped', 'Deleted'))
-                OR (@newStatus = 'Completed' AND [Status] IN ('Warehouse_Shipping', 'Pending_Shipment'))
-              );
+              AND [Status] NOT IN ('Cancelled', 'Scrapped', 'Deleted');
           `)
         updated = updateResult.recordset[0]
         if (updateResult.rowsAffected[0] !== 1 || !updated) {
           transaction = await rollback(transaction)
-          return conflict("当前工单状态不允许更新仓库字段或确认发货")
+          return conflict("当前工单状态不允许保存仓库信息")
         }
-        actionType = updated.OldStatus === updated.NewStatus
-          ? TicketActionType.STATUS_CHANGE
-          : TicketActionType.WAREHOUSE_SHIPPED
-        description = completesTicket ? "仓库确认发货并完成工单" : "更新仓库物流信息"
+        actionType = TicketActionType.STATUS_CHANGE
+        description = "保存仓库物流信息"
       } else {
         const requestedStatus = body.deleteToRecycleBin
           ? TicketStatus.DELETED
@@ -488,8 +437,8 @@ export async function PUT(
       updated,
       actionType,
       description,
-      historyDelayTo,
-      historyDelayReason
+      null,
+      null
     )
     await transaction.commit()
     transaction = null

@@ -62,7 +62,6 @@ interface Device {
 const CONFIRMABLE_TICKET_STATUSES = new Set<TicketStatus>([
   TicketStatus.CREATED,
   TicketStatus.WAREHOUSE_CONFIRMING,
-  TicketStatus.WAREHOUSE_CONFIRMED,
 ])
 const CONFIRMABLE_STATUSES = {
   has: (status: string | null | undefined): boolean => {
@@ -91,8 +90,8 @@ interface OperationLog {
 
 interface WarehouseBatchConfirmProps {
   batchId: string
-  onBack: () => void
-  onConfirmed?: () => void
+  onBack: () => void | Promise<void>
+  onConfirmed?: () => void | Promise<void>
   allowEdit?: boolean
 }
 
@@ -105,6 +104,8 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
   const [manufactureDates, setManufactureDates] = useState<Record<string, Date | null>>({})
   const [arrivalDates, setArrivalDates] = useState<Record<string, Date | null>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isSavingInformation, setIsSavingInformation] = useState(false)
+  const [hasUnsavedInformationChanges, setHasUnsavedInformationChanges] = useState(false)
   const [operationLogs, setOperationLogs] = useState<OperationLog[]>([])
   // 展开查看现场信息的设备ID（null 表示未展开）
   const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null)
@@ -115,7 +116,6 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
     modelName: "",
     deviceName: "",
   })
-  const [isSavingClassification, setIsSavingClassification] = useState(false)
 
   const fetchBatchDevices = useCallback(async () => {
     try {
@@ -137,14 +137,13 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
       })
       setManufactureDates(dates)
 
-      // 初始化到货日期：已有数据则回显，否则默认当天中午（东八区当天，避免跨日误差）
-      const todayNoon = new Date()
-      todayNoon.setHours(12, 0, 0, 0)
+      // 到货日期必须由仓库按实际收货时间手动填写；已有数据仅作回显。
       const arrivalDatesInit: Record<string, Date | null> = {}
       result.data.devices.forEach((device: Device) => {
-        arrivalDatesInit[device.id] = device.arrivalDate ? new Date(device.arrivalDate) : todayNoon
+        arrivalDatesInit[device.id] = device.arrivalDate ? new Date(device.arrivalDate) : null
       })
       setArrivalDates(arrivalDatesInit)
+      setHasUnsavedInformationChanges(false)
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : "加载失败"
       console.error("获取批次设备列表失败:", err)
@@ -184,7 +183,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
     })
   }
 
-  const handleSaveClassification = async () => {
+  const handleSaveClassification = () => {
     if (!editingClassificationDevice) return
 
     const category = classificationForm.category.trim()
@@ -196,41 +195,85 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
       return
     }
 
-    setIsSavingClassification(true)
-    try {
-      const response = await fetch(`/api/tickets/batch-devices/${batchId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          deviceId: Number(editingClassificationDevice.id),
-          updates: {
+    const hasChanges =
+      category !== (editingClassificationDevice.category || "").trim()
+      || subCategory !== (editingClassificationDevice.subCategory || "").trim()
+      || modelName !== (editingClassificationDevice.modelName || "").trim()
+      || (deviceName.length > 0 && deviceName !== (editingClassificationDevice.deviceName || "").trim())
+    if (!hasChanges) {
+      toast.info("信息未发生变化，无需保存")
+      setEditingClassificationDevice(null)
+      return
+    }
+
+    setDevices((currentDevices) => currentDevices.map((device) => (
+      device.id === editingClassificationDevice.id
+        ? {
+            ...device,
             category,
             subCategory,
             modelName,
-            ...(deviceName ? { deviceName } : {}),
-          },
-        }),
-      })
-      const result = await response.json().catch(() => null) as {
-        success?: boolean
-        message?: string
-      } | null
-      if (!response.ok || !result?.success) {
-        throw new Error(result?.message || "保存设备分类失败")
-      }
+            deviceName: deviceName || device.deviceName,
+          }
+        : device
+    )))
+    setHasUnsavedInformationChanges(true)
+    setEditingClassificationDevice(null)
+    toast.success("分类信息已暂存，请点击“保存信息”完成保存")
+  }
 
-      toast.success("设备分类和型号已完善")
-      setEditingClassificationDevice(null)
-      await Promise.all([fetchBatchDevices(), fetchOperationLogs()])
+  const handleSaveInformation = async () => {
+    const devicesToSave = devices.filter(device => CONFIRMABLE_STATUSES.has(device.status || ""))
+    if (devicesToSave.length === 0) {
+      toast.info("当前没有可保存的待确认设备")
+      return
+    }
+
+    setIsSavingInformation(true)
+    try {
+      const responses = await Promise.all(devicesToSave.map(async (device) => {
+        const response = await fetch(`/api/tickets/batch-devices/${batchId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deviceId: Number(device.id),
+            updates: {
+              category: device.category.trim(),
+              subCategory: device.subCategory.trim(),
+              modelName: device.modelName.trim(),
+              ...(device.deviceName.trim() ? { deviceName: device.deviceName.trim() } : {}),
+              manufactureDate: manufactureDates[device.id]?.toISOString() ?? null,
+              arrivalDate: arrivalDates[device.id]?.toISOString() ?? null,
+            },
+          }),
+        })
+        const result = await response.json().catch(() => null) as {
+          success?: boolean
+          message?: string
+          changed?: boolean
+        } | null
+        if (!response.ok || !result?.success) {
+          throw new Error(result?.message || `设备 ${device.id} 保存失败`)
+        }
+        return result.changed !== false
+      }))
+      const changedCount = responses.filter(Boolean).length
+      setHasUnsavedInformationChanges(false)
+      toast.success(changedCount > 0
+        ? `仓库信息已保存，${changedCount} 台设备发生变化；工单状态未改变`
+        : "信息未发生变化，未生成新的操作记录")
+      if (changedCount > 0) {
+        await Promise.all([fetchBatchDevices(), fetchOperationLogs()])
+      }
     } catch (saveError: unknown) {
-      const message = saveError instanceof Error ? saveError.message : "保存设备分类失败"
+      const message = saveError instanceof Error ? saveError.message : "保存仓库信息失败"
       toast.error(message)
     } finally {
-      setIsSavingClassification(false)
+      setIsSavingInformation(false)
     }
   }
 
-  // 确认批次并提交出厂日期（只提交需要确认的设备）
+  // 发送流程只读取已保存的数据并推进状态，不在这里隐式保存表单。
   const handleConfirmBatch = async () => {
     const devicesToConfirm = devices.filter(d => CONFIRMABLE_STATUSES.has(d.status || ""))
     // 验证需要确认的设备都有出厂日期和到货日期
@@ -249,26 +292,18 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
     try {
       const response = await fetch(`/api/tickets/warehouse-confirm-batch/${batchId}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          devices: devicesToConfirm.map(device => ({
-            id: device.id,
-            quantity: device.quantity,
-            manufactureDate: manufactureDates[device.id]?.toISOString(),
-            // 时区：发送本地时间对应的 UTC ISO 字符串，服务端存 UTC，前端读取后 format 为东八区日期
-            arrivalDate: arrivalDates[device.id]?.toISOString()
-          }))
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
       })
 
       const result = await response.json()
-      if (result.success) {
+      if (response.ok && result.success) {
         toast.success(result.message || `批次设备已确认，共 ${sumDeviceQuantity(devicesToConfirm)} 台设备，状态已更新为"维修检查中"`)
-        fetchBatchDevices()
-        fetchOperationLogs()
-        onConfirmed?.()
+        if (onConfirmed) {
+          await onConfirmed()
+        } else {
+          await Promise.all([fetchBatchDevices(), fetchOperationLogs()])
+        }
       } else {
         toast.error(result.message || "确认失败")
       }
@@ -322,7 +357,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
         </div>
         <div className="flex items-center gap-2">
           <Badge className={batchInfo.status === TicketStatus.WAREHOUSE_CONFIRMED ? "bg-blue-600" : "bg-orange-600"}>
-            {batchInfo.status === TicketStatus.WAREHOUSE_CONFIRMED ? "已确认" : "待确认"}
+            {batchInfo.status === TicketStatus.WAREHOUSE_CONFIRMED ? "已发送至维修检查" : "待仓库确认"}
           </Badge>
         </div>
       </div>
@@ -332,7 +367,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
         <Alert className="border-orange-300 bg-orange-50">
           <AlertCircle className="h-4 w-4 text-orange-600" />
           <AlertDescription className="text-orange-800">
-            <p className="font-medium mb-1">⚠️ 设备信息已变更，需重新确认</p>
+            <p className="font-medium mb-1">设备信息已变更，需重新确认</p>
             <p className="text-sm">
               维修人员已修改了批次中的设备信息（如序列号或型号），请重新核对设备信息并确认出厂日期，以便维修工作继续推进。
             </p>
@@ -486,6 +521,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                                     ...prev,
                                     [device.id]: date || null
                                   }))
+                                  setHasUnsavedInformationChanges(true)
                                 }}
                                 initialFocus
                                 locale={zhCN}
@@ -538,6 +574,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                                     ...prev,
                                     [device.id]: date || null
                                   }))
+                                  setHasUnsavedInformationChanges(true)
                                 }}
                                 initialFocus
                                 locale={zhCN}
@@ -711,15 +748,26 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                   <div>
                     <p className="font-semibold">准备确认 {devicesToConfirmCount} 台待确认设备</p>
                     <p className="text-sm text-muted-foreground mt-1">
-                      确认后，这批设备状态将变更为"仓库已确认"，维修人员即可开始处理
+                      先保存信息，再发送流程；只有“发送流程”会进入维修检查中
                     </p>
                   </div>
                 </div>
+                <div className="flex w-full flex-col gap-2 md:w-auto md:flex-row">
+                <Button
+                  size="lg"
+                  variant="outline"
+                  onClick={handleSaveInformation}
+                  disabled={isSubmitting || isSavingInformation}
+                  className="w-full md:w-auto min-w-[150px]"
+                >
+                  {isSavingInformation ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Pencil className="mr-2 h-4 w-4" />}
+                  保存信息
+                </Button>
                 <Button
                   size="lg"
                   onClick={handleConfirmBatch}
-                  disabled={isSubmitting || !allFilled}
-                  className="w-full md:w-auto min-w-[180px]"
+                  disabled={isSubmitting || isSavingInformation || !allFilled || hasUnsavedInformationChanges}
+                  className="w-full md:w-auto min-w-[150px]"
                 >
                   {isSubmitting ? (
                     <span className="flex items-center gap-2">
@@ -729,10 +777,11 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                   ) : (
                     <span className="flex items-center gap-2">
                       <CheckCircle className="w-4 h-4" />
-                      确认 {devicesToConfirmCount} 台待确认设备
+                      发送流程
                     </span>
                   )}
                 </Button>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -812,14 +861,14 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
       <Dialog
         open={Boolean(editingClassificationDevice)}
         onOpenChange={(open) => {
-          if (!open && !isSavingClassification) setEditingClassificationDevice(null)
+          if (!open) setEditingClassificationDevice(null)
         }}
       >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>完善设备分类和型号</DialogTitle>
             <DialogDescription>
-              按实物铭牌手动修正当前设备。保存后，维修工程师将在后续工单中直接看到这些信息。
+              按实物铭牌手动修正当前设备。这里仅暂存到当前页面，请再点击下方“保存信息”统一写入系统。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-2 sm:grid-cols-2">
@@ -834,7 +883,6 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                 }))}
                 placeholder="例如：控制器"
                 maxLength={200}
-                disabled={isSavingClassification}
               />
             </div>
             <div className="space-y-2">
@@ -848,7 +896,6 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                 }))}
                 placeholder="请输入准确的二级分类"
                 maxLength={200}
-                disabled={isSavingClassification}
               />
             </div>
             <div className="space-y-2">
@@ -862,7 +909,6 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                 }))}
                 placeholder="请输入铭牌型号"
                 maxLength={200}
-                disabled={isSavingClassification}
               />
             </div>
             <div className="space-y-2">
@@ -876,7 +922,6 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                 }))}
                 placeholder="可选：填写标准产品名称"
                 maxLength={200}
-                disabled={isSavingClassification}
               />
             </div>
           </div>
@@ -885,17 +930,14 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
               type="button"
               variant="outline"
               onClick={() => setEditingClassificationDevice(null)}
-              disabled={isSavingClassification}
             >
               取消
             </Button>
             <Button
               type="button"
               onClick={handleSaveClassification}
-              disabled={isSavingClassification}
             >
-              {isSavingClassification && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              保存分类信息
+              暂存分类信息
             </Button>
           </DialogFooter>
         </DialogContent>

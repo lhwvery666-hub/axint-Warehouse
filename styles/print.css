@@ -5,15 +5,6 @@
     margin: 8mm;
   }
 
-  :root {
-    /*
-     * Chrome/Edge print layout: lay the report out on a proportionally larger
-     * canvas, then scale it back to the A4 printable width. This preserves the
-     * report proportions and keeps ordinary one-batch reports on one sheet.
-     */
-    --report-print-scale: 0.82;
-  }
-  
   html,
   body {
     width: 100%;
@@ -38,9 +29,14 @@
   }
 
   .print-content {
-    width: calc(100% / var(--report-print-scale));
-    max-width: none !important;
-    zoom: var(--report-print-scale);
+    /*
+     * 不再使用“放大布局宽度后再 zoom 缩回”的方案。Chrome/Edge 会先按
+     * 放大后的宽度裁切打印页，导致最右侧边框在预览和 PDF 中完全消失。
+     * 预留 1mm 安全区，让折叠表格的外边框始终位于 A4 可打印区域内。
+     */
+    width: calc(100% - 1mm) !important;
+    max-width: calc(100% - 1mm) !important;
+    zoom: 1 !important;
     margin: 0 auto !important;
     overflow: visible !important;
   }
@@ -61,6 +57,21 @@
     width: 100% !important;
     max-width: 100% !important;
     table-layout: fixed !important;
+    /* Chrome/Edge 在缩放打印时偶尔会丢掉折叠表格最外侧的 1px 边框。 */
+    box-shadow: inset -1px 0 0 #000 !important;
+  }
+
+  .info-table tr > :last-child,
+  .detail-table tr > :last-child {
+    border-right: 1px solid #000 !important;
+    box-shadow: inset -1px 0 0 #000 !important;
+  }
+
+  .remarks-section,
+  .confirm-repair-section,
+  .customer-signature-area {
+    border-right: 1px solid #000 !important;
+    box-shadow: inset -1px 0 0 #000 !important;
   }
 
   .info-table th,
@@ -112,6 +123,121 @@
   .signed-photo-image {
     max-height: 400px !important;
     page-break-inside: avoid;
+  }
+
+  /*
+   * 少量设备的一页版：只压缩纵向空白，不改变横向宽度。
+   * 超过 5 台时页面不会带此类名，恢复正常尺寸并按设备行安全换页。
+   */
+  .print-content-compact .report-header {
+    margin-bottom: 8px !important;
+    padding-bottom: 5px !important;
+  }
+
+  .print-content-compact .company-name {
+    margin-bottom: 2px !important;
+    font-size: 19px !important;
+  }
+
+  .print-content-compact .report-title {
+    margin-bottom: 5px !important;
+    font-size: 16px !important;
+  }
+
+  .print-content-compact .info-table {
+    margin-bottom: 8px !important;
+  }
+
+  .print-content-compact .info-table td {
+    padding: 4px 6px !important;
+    font-size: 11px !important;
+    line-height: 1.25 !important;
+  }
+
+  .print-content-compact .detail-table-container {
+    margin-bottom: 8px !important;
+  }
+
+  .print-content-compact .detail-table {
+    margin-top: 4px !important;
+  }
+
+  .print-content-compact .detail-table th {
+    padding: 5px 4px !important;
+    font-size: 10.5px !important;
+    line-height: 1.2 !important;
+  }
+
+  .print-content-compact .detail-table td {
+    padding: 5px 4px !important;
+    font-size: 10px !important;
+    line-height: 1.25 !important;
+  }
+
+  .print-content-compact .remarks-section {
+    min-height: 58px !important;
+    padding: 6px 8px !important;
+  }
+
+  .print-content-compact .remarks-title {
+    margin-bottom: 3px !important;
+    font-size: 11px !important;
+  }
+
+  .print-content-compact .remarks-content {
+    min-height: 38px !important;
+    font-size: 10px !important;
+    line-height: 1.35 !important;
+  }
+
+  .print-content-compact .confirm-repair-section {
+    min-height: 72px !important;
+    padding: 6px 9px !important;
+  }
+
+  .print-content-compact .confirm-repair-title {
+    margin-bottom: 4px !important;
+    font-size: 10.5px !important;
+  }
+
+  .print-content-compact .confirm-repair-options {
+    gap: 2px !important;
+  }
+
+  .print-content-compact .confirm-option {
+    padding: 1px 0 !important;
+    font-size: 10px !important;
+  }
+
+  .print-content-compact .customer-signature-area {
+    min-height: 66px !important;
+    padding: 6px 9px !important;
+  }
+
+  .print-content-compact .signature-label-top {
+    margin-bottom: 3px !important;
+    font-size: 10.5px !important;
+  }
+
+  .print-content-compact .signature-space,
+  .print-content-compact .signature-space > div {
+    min-height: 42px !important;
+  }
+
+  .print-content-compact .note-section {
+    padding: 4px 8px !important;
+    font-size: 8.5px !important;
+  }
+
+  .print-content-compact .contact-footer-inline {
+    margin-top: 2px !important;
+    padding: 3px 8px !important;
+    font-size: 9.5px !important;
+  }
+
+  .print-content-compact .contact-footer-address {
+    padding: 0 8px 3px !important;
+    font-size: 9.5px !important;
   }
 }
 

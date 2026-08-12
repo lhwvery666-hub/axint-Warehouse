@@ -340,7 +340,7 @@ export default function DatabaseManager() {
       'Processing': '处理中',
       'Completed': '已完成',
       'Unrepairable': '无法维修',
-      'Delayed': '已延期',
+      'Delayed': '维修检查中',
     };
     return statusMap[status] || status;
   };
@@ -775,7 +775,7 @@ export default function DatabaseManager() {
                 <p className="text-muted-foreground">
                   但仓库设备、入库批次及用户数据将安全保留。是否继续？
                 </p>
-                <p className="font-semibold text-destructive">⚠️ 该操作执行后无法恢复！</p>
+                <p className="font-semibold text-destructive">该操作执行后无法恢复！</p>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -799,13 +799,13 @@ export default function DatabaseManager() {
 
                   if (data.success) {
                     toast({
-                      title: "✅ 清空完成",
+                      title: "清空完成",
                       description: `已删除 ${data.deletedCount?.tickets ?? 0} 条工单，${data.deletedCount?.history ?? 0} 条历史流水`,
                     });
                     setTimeout(() => window.location.reload(), 1200);
                   } else {
                     toast({
-                      title: "❌ 清空失败",
+                      title: "清空失败",
                       description: data.message || "操作失败，请联系技术支持",
                       variant: "destructive",
                     });
@@ -813,7 +813,7 @@ export default function DatabaseManager() {
                 } catch (err: unknown) {
                   setShowClearDialog(false);
                   toast({
-                    title: "❌ 网络错误",
+                    title: "网络错误",
                     description: getClientErrorMessage(err),
                     variant: "destructive",
                   });

@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import * as sql from "mssql"
-import { TicketStatus, UserRole, normalizeTicketStatus } from "@/lib/enums"
+import { TicketStatus, UserRole } from "@/lib/enums"
 import { prisma } from "@/lib/prisma"
 import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { getVisibleTicketStatus } from "@/lib/ticket-visibility"
 
 // ==================== 类型定义 ====================
 
@@ -50,13 +51,6 @@ interface UserInfoRow {
   UserID: number | string
   RealName: string | null
   Username: string | null
-}
-
-interface DelayHistoryRow {
-  TicketID: string | null
-  DelayTo: Date | null
-  DelayReason: string | null
-  CreatedAt: Date | null
 }
 
 interface MappedTicket {
@@ -345,53 +339,6 @@ export async function GET() {
       }
     }
 
-    // ── 批量查询延期信息 ──────────────────────────────────────────
-    const delayInfoMap: Record<string, { delayTo: string | null; delayReason: string | null; createdAtMs: number }> = {}
-    try {
-      const historyRequest = pool.request()
-      if (reporterOnly) {
-        historyRequest.input("authUserId", sql.Int, authUserId)
-      }
-      const historyResult = await historyRequest.query(`
-        IF OBJECT_ID('dbo.Repair_Ticket_History', 'U') IS NOT NULL
-        BEGIN
-          SELECT h.TicketID, h.DelayTo, h.DelayReason, h.CreatedAt
-          FROM [dbo].[Repair_Ticket_History] h
-          WHERE h.ActionType = 'Delay'
-            ${reporterOnly ? `AND EXISTS (
-              SELECT 1 FROM [dbo].[Repair_Tickets] t
-              WHERE t.[ReportByUserID] = @authUserId
-                AND (t.[TicketId] = h.[TicketID] OR CONVERT(NVARCHAR(50), t.[Id]) = h.[TicketID])
-            )` : ""}
-        END
-        ELSE
-        BEGIN
-          SELECT CAST(NULL AS NVARCHAR(50)) AS TicketID,
-                 CAST(NULL AS DATETIME) AS DelayTo,
-                 CAST(NULL AS NVARCHAR(500)) AS DelayReason,
-                 CAST(NULL AS DATETIME) AS CreatedAt
-        END
-      `)
-
-      historyResult.recordset
-        .filter((row: DelayHistoryRow) => row.TicketID != null)
-        .forEach((row: DelayHistoryRow) => {
-          const id = row.TicketID?.toString()
-          if (!id) return
-          const createdAtMs = row.CreatedAt ? new Date(row.CreatedAt).getTime() : 0
-          const existing = delayInfoMap[id]
-          if (!existing || createdAtMs > existing.createdAtMs) {
-            delayInfoMap[id] = {
-              delayTo: row.DelayTo ? new Date(row.DelayTo).toISOString() : null,
-              delayReason: row.DelayReason ?? null,
-              createdAtMs,
-            }
-          }
-        })
-    } catch (delayError: unknown) {
-      console.error("批量查询延期信息失败:", delayError instanceof Error ? delayError.message : delayError)
-    }
-
     // ── 组装最终 Ticket 列表 ──────────────────────────────────────
     const tickets: MappedTicket[] = mappedRecords.map((row, rowIndex): MappedTicket => {
       const deviceInfo = deviceInfoMap.get(row.DeviceSN ?? "") ?? { deviceName: "", modelName: "" }
@@ -413,10 +360,8 @@ export async function GET() {
         console.warn(`⚠️ 数据库ID为空，使用后备方案: ${idStr}`)
       }
 
-      const delayInfo = delayInfoMap[idStr] ?? null
-
-      // ✅ 使用 normalizeTicketStatus 统一映射，消除 Magic String if-else 链（Rule 4）
-      const mappedStatus: TicketStatus = normalizeTicketStatus(row.Status ?? "") ?? TicketStatus.CREATED
+      // API 层统一规范状态，并对现场人员隐藏返厂/复检内部状态。
+      const mappedStatus = getVisibleTicketStatus(row.Status, authResult.normalizedRole)
       const reportedAt = toIsoDate(row.ReportTime)
         ?? toIsoDate(row.SubmitDate)
         ?? toIsoDate(row.CreatedAt)
@@ -440,8 +385,9 @@ export async function GET() {
         reportedAt,
         courierCompany: row.CourierCompany ?? "",
         trackingNumber: row.CourierNumber ?? "",
-        expectedCompletionDate: delayInfo?.delayTo ?? null,
-        delayReason: delayInfo?.delayReason ?? null,
+        // 延期功能已下线；字段保留为空仅用于兼容旧客户端响应结构。
+        expectedCompletionDate: null,
+        delayReason: null,
         contactInfo: row.ContactInfo ?? "",
         senderAddress: row.SenderAddress ?? "",
         customerName: row.ClientName ?? row.ProjectName ?? "",

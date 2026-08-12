@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, UserRole, TicketStatus } from "@/lib/enums"
+import { DB_FIELDS, UserRole } from "@/lib/enums"
 import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 // GET /api/tickets/shipping-info/[batchId]
@@ -150,41 +152,33 @@ export async function GET(
 }
 
 // PUT /api/tickets/shipping-info/[batchId]
-// 更新批次的发货信息
+// 只保存批次发货信息；状态流转由 warehouse-shipping-batch 专用接口负责。
+const shippingInfoSchema = z.object({
+  shippingType: z.enum(["return", "stock"]),
+  returnDate: z.string().datetime().nullable().optional(),
+  returnTrackingNum: z.string().trim().max(200).optional(),
+  returnQuantity: z.coerce.number().int().min(1).max(100000).optional(),
+}).strict()
+
 export async function PUT(
   request: Request,
-  context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
+  context: { params: Promise<{ batchId: string }> }
 ) {
+  const authResult = await checkUserRole([UserRole.WAREHOUSE, UserRole.ADMIN])
+  if (isErrorResponse(authResult)) return authResult
+
   try {
-    const resolvedParams =
-      "then" in (context as {params: Promise<{batchId: string}>}).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
-
-    const batchId = resolvedParams.batchId
-    const body = await request.json()
-    let { shippingType, returnDate, returnTrackingNum, returnQuantity } = body
-    
-    // 清理快递单号中的空格（防呆处理）
-    if (returnTrackingNum && typeof returnTrackingNum === 'string') {
-      returnTrackingNum = returnTrackingNum.replace(/\s+/g, '')
-    }
-
-    if (!batchId) {
+    const batchIdResult = z.string().trim().min(1).max(100).safeParse((await context.params).batchId)
+    const bodyResult = shippingInfoSchema.safeParse(await request.json().catch(() => null))
+    if (!batchIdResult.success || !bodyResult.success) {
       return NextResponse.json(
-        { success: false, message: "批次ID不能为空" },
+        { success: false, message: "请求参数无效" },
         { status: 400 }
       )
     }
-
-    // 验证用户登录和权限（自动处理缺失的 userRole cookie）
-    const authResult = await checkUserRole([UserRole.WAREHOUSE, UserRole.ADMIN])
-    if (isErrorResponse(authResult)) {
-      return NextResponse.json(authResult, { status: 403 })
-    }
-
-    const { userId: userIdCookie } = authResult
-    console.log(`[发货信息保存] ✅ 权限验证通过，userId: ${userIdCookie}`)
+    const batchId = batchIdResult.data
+    const { shippingType, returnDate, returnQuantity } = bodyResult.data
+    const returnTrackingNum = bodyResult.data.returnTrackingNum?.replace(/\s+/g, "") || null
 
     // 验证：如果是发回客户，必须填写发货信息
     if (shippingType === "return" && (!returnDate || !returnTrackingNum)) {
@@ -212,9 +206,9 @@ export async function PUT(
     // 验证批次存在
     const batchResult = await pool
       .request()
-      .input("batchId", batchId)
+      .input("batchId", sql.NVarChar(100), batchId)
       .query(`
-        SELECT TOP 1 ${DB_FIELDS.ID}
+        SELECT ${DB_FIELDS.ID}, ${DB_FIELDS.STATUS}
         FROM Repair_Tickets
         WHERE ${DB_FIELDS.BATCH_ID} = @batchId
       `)
@@ -225,15 +219,20 @@ export async function PUT(
         { status: 404 }
       )
     }
+    if (batchResult.recordset.some((row: Record<string, unknown>) =>
+      !["Warehouse_Shipping", "Pending_Shipment", "Completed"].includes(String(row[DB_FIELDS.STATUS])))
+    ) {
+      return NextResponse.json(
+        { success: false, message: "当前批次状态不允许保存发货信息，请刷新页面" },
+        { status: 409 }
+      )
+    }
 
     // 构建动态更新SQL
-    let updateFields = [
+    const updateFields = [
       'ReturnDate = @returnDate',
       'ReturnTrackingNum = @returnTrackingNum',
       'ReturnQuantity = @returnQuantity',
-      'WarehouseShippedAt = GETUTCDATE()',
-      'WarehouseShippedBy = @shippedBy',
-      `${DB_FIELDS.STATUS} = @newStatus`,
       `${DB_FIELDS.UPDATED_AT} = @updatedAt`
     ]
     
@@ -241,16 +240,14 @@ export async function PUT(
       updateFields.unshift('ShippingType = @shippingType')
     }
 
-    // 更新发货信息并完成工单
+    // 保存字段，不触碰 Status、WarehouseShippedAt 或 WarehouseShippedBy。
     const updateRequest = pool
       .request()
-      .input("batchId", batchId)
-      .input("returnDate", returnDate ? new Date(returnDate) : null)
-      .input("returnTrackingNum", returnTrackingNum || null)
-      .input("returnQuantity", returnQuantity || null)
-      .input("shippedBy", userIdCookie)
-      .input("newStatus", TicketStatus.COMPLETED)
-      .input("updatedAt", new Date())
+      .input("batchId", sql.NVarChar(100), batchId)
+      .input("returnDate", sql.DateTime2, returnDate ? new Date(returnDate) : null)
+      .input("returnTrackingNum", sql.NVarChar(200), returnTrackingNum)
+      .input("returnQuantity", sql.Int, returnQuantity ?? null)
+      .input("updatedAt", sql.DateTime2, new Date())
     
     if (hasShippingType) {
       updateRequest.input("shippingType", shippingType || null)
@@ -262,19 +259,14 @@ export async function PUT(
       WHERE ${DB_FIELDS.BATCH_ID} = @batchId
     `)
 
-    console.log(`✅ 发货信息已更新并完成工单: ${batchId}`)
-
     return NextResponse.json({
       success: true,
-      message: shippingType === "return" 
-        ? "发货完成！设备已发回客户，工单已完成" 
-        : "入库完成！设备已入库，工单已完成"
+      message: "发货信息已保存，工单状态未改变"
     })
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : "更新发货信息失败"
     console.error("更新发货信息失败:", error)
     return NextResponse.json(
-      { success: false, message: errorMessage },
+      { success: false, message: "保存发货信息失败，请稍后重试" },
       { status: 500 }
     )
   }

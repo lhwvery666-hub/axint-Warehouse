@@ -1,221 +1,135 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, UserRole, TicketActionType, TicketStatus, normalizeTicketStatus } from "@/lib/enums"
+import { TicketActionType, UserRole } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
+const deviceIdSchema = z.coerce.number().int().positive()
+const manufactureDateSchema = z.object({
+  manufactureDate: z.string().datetime().nullable().optional(),
+  warrantyStatus: z.string().trim().max(50).nullable().optional(),
+}).strict()
+
+interface DeviceRow {
+  Id: number
+  DeviceSN: string | null
+  BatchId: string | null
+  Status: string
+}
+
+async function rollback(transaction: sql.Transaction | null): Promise<null> {
+  if (!transaction) return null
+  try {
+    await transaction.rollback()
+  } catch (rollbackError) {
+    console.error("[Manufacture Date] 事务回滚失败:", rollbackError)
+  }
+  return null
+}
+
 // PUT /api/tickets/manufacture-date/[deviceId]
-// 更新设备出厂日期（仓库管理员可随时修改）
-// 若当前批次状态已超过 Warehouse_Confirming，则自动将批次所有设备回退至 Warehouse_Confirming
+// Save-only endpoint: changing a date never changes or rolls back workflow status.
 export async function PUT(
   request: Request,
-  context: { params: Promise<{ deviceId: string }> } | { params: { deviceId: string } }
+  context: { params: Promise<{ deviceId: string }> }
 ) {
+  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.WAREHOUSE])
+  if (isErrorResponse(authResult)) return authResult
+
+  let transaction: sql.Transaction | null = null
   try {
-    const resolvedParams =
-      "then" in (context as unknown as { params: { then?: unknown } }).params
-        ? await (context as { params: Promise<{ deviceId: string }> }).params
-        : (context as { params: { deviceId: string } }).params
-
-    const deviceId = resolvedParams.deviceId
-    const body = await request.json() as { manufactureDate?: string; warrantyStatus?: string }
-    const { manufactureDate, warrantyStatus: manualWarrantyStatus } = body
-
-    if (!deviceId) {
-      return NextResponse.json(
-        { success: false, message: "设备ID不能为空" },
-        { status: 400 }
-      )
+    const deviceIdResult = deviceIdSchema.safeParse((await context.params).deviceId)
+    const bodyResult = manufactureDateSchema.safeParse(await request.json().catch(() => null))
+    if (!deviceIdResult.success || !bodyResult.success) {
+      return NextResponse.json({ success: false, message: "请求参数无效" }, { status: 400 })
+    }
+    const operatorId = Number(authResult.userId)
+    if (!Number.isSafeInteger(operatorId)) {
+      return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
     }
 
-    // 权限检查：允许管理员和仓库管理员修改出厂日期
-    const authResult = await checkUserRole([UserRole.ADMIN, UserRole.WAREHOUSE])
-    if (isErrorResponse(authResult)) {
-      return authResult
+    const deviceId = deviceIdResult.data
+    const manufactureDate = bodyResult.data.manufactureDate
+      ? new Date(bodyResult.data.manufactureDate)
+      : null
+    let warrantyStatus = bodyResult.data.warrantyStatus || null
+    if (!warrantyStatus && manufactureDate) {
+      const ageInYears = (Date.now() - manufactureDate.getTime()) / (1000 * 60 * 60 * 24 * 365)
+      warrantyStatus = ageInYears <= 1 ? "InWarranty" : "OutOfWarranty"
     }
-
-    const cookieStore = await cookies()
-    const userIdCookie = cookieStore.get("userId")?.value || null
 
     const pool = await getDbConnection()
-
-    // 查询设备当前状态及 BatchId
-    const deviceResult = await pool
-      .request()
-      .input("deviceId", deviceId)
-      .query(`
-        SELECT ${DB_FIELDS.ID}, ${DB_FIELDS.DEVICE_SN}, ${DB_FIELDS.BATCH_ID}, ${DB_FIELDS.STATUS}
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.ID} = @deviceId
+    transaction = new sql.Transaction(pool)
+    await transaction.begin()
+    const deviceResult = await new sql.Request(transaction)
+      .input("deviceId", sql.Int, deviceId)
+      .query<DeviceRow>(`
+        SELECT [Id], [DeviceSN], [BatchId], [Status]
+        FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [Id] = @deviceId;
       `)
+    const device = deviceResult.recordset[0]
+    if (!device) {
+      transaction = await rollback(transaction)
+      return NextResponse.json({ success: false, message: "设备不存在" }, { status: 404 })
+    }
 
-    if (deviceResult.recordset.length === 0) {
+    const updateResult = await new sql.Request(transaction)
+      .input("deviceId", sql.Int, deviceId)
+      .input("manufactureDate", sql.DateTime2, manufactureDate)
+      .input("warrantyStatus", sql.NVarChar(50), warrantyStatus)
+      .input("expectedStatus", sql.NVarChar(50), device.Status)
+      .query(`
+        UPDATE [dbo].[Repair_Tickets]
+        SET [ManufactureDate] = @manufactureDate,
+            [WarrantyStatus] = @warrantyStatus,
+            [UpdatedAt] = GETUTCDATE()
+        WHERE [Id] = @deviceId AND [Status] = @expectedStatus;
+      `)
+    if (updateResult.rowsAffected[0] !== 1) {
+      transaction = await rollback(transaction)
       return NextResponse.json(
-        { success: false, message: "设备不存在" },
-        { status: 404 }
+        { success: false, message: "设备状态已变化，请刷新页面后重试" },
+        { status: 409 }
       )
     }
 
-    const deviceRow = deviceResult.recordset[0] as {
-      [key: string]: unknown
-    }
-    const currentStatus = deviceRow[DB_FIELDS.STATUS] as string | null
-    const batchId = deviceRow[DB_FIELDS.BATCH_ID] as string | null
-    const deviceSn = deviceRow[DB_FIELDS.DEVICE_SN] as string | null
-
-    // ── 保修状态：优先使用手动传入值，否则自动计算（1年内为保内）──────────────
-    let warrantyStatus: string | null = null
-    if (manualWarrantyStatus) {
-      warrantyStatus = manualWarrantyStatus
-    } else if (manufactureDate) {
-      const mfgDate = new Date(manufactureDate)
-      const now = new Date()
-      const diffYears = (now.getTime() - mfgDate.getTime()) / (1000 * 60 * 60 * 24 * 365)
-      warrantyStatus = diffYears <= 1 ? "InWarranty" : "OutOfWarranty"
-    }
-
-    // ── 只更新日期和保修字段，绝不触碰 Status（状态回退由下方逻辑单独处理）───
-    await pool
-      .request()
-      .input("deviceId", deviceId)
-      .input("manufactureDate", manufactureDate ? new Date(manufactureDate) : null)
-      .input("warrantyStatus", warrantyStatus)
-      .query(`
-        UPDATE Repair_Tickets
-        SET ManufactureDate = @manufactureDate,
-            WarrantyStatus  = @warrantyStatus
-        WHERE ${DB_FIELDS.ID} = @deviceId
-      `)
-
-    // ── 状态回退判断：若批次状态已超过仓库确认，则将整批回退至 Warehouse_Confirming ──
-    // 只要不是 Created / Warehouse_Confirming / 终止状态，均认为需要回退
-    const SKIP_REVERT_STATUSES = new Set<string>([
-      TicketStatus.CREATED,
-      TicketStatus.WAREHOUSE_CONFIRMING,
-      TicketStatus.COMPLETED,
-      TicketStatus.CANCELLED,
-      TicketStatus.DELETED,
-      TicketStatus.UNREPAIRABLE,
-      TicketStatus.SCRAPPED,
-      TicketStatus.RETURN_UNREPAIRED,
-      TicketStatus.REJECTED_NO_RETURN,
-    ])
-
-    // ⚠️ 用 normalizeTicketStatus 归一化后再比较，避免大小写/历史脏数据导致误判需要回退
-    const normalizedCurrentStatus = normalizeTicketStatus(currentStatus)
-    let didRevert = false
-    if (batchId && normalizedCurrentStatus && !SKIP_REVERT_STATUSES.has(normalizedCurrentStatus)) {
-      // 将该批次所有设备回退至 Warehouse_Confirming
-      await pool
-        .request()
-        .input("batchId", batchId)
-        .input("revertStatus", TicketStatus.WAREHOUSE_CONFIRMING)
+    if (device.BatchId) {
+      const formattedDate = manufactureDate
+        ? manufactureDate.toISOString().slice(0, 10)
+        : "已清空"
+      await new sql.Request(transaction)
+        .input("ticketId", sql.NVarChar(50), String(deviceId))
+        .input("batchId", sql.NVarChar(100), device.BatchId)
+        .input("actionType", sql.NVarChar(50), TicketActionType.MANUFACTURE_DATE_OVERRIDE)
+        .input("operatorId", sql.Int, operatorId)
+        .input("operatorName", sql.NVarChar(100), authResult.realName || authResult.username)
+        .input("description", sql.NVarChar(sql.MAX), `保存设备 ${device.DeviceSN || deviceId} 出厂日期：${formattedDate}`)
+        .input("status", sql.NVarChar(50), device.Status)
         .query(`
-          UPDATE Repair_Tickets
-          SET ${DB_FIELDS.STATUS} = @revertStatus
-          WHERE ${DB_FIELDS.BATCH_ID} = @batchId
+          INSERT INTO [dbo].[Repair_Ticket_History] (
+            [TicketID], [BatchId], [ActionType], [OperatorId], [OperatorName],
+            [Description], [OldStatus], [NewStatus], [CreatedAt]
+          ) VALUES (
+            @ticketId, @batchId, @actionType, @operatorId, @operatorName,
+            @description, @status, @status, GETUTCDATE()
+          );
         `)
-      didRevert = true
-      console.log(`🔄 批次 ${batchId} 状态已由 "${currentStatus}" 回退至 "${TicketStatus.WAREHOUSE_CONFIRMING}"`)
     }
 
-    console.log(`✅ 设备出厂日期已更新: ${deviceId}, 保修状态: ${warrantyStatus}, 状态回退: ${didRevert}`)
-
-    // ── 写入操作日志（使用原始 SQL + 动态列检测，确保兼容各版本数据库结构）────
-    if (batchId) {
-      try {
-        let operatorName = "仓库管理员"
-        if (userIdCookie) {
-          try {
-            const userRow = await pool
-              .request()
-              .input("userId", userIdCookie)
-              .query(`SELECT TOP 1 RealName, Username FROM Users WHERE UserID = @userId`)
-            operatorName =
-              userRow.recordset[0]?.RealName || userRow.recordset[0]?.Username || operatorName
-          } catch (_) { /* 忽略，使用默认名称 */ }
-        }
-
-        const formattedDate = manufactureDate
-          ? new Date(manufactureDate).toISOString().slice(0, 10)
-          : "（已清空）"
-
-        const warrantyLabel =
-          warrantyStatus === "InWarranty" ? "保内" :
-          warrantyStatus === "OutOfWarranty" ? "过保" : warrantyStatus || "未知"
-
-        const description = didRevert
-          ? `仓库人员重新核对设备出厂日期（设备SN：${deviceSn || deviceId}，新日期：${formattedDate}，保修判定：${warrantyLabel}），批次状态已从"${currentStatus}"回退至"仓库确认中"`
-          : `仓库人员更新设备出厂日期（设备SN：${deviceSn || deviceId}，新日期：${formattedDate}，保修判定：${warrantyLabel}）`
-
-        // 动态检测 Repair_Ticket_History 表的列，兼容不同版本数据库
-        const histColCheck = await pool.request().query(`
-          SELECT COLUMN_NAME
-          FROM INFORMATION_SCHEMA.COLUMNS
-          WHERE TABLE_NAME = 'Repair_Ticket_History'
-            AND COLUMN_NAME IN ('BatchId','OperatorId','OperatorName','Description','OldStatus','NewStatus','TicketID')
-        `)
-        const histCols = new Set(
-          histColCheck.recordset.map((r: Record<string, unknown>) => (r.COLUMN_NAME as string).toLowerCase())
-        )
-
-        const insertCols: string[] = ['ActionType', 'CreatedAt']
-        const insertVals: string[] = ['@actionType', '@createdAt']
-        const histReq = pool.request()
-          .input('actionType', TicketActionType.MANUFACTURE_DATE_OVERRIDE)
-          .input('createdAt', new Date())
-
-        if (histCols.has('batchid')) {
-          insertCols.push('BatchId'); insertVals.push('@batchId')
-          histReq.input('batchId', batchId)
-        }
-        if (histCols.has('ticketid')) {
-          insertCols.push('TicketID'); insertVals.push('@ticketId')
-          histReq.input('ticketId', String(deviceId))
-        }
-        if (histCols.has('operatorid') && userIdCookie) {
-          insertCols.push('OperatorId'); insertVals.push('@operatorId')
-          histReq.input('operatorId', Number(userIdCookie))
-        }
-        if (histCols.has('operatorname')) {
-          insertCols.push('OperatorName'); insertVals.push('@operatorName')
-          histReq.input('operatorName', operatorName)
-        }
-        if (histCols.has('description')) {
-          insertCols.push('Description'); insertVals.push('@description')
-          histReq.input('description', description)
-        }
-        if (histCols.has('oldstatus')) {
-          insertCols.push('OldStatus'); insertVals.push('@oldStatus')
-          histReq.input('oldStatus', currentStatus || null)
-        }
-        if (histCols.has('newstatus')) {
-          insertCols.push('NewStatus'); insertVals.push('@newStatus')
-          histReq.input('newStatus', didRevert ? TicketStatus.WAREHOUSE_CONFIRMING : (currentStatus || null))
-        }
-
-        await histReq.query(`
-          INSERT INTO Repair_Ticket_History (${insertCols.join(', ')})
-          VALUES (${insertVals.join(', ')})
-        `)
-
-        console.log(`✅ [ManufactureDateOverride] 操作日志已写入，batchId=${batchId}, deviceId=${deviceId}, didRevert=${didRevert}`)
-      } catch (logError) {
-        console.error(`❌ [ManufactureDateOverride] 写入操作日志失败:`, logError)
-      }
-    }
-
+    await transaction.commit()
+    transaction = null
     return NextResponse.json({
       success: true,
-      message: didRevert
-        ? `出厂日期已更新，批次状态已回退至仓库确认中`
-        : `出厂日期已更新`,
-      data: { warrantyStatus, didRevert },
+      message: "出厂日期已保存，工单状态未改变",
+      data: { warrantyStatus, didRevert: false },
     })
   } catch (error: unknown) {
-    console.error("更新出厂日期失败:", error)
+    console.error("[Manufacture Date] 保存失败:", error)
+    transaction = await rollback(transaction)
     return NextResponse.json(
-      { success: false, message: error instanceof Error ? error.message : "更新出厂日期失败" },
+      { success: false, message: "保存出厂日期失败，请稍后重试" },
       { status: 500 }
     )
   }

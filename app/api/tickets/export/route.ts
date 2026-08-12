@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server"
 import { getDbConnection } from "@/lib/db-config"
 import * as XLSX from "xlsx"
-import { TICKET_STATUS_LABELS, normalizeTicketStatus, DB_FIELDS } from "@/lib/enums"
-import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { TICKET_STATUS_LABELS, normalizeTicketStatus, DB_FIELDS, UserRole } from "@/lib/enums"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 
 /** 将 UTC Date 转为北京时间 (UTC+8)，格式 YYYY-MM-DD HH:mm */
 function formatDateBJ(date: Date): string {
@@ -13,7 +13,12 @@ function formatDateBJ(date: Date): string {
 // GET /api/tickets/export
 // 导出所有工单数据为Excel文件
 export async function GET(request: Request) {
-  const authResult = await checkUserRole(ALL_USER_ROLES)
+  const authResult = await checkUserRole([
+    UserRole.ADMIN,
+    UserRole.TECHNICIAN,
+    UserRole.WAREHOUSE,
+    UserRole.BUSINESS,
+  ])
   if (isErrorResponse(authResult)) return authResult
 
   try {

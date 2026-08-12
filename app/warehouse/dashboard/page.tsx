@@ -1,18 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Package, CheckCircle, Clock, Loader2, AlertCircle, ChevronRight, Database, Truck, Download, CheckCircle2, RefreshCw } from "lucide-react";
+import { Package, CheckCircle, Clock, Loader2, ChevronRight, Database, Truck, Download, CheckCircle2, RefreshCw, ArrowRightLeft } from "lucide-react";
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { toBeijingTime } from "@/lib/utils";
 import DatabaseManager from "@/components/admin/database-manager";
 import WarehouseBatchConfirm from "@/components/warehouse-batch-confirm";
 import WarehouseBatchShipping from "@/components/warehouse-batch-shipping";
+import WarehouseFactoryTransfer, { type WarehouseFactoryTransferDevice } from "@/components/warehouse-factory-transfer";
 import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
 import { WorkOrderCardStack } from "@/components/work-order-card-stack";
 import { TicketStatus } from "@/lib/enums";
@@ -20,6 +20,7 @@ import { WorkOrderFilterBar } from "@/components/work-order-filter-bar";
 import { WorkOrderPagination } from "@/components/work-order-pagination";
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
 import { clampPage, paginateItems } from "@/lib/pagination";
+import { toast } from "sonner";
 
 interface PendingBatch {
   batchId: string;
@@ -35,19 +36,21 @@ interface PendingBatch {
   deviceSerials?: string;
   deviceModels?: string;
   statuses?: string;
+  pendingFactoryDeviceCount?: number;
   createdAt: string;
   status: string;
 }
 
 export default function WarehouseDashboard() {
-  const router = useRouter();
   const [activeTab, setActiveTab] = useState("pending");
   const [pendingBatches, setPendingBatches] = useState<PendingBatch[]>([]);
   const [shippingBatches, setShippingBatches] = useState<PendingBatch[]>([]);
+  const [factoryTransferDevices, setFactoryTransferDevices] = useState<WarehouseFactoryTransferDevice[]>([]);
   const [completedBatches, setCompletedBatches] = useState<PendingBatch[]>([]);
   const [allBatches, setAllBatches] = useState<PendingBatch[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  const [selectedFactoryTransferDevice, setSelectedFactoryTransferDevice] = useState<WarehouseFactoryTransferDevice | null>(null);
   const [selectedMode, setSelectedMode] = useState<"confirm" | "shipping" | "view">("confirm");
   const [workOrderQuery, setWorkOrderQuery] = useState("");
   const [customerQuery, setCustomerQuery] = useState("");
@@ -55,81 +58,134 @@ export default function WarehouseDashboard() {
   const [filterStatus, setFilterStatus] = useState(ALL_REPAIR_STATUS_FILTER);
   const [currentPage, setCurrentPage] = useState(1);
 
-  const loadPendingBatches = useCallback(async () => {
+  const loadPendingBatches = useCallback(async (): Promise<boolean> => {
     setLoading(true);
     try {
-      const response = await fetch("/api/tickets/warehouse-pending-batches");
+      const response = await fetch("/api/tickets/warehouse-pending-batches", { cache: "no-store" });
       const result = await response.json();
       
-      if (result.success) {
-        setPendingBatches(result.data || []);
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "加载待确认批次失败");
       }
+      setPendingBatches(result.data || []);
+      return true;
     } catch (error) {
       console.error("加载待确认批次失败:", error);
+      return false;
     } finally {
       setLoading(false);
     }
   }, []);
 
-  const loadShippingBatches = useCallback(async () => {
+  const loadShippingBatches = useCallback(async (): Promise<boolean> => {
     setLoading(true);
     try {
-      const response = await fetch("/api/tickets/warehouse-shipping-batches");
+      const response = await fetch("/api/tickets/warehouse-shipping-batches", { cache: "no-store" });
       const result = await response.json();
       
-      if (result.success) {
-        setShippingBatches(result.data || []);
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "加载待发货批次失败");
       }
+      setShippingBatches(result.data || []);
+      return true;
     } catch (error) {
       console.error("加载待发货批次失败:", error);
+      return false;
     } finally {
       setLoading(false);
     }
   }, []);
 
-  const loadCompletedBatches = useCallback(async () => {
+  const loadFactoryTransferDevices = useCallback(async (): Promise<boolean> => {
     setLoading(true);
     try {
-      const response = await fetch("/api/tickets/warehouse-completed-batches");
+      const response = await fetch("/api/tickets/warehouse-factory-transfer-devices", { cache: "no-store" });
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "加载待移交设备失败");
+      }
+      setFactoryTransferDevices(result.data || []);
+      return true;
+    } catch (error: unknown) {
+      console.error("加载待移交设备失败:", error);
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const loadCompletedBatches = useCallback(async (): Promise<boolean> => {
+    setLoading(true);
+    try {
+      const response = await fetch("/api/tickets/warehouse-completed-batches", { cache: "no-store" });
       const result = await response.json();
       
-      if (result.success) {
-        setCompletedBatches(result.data || []);
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "加载已完成批次失败");
       }
+      setCompletedBatches(result.data || []);
+      return true;
     } catch (error) {
       console.error("加载已完成批次失败:", error);
+      return false;
     } finally {
       setLoading(false);
     }
   }, []);
 
-  const loadAllBatches = useCallback(async () => {
+  const loadAllBatches = useCallback(async (): Promise<boolean> => {
     setLoading(true);
     try {
-      const response = await fetch("/api/tickets/all-batches");
+      const response = await fetch("/api/tickets/all-batches", { cache: "no-store" });
       const result = await response.json();
       
-      if (result.success) {
-        setAllBatches(result.data || []);
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "加载全部批次失败");
       }
+      setAllBatches(result.data || []);
+      return true;
     } catch (error) {
       console.error("加载全部批次失败:", error);
+      return false;
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const refreshActiveTab = useCallback(async (): Promise<boolean> => {
+    if (activeTab === "pending") return loadPendingBatches();
+    if (activeTab === "shipping") return loadShippingBatches();
+    if (activeTab === "transfer") return loadFactoryTransferDevices();
+    if (activeTab === "completed") return loadCompletedBatches();
+    if (activeTab === "all") return loadAllBatches();
+    return true;
+  }, [activeTab, loadAllBatches, loadCompletedBatches, loadFactoryTransferDevices, loadPendingBatches, loadShippingBatches]);
+
+  const closeSelectedBatchAfterRefresh = useCallback(async (workflowSaved: boolean) => {
+    const refreshed = await refreshActiveTab();
+    setSelectedBatchId(null);
+    setSelectedFactoryTransferDevice(null);
+    if (!refreshed) {
+      toast.error(workflowSaved
+        ? "流程已保存，但当前列表刷新失败，请点击刷新按钮重试"
+        : "当前列表刷新失败，请点击刷新按钮重试");
+    }
+  }, [refreshActiveTab]);
 
   useEffect(() => {
     if (activeTab === "pending") {
       void loadPendingBatches();
     } else if (activeTab === "shipping") {
       void loadShippingBatches();
+    } else if (activeTab === "transfer") {
+      void loadFactoryTransferDevices();
     } else if (activeTab === "completed") {
       void loadCompletedBatches();
     } else if (activeTab === "all") {
       void loadAllBatches();
     }
-  }, [activeTab, loadAllBatches, loadCompletedBatches, loadPendingBatches, loadShippingBatches]);
+  }, [activeTab, loadAllBatches, loadCompletedBatches, loadFactoryTransferDevices, loadPendingBatches, loadShippingBatches]);
 
   const filterWarehouseBatches = (batches: PendingBatch[]) => batches.filter((batch) =>
     matchesRepairListFilters(batch, {
@@ -141,12 +197,15 @@ export default function WarehouseDashboard() {
   );
   const filteredPendingBatches = filterWarehouseBatches(pendingBatches);
   const filteredShippingBatches = filterWarehouseBatches(shippingBatches);
+  const filteredFactoryTransferDevices = filterWarehouseBatches(factoryTransferDevices) as WarehouseFactoryTransferDevice[];
   const filteredCompletedBatches = filterWarehouseBatches(completedBatches);
   const filteredAllBatches = filterWarehouseBatches(allBatches);
   const activeFilteredCount = activeTab === "pending"
     ? filteredPendingBatches.length
     : activeTab === "shipping"
       ? filteredShippingBatches.length
+      : activeTab === "transfer"
+        ? filteredFactoryTransferDevices.length
       : activeTab === "completed"
         ? filteredCompletedBatches.length
         : activeTab === "all"
@@ -154,6 +213,7 @@ export default function WarehouseDashboard() {
           : 0;
   const paginatedPendingBatches = paginateItems(filteredPendingBatches, currentPage);
   const paginatedShippingBatches = paginateItems(filteredShippingBatches, currentPage);
+  const paginatedFactoryTransferDevices = paginateItems(filteredFactoryTransferDevices, currentPage);
   const paginatedCompletedBatches = paginateItems(filteredCompletedBatches, currentPage);
   const paginatedAllBatches = paginateItems(filteredAllBatches, currentPage);
 
@@ -172,45 +232,39 @@ export default function WarehouseDashboard() {
   );
 
   // 如果选择了批次，显示对应的界面
+  if (selectedFactoryTransferDevice) {
+    return (
+      <div className="min-h-screen bg-background p-4 md:p-6">
+        <WarehouseFactoryTransfer
+          device={selectedFactoryTransferDevice}
+          onBack={() => closeSelectedBatchAfterRefresh(false)}
+          onTransferred={() => closeSelectedBatchAfterRefresh(true)}
+        />
+      </div>
+    );
+  }
+
   if (selectedBatchId) {
     return (
       <div className="min-h-screen bg-background p-4 md:p-6">
         {selectedMode === "confirm" ? (
           <WarehouseBatchConfirm
             batchId={selectedBatchId}
-            onBack={() => {
-              setSelectedBatchId(null);
-              loadPendingBatches();
-            }}
-            onConfirmed={() => {
-              setSelectedBatchId(null);
-              loadPendingBatches();
-            }}
+            onBack={() => closeSelectedBatchAfterRefresh(false)}
+            onConfirmed={() => closeSelectedBatchAfterRefresh(true)}
           />
         ) : selectedMode === "shipping" ? (
           <WarehouseBatchShipping
             batchId={selectedBatchId}
-            onBack={() => {
-              setSelectedBatchId(null);
-              loadShippingBatches();
-            }}
-            onCompleted={() => {
-              setSelectedBatchId(null);
-              loadShippingBatches();
-            }}
+            onBack={() => closeSelectedBatchAfterRefresh(false)}
+            onCompleted={() => closeSelectedBatchAfterRefresh(true)}
           />
         ) : (
           // 查看已完成批次详情（允许修改发货信息）
           <WarehouseBatchShipping
             batchId={selectedBatchId}
-            onBack={() => {
-              setSelectedBatchId(null);
-              loadCompletedBatches();
-            }}
-            onCompleted={() => {
-              setSelectedBatchId(null);
-              loadCompletedBatches();
-            }}
+            onBack={() => closeSelectedBatchAfterRefresh(false)}
+            onCompleted={() => closeSelectedBatchAfterRefresh(true)}
             allowEdit={true}
           />
         )}
@@ -254,7 +308,7 @@ export default function WarehouseDashboard() {
       />
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-        <TabsList className="grid w-full md:w-auto grid-cols-5 md:grid-cols-5">
+        <TabsList className="grid w-full grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
           <TabsTrigger value="pending" className="flex items-center gap-2">
             <Clock className="h-4 w-4" />
             待确认批次
@@ -262,6 +316,10 @@ export default function WarehouseDashboard() {
           <TabsTrigger value="shipping" className="flex items-center gap-2">
             <Truck className="h-4 w-4" />
             待发货批次
+          </TabsTrigger>
+          <TabsTrigger value="transfer" className="flex items-center gap-2">
+            <ArrowRightLeft className="h-4 w-4" />
+            待移交
           </TabsTrigger>
           <TabsTrigger value="completed" className="flex items-center gap-2">
             <CheckCircle2 className="h-4 w-4" />
@@ -375,7 +433,7 @@ export default function WarehouseDashboard() {
                 待发货的批次工单
               </CardTitle>
               <CardDescription>
-                以下批次工单待仓库安排发货（含返厂维修寄送原厂）
+                返厂寄出任务优先显示，其余批次待仓库发回客户或完成入库
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -396,8 +454,8 @@ export default function WarehouseDashboard() {
                   <WorkOrderCardStack>
                     {paginatedShippingBatches.map((batch) => {
                     const uniqueKey = `shipping-${batch.batchId}`
-                    const isRmaBatch = batch.status === TicketStatus.PENDING_FACTORY
-                      || batch.status === "pending_factory"
+                    const pendingFactoryDeviceCount = Number(batch.pendingFactoryDeviceCount || 0)
+                    const hasPendingFactoryDevice = pendingFactoryDeviceCount > 0
                     return (
                       <Card key={uniqueKey} className="cursor-pointer" onClick={() => {
                         setSelectedBatchId(batch.batchId);
@@ -414,13 +472,17 @@ export default function WarehouseDashboard() {
                           deviceSerials={batch.deviceSerials}
                           deviceModels={batch.deviceModels}
                           category={batch.category}
-                          statusNode={isRmaBatch ? (
-                            <Badge variant="outline" className="bg-blue-50 border-blue-300 text-blue-800">
-                              <Truck className="w-3 h-3 mr-1" />返厂处理
-                            </Badge>
-                          ) : (
-                            <Badge variant="outline" className="bg-green-50 border-green-300 text-green-800">
-                              <Truck className="w-3 h-3 mr-1" />待发货
+                          statusNode={(
+                            <Badge
+                              variant="outline"
+                              className={hasPendingFactoryDevice
+                                ? "bg-orange-50 border-orange-300 text-orange-800"
+                                : "bg-green-50 border-green-300 text-green-800"}
+                            >
+                              <Truck className="w-3 h-3 mr-1" />
+                              {hasPendingFactoryDevice
+                                ? `返厂待发货（${pendingFactoryDeviceCount} 台）`
+                                : "待发货"}
                             </Badge>
                           )}
                           createdAt={`创建时间：${format(toBeijingTime(batch.createdAt), "MM-dd HH:mm", { locale: zhCN })}`}
@@ -433,6 +495,85 @@ export default function WarehouseDashboard() {
                   <WorkOrderPagination
                     currentPage={currentPage}
                     totalItems={filteredShippingBatches.length}
+                    onPageChange={setCurrentPage}
+                  />
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* 返厂设备待移交 */}
+        <TabsContent value="transfer" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    <ArrowRightLeft className="h-5 w-5 text-amber-600" />
+                    返厂设备待移交
+                  </CardTitle>
+                  <CardDescription className="mt-1.5">
+                    仓库跟进厂家维修与返程物流；收到设备并核对后，按单台移交维修人员继续完成维修
+                  </CardDescription>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={loadFactoryTransferDevices}
+                  disabled={loading}
+                  className="flex shrink-0 items-center gap-2"
+                >
+                  <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+                  刷新
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {loading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                  <span className="ml-2 text-muted-foreground">加载中...</span>
+                </div>
+              ) : filteredFactoryTransferDevices.length === 0 ? (
+                <div className="py-12 text-center">
+                  <CheckCircle2 className="mx-auto mb-4 h-12 w-12 text-green-500" />
+                  <p className="text-muted-foreground">
+                    {hasActiveFilters ? "未找到匹配的待移交设备" : "暂无待移交的返厂设备"}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <WorkOrderCardStack>
+                    {paginatedFactoryTransferDevices.map((device) => (
+                      <Card
+                        key={`transfer-${device.id}`}
+                        className="cursor-pointer"
+                        onClick={() => setSelectedFactoryTransferDevice(device)}
+                      >
+                        <BatchWorkOrderCardContent
+                          batchId={device.batchId}
+                          deviceCount={device.deviceCount}
+                          customerName={device.customerName}
+                          projectName={device.projectName}
+                          projectLocation={device.projectLocation}
+                          deviceSerials={device.deviceSerials}
+                          deviceModels={device.deviceModels}
+                          category={device.category}
+                          statusNode={(
+                            <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
+                              <ArrowRightLeft className="mr-1 h-3 w-3" />待移交
+                            </Badge>
+                          )}
+                          createdAt={`厂家：${device.supplierName || "未填写"} · 已跟进 ${Math.max(0, Number(device.followUpDays) || 0)} 天`}
+                          trailing={<ChevronRight className="h-5 w-5 text-muted-foreground" />}
+                        />
+                      </Card>
+                    ))}
+                  </WorkOrderCardStack>
+                  <WorkOrderPagination
+                    currentPage={currentPage}
+                    totalItems={filteredFactoryTransferDevices.length}
                     onPageChange={setCurrentPage}
                   />
                 </>

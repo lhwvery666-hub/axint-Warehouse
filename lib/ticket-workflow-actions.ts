@@ -19,7 +19,7 @@ export enum TicketAction {
   
   // 维修人员动作
   SEND_REPORT_FOR_SIGN = "send_report_for_sign", // 发送维修报告至现场确认
-  REQUEST_FACTORY_REPAIR = "request_factory_repair", // 提交整批返厂维修申请
+  REQUEST_FACTORY_REPAIR = "request_factory_repair", // 提交当前设备返厂维修申请
   /**
    * @deprecated 遗留动作，未被任何前端组件触发。
    * 该动作原本允许维修人员在"维修作业中"（Technician_Repairing）状态下
@@ -45,7 +45,7 @@ export const TICKET_ACTION_LABELS: Record<TicketAction, string> = {
   [TicketAction.CONFIRM_RECEIPT]: "核对设备并确认收货",
   [TicketAction.CONFIRM_SHIPMENT]: "确认出库发货",
   [TicketAction.SEND_REPORT_FOR_SIGN]: "发送维修报告至现场确认",
-  [TicketAction.REQUEST_FACTORY_REPAIR]: "提交整批返厂维修申请",
+  [TicketAction.REQUEST_FACTORY_REPAIR]: "提交当前设备返厂维修申请",
   [TicketAction.CONFIRM_SIGNATURE]: "核对凭证并转交商务",
   [TicketAction.UPLOAD_SIGNATURE]: "上传签字凭证",
   [TicketAction.CONFIRM_PAYMENT]: "确认收费完结，通知发货",
@@ -71,20 +71,17 @@ export interface WorkflowTransition {
  * 严格控制每个状态下每个角色只能执行特定的操作
  */
 export const WORKFLOW_TRANSITIONS: WorkflowTransition[] = [
-  // 1. 待处理 -> 仓库确认中
+  // 1. 待仓库确认 -> 维修检查中
   {
-    currentStatus: TicketStatus.CREATED,
+    currentStatus: TicketStatus.WAREHOUSE_CONFIRMING,
     allowedRole: UserRole.WAREHOUSE,
     action: TicketAction.CONFIRM_RECEIPT,
-    nextStatus: TicketStatus.WAREHOUSE_CONFIRMED,
+    nextStatus: TicketStatus.IN_REPAIR,
     requiresValidation: true,
     validationKey: "all_devices_have_shipping_date",
   },
   
-  // 2. 仓库已确认 -> 维修检查中
-  // （自动流转，无需用户操作，当仓库确认后自动进入维修）
-  
-  // 3. 维修检查中 -> 待现场确认（待签字）
+  // 2. 维修检查中 -> 待现场确认（待签字）
   {
     currentStatus: TicketStatus.IN_REPAIR,
     allowedRole: UserRole.TECHNICIAN,
@@ -93,25 +90,35 @@ export const WORKFLOW_TRANSITIONS: WorkflowTransition[] = [
     requiresValidation: true,
     validationKey: "repair_report_complete",
   },
+  // Compatibility only: historical Warehouse_Confirmed rows continue from
+  // repair inspection without exposing the retired intermediate state.
   {
-    currentStatus: TicketStatus.IN_REPAIR,
+    currentStatus: TicketStatus.WAREHOUSE_CONFIRMED,
     allowedRole: UserRole.TECHNICIAN,
-    action: TicketAction.REQUEST_FACTORY_REPAIR,
-    nextStatus: TicketStatus.PENDING_FACTORY,
+    action: TicketAction.SEND_REPORT_FOR_SIGN,
+    nextStatus: TicketStatus.PENDING_REPORTER_CONFIRM,
     requiresValidation: true,
-    validationKey: "factory_repair_details_complete",
-  },
-  {
-    currentStatus: TicketStatus.TECHNICIAN_REPAIRING,
-    allowedRole: UserRole.TECHNICIAN,
-    action: TicketAction.REQUEST_FACTORY_REPAIR,
-    nextStatus: TicketStatus.PENDING_FACTORY,
-    requiresValidation: true,
-    validationKey: "factory_repair_details_complete",
+    validationKey: "repair_report_complete",
   },
   {
     currentStatus: TicketStatus.IN_REPAIR,
     allowedRole: UserRole.ADMIN,
+    action: TicketAction.SEND_REPORT_FOR_SIGN,
+    nextStatus: TicketStatus.PENDING_REPORTER_CONFIRM,
+    requiresValidation: true,
+    validationKey: "repair_report_complete",
+  },
+  {
+    currentStatus: TicketStatus.WAREHOUSE_CONFIRMED,
+    allowedRole: UserRole.ADMIN,
+    action: TicketAction.SEND_REPORT_FOR_SIGN,
+    nextStatus: TicketStatus.PENDING_REPORTER_CONFIRM,
+    requiresValidation: true,
+    validationKey: "repair_report_complete",
+  },
+  {
+    currentStatus: TicketStatus.TECHNICIAN_REPAIRING,
+    allowedRole: UserRole.TECHNICIAN,
     action: TicketAction.REQUEST_FACTORY_REPAIR,
     nextStatus: TicketStatus.PENDING_FACTORY,
     requiresValidation: true,
@@ -162,20 +169,8 @@ export const WORKFLOW_TRANSITIONS: WorkflowTransition[] = [
     nextStatus: TicketStatus.COMPLETED,
     requiresValidation: false,
   },
-  {
-    currentStatus: TicketStatus.PENDING_FACTORY,
-    allowedRole: UserRole.ADMIN,
-    action: TicketAction.CONFIRM_FACTORY_RETURN,
-    nextStatus: TicketStatus.FACTORY_FINISHED,
-    requiresValidation: false,
-  },
-  {
-    currentStatus: TicketStatus.PENDING_FACTORY,
-    allowedRole: UserRole.BUSINESS,
-    action: TicketAction.CONFIRM_FACTORY_RETURN,
-    nextStatus: TicketStatus.FACTORY_FINISHED,
-    requiresValidation: false,
-  },
+  // 原厂返修设备返回后，由仓库“待移交”专用接口按单台确认。
+  // 不再开放通用整批动作，避免不同厂家分批返回时误流转整批设备。
 ];
 
 // ==================== 工具函数 ====================

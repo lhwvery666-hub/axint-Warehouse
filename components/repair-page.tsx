@@ -1,7 +1,7 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { useRouter } from "next/navigation"
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
 import { Clock, Wrench, AlertCircle, ChevronRight, Filter, Plus, ArrowLeft, ShieldCheck, ShieldAlert, Calendar, CheckCircle, Package, MessageSquare, FileCheck, Camera, ZoomIn, Download, Copy, FileText, DollarSign, Send, ClipboardList, PenTool } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Calendar as CalendarComponent } from "@/components/ui/calendar"
-import { format } from "date-fns"
+import { format, parseISO } from "date-fns"
 import { zhCN } from "date-fns/locale"
 import { cn, toBeijingTime } from "@/lib/utils"
 import { useAuth } from "@/context/auth-context"
@@ -24,9 +24,18 @@ import { WorkOrderCardStack } from "@/components/work-order-card-stack"
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar"
 import { WorkOrderPagination } from "@/components/work-order-pagination"
 import { resolveTimeFilterPool, getTimeFilterTargetDate } from "@/lib/workflow-utils"
-import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, matchesRepairTimeRange, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters"
+import {
+  ALL_REPAIR_STATUS_FILTER,
+  matchesRepairListFilters,
+  matchesRepairSummaryFilter,
+  matchesRepairTimeRange,
+  parseRepairSummaryFilter,
+  REPAIR_STATUS_FILTER_OPTIONS,
+  REPAIR_SUMMARY_FILTER,
+  type RepairSummaryFilter,
+} from "@/lib/repair-list-filters"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
-import { clampPage, paginateItems } from "@/lib/pagination"
+import { clampPage, paginateItems, parsePageParam } from "@/lib/pagination"
 
 // ==================== 类型定义 ====================
 /**
@@ -56,7 +65,7 @@ interface BatchDevice {
 }
 
 interface RepairPageProps {
-  onBack?: () => void
+  onBack?: () => void | Promise<void>
   taskId?: string | null
   userType?: string
   batchContext?: {
@@ -77,10 +86,11 @@ function getUnreadCount(batchId: string, totalCount: number): number {
 export default function RepairPage({ onBack, taskId, userType, batchContext }: RepairPageProps) {
   const { user } = useAuth()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const userRole = userType || user?.role || "technician"
   
   // 使用RepairContext获取维修工单数据
-  const { repairs } = useRepairContext();
+  const { repairs, refreshRepairs } = useRepairContext();
   
   // 视图状态：tasks(任务列表), new(新建维修), detail(维修详情), batchSelect(批次设备选择)
   // 如果传入了taskId，则直接显示详情页面
@@ -130,20 +140,75 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
       setView(batchContext ? "batchSelect" : "tasks")
     }
   }, [taskId, batchContext])
-  const [workOrderQuery, setWorkOrderQuery] = useState("")
-  const [customerQuery, setCustomerQuery] = useState("")
-  const [deviceQuery, setDeviceQuery] = useState("")
-  const [filterStatus, setFilterStatus] = useState<string>(ALL_REPAIR_STATUS_FILTER)
-  const [filterTimeRange, setFilterTimeRange] = useState<string>("all")
-  const [currentPage, setCurrentPage] = useState(1)
+  const [workOrderQuery, setWorkOrderQuery] = useState(() => searchParams.get("repairWorkOrder") || "")
+  const [customerQuery, setCustomerQuery] = useState(() => searchParams.get("repairCustomer") || "")
+  const [deviceQuery, setDeviceQuery] = useState(() => searchParams.get("repairDevice") || "")
+  const [filterStatus, setFilterStatus] = useState<string>(() => {
+    const requestedStatus = searchParams.get("repairStatus")
+    return REPAIR_STATUS_FILTER_OPTIONS.some((option) => option.value === requestedStatus)
+      ? requestedStatus as string
+      : ALL_REPAIR_STATUS_FILTER
+  })
+  const [summaryFilter, setSummaryFilter] = useState<RepairSummaryFilter>(() => (
+    parseRepairSummaryFilter(searchParams.get("repairSummary"))
+  ))
+  const [filterTimeRange, setFilterTimeRange] = useState<string>(() => {
+    const requestedRange = searchParams.get("repairTime")
+    return ["all", "today", "week", "month", "custom"].includes(requestedRange || "")
+      ? requestedRange as string
+      : "all"
+  })
+  const [currentPage, setCurrentPage] = useState(() => parsePageParam(searchParams.get("repairPage")))
   const [dateRange, setDateRange] = useState<{
     from: Date | undefined;
     to: Date | undefined;
-  }>({
-    from: undefined,
-    to: undefined
-  })
+  }>(() => ({
+    from: searchParams.get("repairFrom") ? parseISO(searchParams.get("repairFrom") as string) : undefined,
+    to: searchParams.get("repairTo") ? parseISO(searchParams.get("repairTo") as string) : undefined,
+  }))
   const [isCalendarOpen, setIsCalendarOpen] = useState(false)
+
+  const buildRepairListUrl = useCallback(() => {
+    const params = new URLSearchParams(searchParams.toString())
+    params.set("tab", "repair")
+
+    const setOrDelete = (key: string, value: string) => {
+      if (value) {
+        params.set(key, value)
+      } else {
+        params.delete(key)
+      }
+    }
+
+    setOrDelete("repairWorkOrder", workOrderQuery.trim())
+    setOrDelete("repairCustomer", customerQuery.trim())
+    setOrDelete("repairDevice", deviceQuery.trim())
+    setOrDelete("repairStatus", filterStatus === ALL_REPAIR_STATUS_FILTER ? "" : filterStatus)
+    setOrDelete("repairSummary", summaryFilter === REPAIR_SUMMARY_FILTER.ALL ? "" : summaryFilter)
+    setOrDelete("repairTime", filterTimeRange === "all" ? "" : filterTimeRange)
+    setOrDelete("repairPage", currentPage === 1 ? "" : String(currentPage))
+
+    if (filterTimeRange === "custom") {
+      setOrDelete("repairFrom", dateRange.from ? format(dateRange.from, "yyyy-MM-dd") : "")
+      setOrDelete("repairTo", dateRange.to ? format(dateRange.to, "yyyy-MM-dd") : "")
+    } else {
+      params.delete("repairFrom")
+      params.delete("repairTo")
+    }
+
+    return `/?${params.toString()}`
+  }, [
+    currentPage,
+    customerQuery,
+    dateRange.from,
+    dateRange.to,
+    deviceQuery,
+    filterStatus,
+    filterTimeRange,
+    searchParams,
+    summaryFilter,
+    workOrderQuery,
+  ])
   
   // 获取最新的工单数据
   const [tasks, setTasks] = useState<any[]>([])
@@ -227,11 +292,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
     setTasks(groupedTasks);
   }, [repairs, view]); // 当repairs或视图变化时重新获取数据
 
-  // ⚠️ 曾经的 bug：① CREATED 与 WAREHOUSE_CONFIRMING 被强行合并显示"待处理"；
-  // ② normalizeTicketStatus 返回的是规范枚举值（如 "Warehouse_Shipping"），但这里却拿小写字符串
-  // "pending_shipment"/"unrepairable"/"delayed" 去比较，永远不会命中，导致这些状态显示不出徽章；
-  // ③ 缺少 WAREHOUSE_CONFIRMED / TECHNICIAN_REPAIRING / PENDING_REPORTER_CONFIRM 分支。
-  // 修复：统一用 TICKET_STATUS_LABELS 取文案，覆盖全部状态，不再吞掉或误合并。
+  // 所有原始状态先归一化；历史“仓库已确认/延期”均按维修检查中展示。
   const getStatusBadge = (status: string) => {
     const normalizedStatus = normalizeTicketStatus(status)
     if (!normalizedStatus) return null
@@ -248,13 +309,6 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
       return (
         <Badge className="bg-orange-100 text-orange-800 border-orange-300 hover:bg-orange-200">
           <Clock className="w-3 h-3 mr-1" />
-          {label}
-        </Badge>
-      )
-    } else if (normalizedStatus === TicketStatus.WAREHOUSE_CONFIRMED) {
-      return (
-        <Badge className="bg-teal-100 text-teal-800 border-teal-300 hover:bg-teal-200">
-          <CheckCircle className="w-3 h-3 mr-1" />
           {label}
         </Badge>
       )
@@ -307,13 +361,6 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
           {label}
         </Badge>
       )
-    } else if (normalizedStatus === TicketStatus.DELAYED) {
-      return (
-        <Badge className="bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200 text-xs">
-          <Clock className="w-3 h-3 mr-1" />
-          {label}
-        </Badge>
-      )
     } else {
       return (
         <Badge variant="outline" className="text-muted-foreground">
@@ -343,7 +390,8 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
     setView("new")
   }
 
-  const handleBackToTasks = () => {
+  const handleBackToTasks = async () => {
+    await refreshRepairs()
     setSelectedTaskId(null)
     // 如果有批次上下文，返回批次选择页面；否则返回任务列表
     if (currentBatchTask) {
@@ -368,7 +416,10 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
       repairs.find(r => r.id === task.id)?.reportedAt ||
       "";
 
-    const pool = resolveTimeFilterPool(filterStatus);
+    const effectiveTimeStatus = summaryFilter === REPAIR_SUMMARY_FILTER.COMPLETED
+      ? TicketStatus.COMPLETED
+      : filterStatus;
+    const pool = resolveTimeFilterPool(effectiveTimeStatus);
     const fullReportDate = getTimeFilterTargetDate(pool, task.rawData, baseReportDate) || "";
 
     return matchesRepairTimeRange(fullReportDate, filterTimeRange, dateRange);
@@ -376,7 +427,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
   
   // 排除终止状态后，依次应用时间筛选和多条件联合筛选
   // 排除终止状态的工单（Cancelled, Scrapped, Return_Unrepaired）
-  const filteredTasks = tasks
+  const summaryCountTasks = tasks
     .filter(task => {
       const status = (task.status || "").toString().toLowerCase()
       // 排除终止状态
@@ -390,18 +441,77 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
       workOrderQuery,
       customerQuery,
       deviceQuery,
-      status: filterStatus,
+      status: ALL_REPAIR_STATUS_FILTER,
     }))
 
-  // 联合筛选条件变化时从第一页重新展示，避免停留在已经不存在的页码。
+  const filteredTasks = summaryCountTasks
+    .filter(task => matchesRepairListFilters(task, {
+      workOrderQuery: "",
+      customerQuery: "",
+      deviceQuery: "",
+      status: filterStatus,
+    }))
+    .filter(task => matchesRepairSummaryFilter(task, summaryFilter))
+
   useEffect(() => {
-    setCurrentPage(1)
-  }, [workOrderQuery, customerQuery, deviceQuery, filterStatus, filterTimeRange, dateRange])
+    const timer = setTimeout(() => {
+      const nextUrl = buildRepairListUrl()
+      const currentUrl = window.location.pathname + window.location.search
+      if (nextUrl !== currentUrl) {
+        router.replace(nextUrl, { scroll: false })
+      }
+    }, 300)
+
+    return () => clearTimeout(timer)
+  }, [buildRepairListUrl, router])
+
+  const toggleSummaryFilter = (nextFilter: RepairSummaryFilter) => {
+    const resolvedFilter = summaryFilter === nextFilter
+      ? REPAIR_SUMMARY_FILTER.ALL
+      : nextFilter
+
+    setSummaryFilter(resolvedFilter)
+    if (resolvedFilter !== REPAIR_SUMMARY_FILTER.ALL) {
+      setFilterStatus(ALL_REPAIR_STATUS_FILTER)
+    }
+  }
+
+  const handleSummaryCardKeyDown = (
+    event: KeyboardEvent<HTMLDivElement>,
+    nextFilter: RepairSummaryFilter,
+  ) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault()
+      toggleSummaryFilter(nextFilter)
+    }
+  }
+
+  const repairFilterSignature = [
+    workOrderQuery,
+    customerQuery,
+    deviceQuery,
+    filterStatus,
+    summaryFilter,
+    filterTimeRange,
+    dateRange.from?.getTime() ?? "",
+    dateRange.to?.getTime() ?? "",
+  ].join("|")
+  const previousRepairFilterSignature = useRef(repairFilterSignature)
+
+  // 联合筛选条件确实发生变化时从第一页重新展示；首次恢复 URL 状态时保留原页码。
+  useEffect(() => {
+    if (previousRepairFilterSignature.current !== repairFilterSignature) {
+      previousRepairFilterSignature.current = repairFilterSignature
+      setCurrentPage(1)
+    }
+  }, [repairFilterSignature])
 
   // 数据刷新或筛选结果减少时，把当前页约束到仍然有效的范围内。
   useEffect(() => {
-    setCurrentPage((page) => clampPage(page, filteredTasks.length))
-  }, [filteredTasks.length])
+    if (tasks.length > 0) {
+      setCurrentPage((page) => clampPage(page, filteredTasks.length))
+    }
+  }, [filteredTasks.length, tasks.length])
 
   const paginatedTasks = paginateItems(filteredTasks, currentPage)
 
@@ -447,7 +557,10 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
               onWorkOrderQueryChange={setWorkOrderQuery}
               onCustomerQueryChange={setCustomerQuery}
               onDeviceQueryChange={setDeviceQuery}
-              onStatusChange={setFilterStatus}
+              onStatusChange={(status) => {
+                setSummaryFilter(REPAIR_SUMMARY_FILTER.ALL)
+                setFilterStatus(status)
+              }}
               trailing={(
                 <>
                 <select
@@ -513,41 +626,93 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
             />
 
             {/* 任务统计 */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <Card className="border-border/50 dark:border-border shadow-md hover:shadow-lg transition-shadow bg-gradient-to-br from-primary/5 to-primary/10 dark:from-primary/20 dark:to-primary/15 bg-card dark:bg-card">
-                <CardContent className="p-4 md:p-6 text-center">
-                  <div className="flex items-center justify-center mb-2">
-                    <Clock className="h-5 w-5 text-primary mr-2" />
-                    <p className="text-3xl md:text-4xl font-bold text-primary">{tasks.filter(t => t.status === "pending").length}</p>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4 md:gap-4">
+              <Card
+                role="button"
+                tabIndex={0}
+                aria-pressed={summaryFilter === REPAIR_SUMMARY_FILTER.PENDING}
+                aria-label="筛选待仓库确认工单"
+                onClick={() => toggleSummaryFilter(REPAIR_SUMMARY_FILTER.PENDING)}
+                onKeyDown={(event) => handleSummaryCardKeyDown(event, REPAIR_SUMMARY_FILTER.PENDING)}
+                className={cn(
+                  "order-3 cursor-pointer select-none gap-0 border-border/50 bg-card py-0 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary dark:border-border dark:bg-card",
+                  "bg-gradient-to-br from-primary/5 to-primary/10 dark:from-primary/20 dark:to-primary/15",
+                  summaryFilter === REPAIR_SUMMARY_FILTER.PENDING && "border-primary ring-2 ring-primary",
+                )}
+              >
+                <CardContent className="px-3 py-3 text-center">
+                  <div className="mb-1 flex items-center justify-center">
+                    <Clock className="mr-2 h-4 w-4 text-primary" />
+                    <p className="text-2xl font-bold leading-none text-primary md:text-3xl">{summaryCountTasks.filter(task => matchesRepairSummaryFilter(task, REPAIR_SUMMARY_FILTER.PENDING)).length}</p>
                   </div>
-                  <p className="text-sm font-medium text-muted-foreground">待处理</p>
+                  <p className="text-sm font-medium text-muted-foreground">待仓库确认</p>
+                  <p className="min-h-4 text-[11px] text-primary">{summaryFilter === REPAIR_SUMMARY_FILTER.PENDING ? "已筛选，点击取消" : ""}</p>
                 </CardContent>
               </Card>
-              <Card className="border-border/50 dark:border-border shadow-md hover:shadow-lg transition-shadow bg-gradient-to-br from-warning/5 to-warning/10 dark:from-warning/20 dark:to-warning/15 bg-card dark:bg-card">
-                <CardContent className="p-4 md:p-6 text-center">
-                  <div className="flex items-center justify-center mb-2">
-                    <Wrench className="h-5 w-5 text-warning mr-2" />
-                    <p className="text-3xl md:text-4xl font-bold text-warning">{tasks.filter(t => t.status === "processing").length}</p>
+              <Card
+                role="button"
+                tabIndex={0}
+                aria-pressed={summaryFilter === REPAIR_SUMMARY_FILTER.ACTIVE}
+                aria-label="筛选进行中工单"
+                onClick={() => toggleSummaryFilter(REPAIR_SUMMARY_FILTER.ACTIVE)}
+                onKeyDown={(event) => handleSummaryCardKeyDown(event, REPAIR_SUMMARY_FILTER.ACTIVE)}
+                className={cn(
+                  "order-2 cursor-pointer select-none gap-0 border-border/50 bg-card py-0 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning dark:border-border dark:bg-card",
+                  "bg-gradient-to-br from-warning/5 to-warning/10 dark:from-warning/20 dark:to-warning/15",
+                  summaryFilter === REPAIR_SUMMARY_FILTER.ACTIVE && "border-warning ring-2 ring-warning",
+                )}
+              >
+                <CardContent className="px-3 py-3 text-center">
+                  <div className="mb-1 flex items-center justify-center">
+                    <Wrench className="mr-2 h-4 w-4 text-warning" />
+                    <p className="text-2xl font-bold leading-none text-warning md:text-3xl">{summaryCountTasks.filter(task => matchesRepairSummaryFilter(task, REPAIR_SUMMARY_FILTER.ACTIVE)).length}</p>
                   </div>
                   <p className="text-sm font-medium text-muted-foreground">进行中</p>
+                  <p className="min-h-4 text-[11px] text-warning">{summaryFilter === REPAIR_SUMMARY_FILTER.ACTIVE ? "已筛选，点击取消" : ""}</p>
                 </CardContent>
               </Card>
-              <Card className="border-border/50 dark:border-border shadow-md hover:shadow-lg transition-shadow bg-gradient-to-br from-success/5 to-success/10 dark:from-success/20 dark:to-success/15 bg-card dark:bg-card">
-                <CardContent className="p-4 md:p-6 text-center">
-                  <div className="flex items-center justify-center mb-2">
-                    <CheckCircle className="h-5 w-5 text-success mr-2" />
-                    <p className="text-3xl md:text-4xl font-bold text-success">{tasks.filter(t => normalizeTicketStatus(t.status) === TicketStatus.COMPLETED).length}</p>
+              <Card
+                role="button"
+                tabIndex={0}
+                aria-pressed={summaryFilter === REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING}
+                aria-label="筛选待商务审核或待仓库发货工单"
+                onClick={() => toggleSummaryFilter(REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING)}
+                onKeyDown={(event) => handleSummaryCardKeyDown(event, REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING)}
+                className={cn(
+                  "order-4 cursor-pointer select-none gap-0 border-border/50 bg-card py-0 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-border dark:bg-card",
+                  "bg-gradient-to-br from-violet-500/5 to-violet-500/10 dark:from-violet-500/20 dark:to-violet-500/15",
+                  summaryFilter === REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING && "border-violet-500 ring-2 ring-violet-500",
+                )}
+              >
+                <CardContent className="px-3 py-3 text-center">
+                  <div className="mb-1 flex items-center justify-center">
+                    <Package className="mr-2 h-4 w-4 text-violet-600 dark:text-violet-400" />
+                    <p className="text-2xl font-bold leading-none text-violet-600 md:text-3xl dark:text-violet-400">{summaryCountTasks.filter(task => matchesRepairSummaryFilter(task, REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING)).length}</p>
+                  </div>
+                  <p className="text-sm font-medium text-muted-foreground">待商务审核 / 待仓库发货</p>
+                  <p className="min-h-4 text-[11px] text-violet-600 dark:text-violet-400">{summaryFilter === REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING ? "已筛选，点击取消" : ""}</p>
+                </CardContent>
+              </Card>
+              <Card
+                role="button"
+                tabIndex={0}
+                aria-pressed={summaryFilter === REPAIR_SUMMARY_FILTER.COMPLETED}
+                aria-label="筛选已完成工单"
+                onClick={() => toggleSummaryFilter(REPAIR_SUMMARY_FILTER.COMPLETED)}
+                onKeyDown={(event) => handleSummaryCardKeyDown(event, REPAIR_SUMMARY_FILTER.COMPLETED)}
+                className={cn(
+                  "order-1 cursor-pointer select-none gap-0 border-border/50 bg-card py-0 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-success dark:border-border dark:bg-card",
+                  "bg-gradient-to-br from-success/5 to-success/10 dark:from-success/20 dark:to-success/15",
+                  summaryFilter === REPAIR_SUMMARY_FILTER.COMPLETED && "border-success ring-2 ring-success",
+                )}
+              >
+                <CardContent className="px-3 py-3 text-center">
+                  <div className="mb-1 flex items-center justify-center">
+                    <CheckCircle className="mr-2 h-4 w-4 text-success" />
+                    <p className="text-2xl font-bold leading-none text-success md:text-3xl">{summaryCountTasks.filter(task => matchesRepairSummaryFilter(task, REPAIR_SUMMARY_FILTER.COMPLETED)).length}</p>
                   </div>
                   <p className="text-sm font-medium text-muted-foreground">已完成</p>
-                </CardContent>
-              </Card>
-              <Card className="border-border/50 dark:border-border shadow-md hover:shadow-lg transition-shadow bg-gradient-to-br from-destructive/5 to-destructive/10 dark:from-destructive/20 dark:to-destructive/15 bg-card dark:bg-card">
-                <CardContent className="p-4 md:p-6 text-center">
-                  <div className="flex items-center justify-center mb-2">
-                    <AlertCircle className="h-5 w-5 text-destructive mr-2" />
-                    <p className="text-3xl md:text-4xl font-bold text-destructive">{tasks.filter(t => t.status === "unrepairable").length}</p>
-                  </div>
-                  <p className="text-sm font-medium text-muted-foreground">无法维修</p>
+                  <p className="min-h-4 text-[11px] text-success">{summaryFilter === REPAIR_SUMMARY_FILTER.COMPLETED ? "已筛选，点击取消" : ""}</p>
                 </CardContent>
               </Card>
             </div>
@@ -589,18 +754,14 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
                         reportedAt={task.reportedAt}
                         unreadCount={unread}
                         hasSignedPhoto={task.isBatch && !!task.rawData?.signedReportPhoto}
-                        delayedText={
-                          task.status === "delayed" && task.expectedCompletionDate
-                            ? `延期至 ${format(new Date(task.expectedCompletionDate), "yyyy-MM-dd")}`
-                            : undefined
-                        }
                         pendingSnText={needsSupplement ? "待补录 SN" : undefined}
                         onClick={() => {
                           // 只要有批次ID（不管是批次工单还是批次中的单个设备），都跳转到批次详情页
                           // 与首页仪表盘保持一致，展示统一的工单详情页（阶段进度条、设备列表、盖章件、打印等）
                           // 携带 from=repair，方便详情页"返回"时能回到维修工单列表而不是首页
                           if (task.batchId) {
-                            router.push(`/batch/${task.batchId}?from=repair`);
+                            const returnTo = encodeURIComponent(buildRepairListUrl())
+                            router.push(`/batch/${task.batchId}?from=repair&returnTo=${returnTo}`);
                           } else {
                             handleViewTask(task.id);
                           }

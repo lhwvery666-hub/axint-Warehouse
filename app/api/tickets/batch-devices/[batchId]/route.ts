@@ -8,6 +8,12 @@ import {
   canEditDeviceClassification,
   canEditDeviceIdentity,
 } from "@/lib/device-identity-permissions"
+import { getChangedDeviceUpdates } from "@/lib/device-update-diff"
+import {
+  canViewFactoryDetails,
+  getVisibleRepairAction,
+  getVisibleTicketStatus,
+} from "@/lib/ticket-visibility"
 
 const batchIdSchema = z.string().trim().min(1).max(100)
 const newDeviceSchema = z.object({
@@ -35,6 +41,7 @@ const updateDeviceSchema = z.object({
     materialCode: z.string().trim().max(100).nullable().optional(),
     quantity: z.number().int().min(1).max(100000).optional(),
     manufactureDate: z.string().datetime().nullable().optional(),
+    arrivalDate: z.string().datetime().nullable().optional(),
   }).strict(),
 }).strict()
 
@@ -44,10 +51,16 @@ interface BatchGuardRow {
   ReportByUserID: number | null
   ProjectName: string | null
   ContactInfo: string | null
+  DeviceSN: string | null
   DeviceName: string | null
   ModelName: string | null
   Category: string | null
   SubCategory: string | null
+  Problem: string | null
+  MaterialCode: string | null
+  Quantity: number | null
+  ManufactureDate: Date | null
+  ArrivalDate: Date | null
 }
 
 async function rollback(transaction: sql.Transaction | null): Promise<null> {
@@ -84,6 +97,8 @@ export async function GET(
       return NextResponse.json({ success: false, message: "批次ID无效" }, { status: 400 })
     }
     const batchId = parsedBatchId.data
+    const viewerRole = authResult.normalizedRole
+    const mayViewFactoryDetails = canViewFactoryDetails(viewerRole)
     const userId = Number(authResult.userId)
     if (!Number.isSafeInteger(userId)) {
       return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
@@ -126,7 +141,7 @@ export async function GET(
       deviceName: row.DeviceName,
       category: row.Category,
       subCategory: row.SubCategory,
-      status: row.Status,
+      status: getVisibleTicketStatus(String(row.Status || ""), viewerRole),
       problem: row.Problem,
       materialCode: row.MaterialCode,
       fullSpec: row.FullSpec,
@@ -140,7 +155,10 @@ export async function GET(
       warrantyStatus: row.WarrantyStatus || null,
       warrantyStatusOverride: row.WarrantyStatusOverride || null,
       deviceImages: row.DevicePhotos || null,
-      repairAction: row.RepairAction || null,
+      repairAction: getVisibleRepairAction(
+        typeof row.RepairAction === "string" ? row.RepairAction : null,
+        viewerRole
+      ),
       quantity: typeof row.Quantity === "number" ? row.Quantity : (parseInt(String(row.Quantity)) || 1),
       finalOutcome: (() => {
         try {
@@ -176,15 +194,19 @@ export async function GET(
           subCategory: first.SubCategory || "",
           deviceCount: devices.reduce((sum, device) => sum + (device.quantity || 1), 0),
           signedReportPhoto,
-          status: first.Status || TicketStatus.CREATED,
+          status: getVisibleTicketStatus(String(first.Status || ""), viewerRole),
           senderAddress: first.SenderAddress || "",
           trackingNumber: first.TrackingNumber_In || "",
           expressCompany: first.CourierCompany || "",
           revisionRequestedBy: first.RevisionRequestedBy || null,
           revisionRequestReason: first.RevisionRequestReason || null,
           revisionRequestDate: first.RevisionRequestDate || null,
-          factoryTrackingNum: first.FactoryTrackingNum || null,
-          factoryShipDate: first.FactoryShipDate || null,
+          ...(mayViewFactoryDetails
+            ? {
+                factoryTrackingNum: first.FactoryTrackingNum || null,
+                factoryShipDate: first.FactoryShipDate || null,
+              }
+            : {}),
           customerReturnDate: first.ReceivedDate || first.ArrivalDate || null,
         },
         devices,
@@ -331,15 +353,15 @@ export async function PUT(
       authResult.normalizedRole === UserRole.WAREHOUSE
     if (isIdentityOnlyEditor) {
       const allowedFields = authResult.normalizedRole === UserRole.WAREHOUSE
-        ? new Set(["deviceName", "modelName", "category", "subCategory"])
-        : new Set(["deviceName", "modelName"])
+        ? new Set(["deviceName", "modelName", "category", "subCategory", "manufactureDate", "arrivalDate"])
+        : new Set(["deviceName", "modelName", "category", "subCategory"])
       if (Object.keys(updates).some((field) => !allowedFields.has(field))) {
         return NextResponse.json(
           {
             success: false,
             message: authResult.normalizedRole === UserRole.WAREHOUSE
-              ? "仓库人员只能完善设备分类、产品名称和型号"
-              : "维修人员只能修改产品名称和型号",
+              ? "仓库人员只能完善设备分类、产品名称、型号和收货日期"
+              : "维修人员只能修改设备分类、产品名称和型号",
           },
           { status: 403 }
         )
@@ -354,8 +376,11 @@ export async function PUT(
         return NextResponse.json({ success: false, message: "二级分类不能为空" }, { status: 400 })
       }
     }
-    if (authResult.normalizedRole === UserRole.REPORTER && updates.manufactureDate !== undefined) {
-      return NextResponse.json({ success: false, message: "现场人员无权修改出厂日期" }, { status: 403 })
+    if (
+      authResult.normalizedRole === UserRole.REPORTER
+      && (updates.manufactureDate !== undefined || updates.arrivalDate !== undefined)
+    ) {
+      return NextResponse.json({ success: false, message: "现场人员无权修改仓库日期" }, { status: 403 })
     }
     const userId = Number(authResult.userId)
     if (!Number.isSafeInteger(userId)) {
@@ -369,11 +394,19 @@ export async function PUT(
       .input("batchId", sql.NVarChar(100), batchId)
       .query<BatchGuardRow>(`
         SELECT [Id], [Status], [ReportByUserID], [ProjectName], [ContactInfo],
-               [DeviceName], [ModelName], [Category], [SubCategory]
+               [DeviceSN], [DeviceName], [ModelName], [Category], [SubCategory],
+               [Problem], [MaterialCode], [Quantity], [ManufactureDate], [ArrivalDate]
         FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BatchId] = @batchId;
       `)
     const targetRow = guardResult.recordset.find((row) => row.Id === deviceId)
+    if (!targetRow) {
+      transaction = await rollback(transaction)
+      return NextResponse.json(
+        { success: false, message: "设备不存在或不属于该批次" },
+        { status: 404 }
+      )
+    }
     const changesClassification = updates.category !== undefined || updates.subCategory !== undefined
     const canEdit = isIdentityOnlyEditor
       ? Boolean(
@@ -391,6 +424,27 @@ export async function PUT(
       )
     }
 
+    const effectiveUpdates = getChangedDeviceUpdates(updates, {
+      deviceSn: targetRow.DeviceSN,
+      modelName: targetRow.ModelName,
+      deviceName: targetRow.DeviceName,
+      faultDescription: targetRow.Problem,
+      category: targetRow.Category,
+      subCategory: targetRow.SubCategory,
+      materialCode: targetRow.MaterialCode,
+      quantity: targetRow.Quantity,
+      manufactureDate: targetRow.ManufactureDate,
+      arrivalDate: targetRow.ArrivalDate,
+    })
+    if (Object.keys(effectiveUpdates).length === 0) {
+      transaction = await rollback(transaction)
+      return NextResponse.json({
+        success: true,
+        changed: false,
+        message: "信息未发生变化，无需保存",
+      })
+    }
+
     const fields: string[] = []
     const updateRequest = new sql.Request(transaction)
       .input("deviceId", sql.Int, deviceId)
@@ -402,19 +456,25 @@ export async function PUT(
       fields.push(`[${column}] = @${parameter}`)
       updateRequest.input(parameter, type, value)
     }
-    if (updates.deviceSn !== undefined) addField("DeviceSN", "deviceSn", sql.NVarChar(100), updates.deviceSn)
-    if (updates.modelName !== undefined) addField("ModelName", "modelName", sql.NVarChar(200), updates.modelName)
-    if (updates.deviceName !== undefined) addField("DeviceName", "deviceName", sql.NVarChar(200), updates.deviceName)
-    if (updates.faultDescription !== undefined) addField("Problem", "problem", sql.NVarChar(sql.MAX), updates.faultDescription)
-    if (updates.category !== undefined) addField("Category", "category", sql.NVarChar(200), updates.category)
-    if (updates.subCategory !== undefined) addField("SubCategory", "subCategory", sql.NVarChar(200), updates.subCategory)
-    if (updates.materialCode !== undefined) addField("MaterialCode", "materialCode", sql.NVarChar(100), updates.materialCode)
-    if (updates.quantity !== undefined) addField("Quantity", "quantity", sql.Int(), updates.quantity)
-    if (updates.manufactureDate !== undefined) addField(
+    if (effectiveUpdates.deviceSn !== undefined) addField("DeviceSN", "deviceSn", sql.NVarChar(100), effectiveUpdates.deviceSn)
+    if (effectiveUpdates.modelName !== undefined) addField("ModelName", "modelName", sql.NVarChar(200), effectiveUpdates.modelName)
+    if (effectiveUpdates.deviceName !== undefined) addField("DeviceName", "deviceName", sql.NVarChar(200), effectiveUpdates.deviceName)
+    if (effectiveUpdates.faultDescription !== undefined) addField("Problem", "problem", sql.NVarChar(sql.MAX), effectiveUpdates.faultDescription)
+    if (effectiveUpdates.category !== undefined) addField("Category", "category", sql.NVarChar(200), effectiveUpdates.category)
+    if (effectiveUpdates.subCategory !== undefined) addField("SubCategory", "subCategory", sql.NVarChar(200), effectiveUpdates.subCategory)
+    if (effectiveUpdates.materialCode !== undefined) addField("MaterialCode", "materialCode", sql.NVarChar(100), effectiveUpdates.materialCode)
+    if (effectiveUpdates.quantity !== undefined) addField("Quantity", "quantity", sql.Int(), effectiveUpdates.quantity)
+    if (effectiveUpdates.manufactureDate !== undefined) addField(
       "ManufactureDate",
       "manufactureDate",
       sql.DateTime2(),
-      updates.manufactureDate ? new Date(updates.manufactureDate) : null
+      effectiveUpdates.manufactureDate ? new Date(effectiveUpdates.manufactureDate) : null
+    )
+    if (effectiveUpdates.arrivalDate !== undefined) addField(
+      "ArrivalDate",
+      "arrivalDate",
+      sql.DateTime2(),
+      effectiveUpdates.arrivalDate ? new Date(effectiveUpdates.arrivalDate) : null
     )
     fields.push("[UpdatedAt] = GETUTCDATE()")
 
@@ -437,21 +497,43 @@ export async function PUT(
     }
 
     const changeDescriptions: string[] = []
-    if (updates.deviceName !== undefined) {
-      changeDescriptions.push(`产品名称：${targetRow?.DeviceName || "未填写"} → ${updates.deviceName || "未填写"}`)
+    const displayText = (value: string | null | undefined) => value?.trim() || "未填写"
+    const displayDate = (value: Date | string | null | undefined) => {
+      if (!value) return "未填写"
+      const date = value instanceof Date ? value : new Date(value)
+      return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : "未填写"
     }
-    if (updates.modelName !== undefined) {
-      changeDescriptions.push(`型号：${targetRow?.ModelName || "未填写"} → ${updates.modelName}`)
+    if (effectiveUpdates.deviceSn !== undefined) {
+      changeDescriptions.push(`设备 SN：${displayText(targetRow.DeviceSN)} → ${displayText(effectiveUpdates.deviceSn)}`)
     }
-    if (updates.category !== undefined) {
-      changeDescriptions.push(`一级分类：${targetRow?.Category || "未填写"} → ${updates.category}`)
+    if (effectiveUpdates.deviceName !== undefined) {
+      changeDescriptions.push(`产品名称：${displayText(targetRow.DeviceName)} → ${displayText(effectiveUpdates.deviceName)}`)
     }
-    if (updates.subCategory !== undefined) {
-      changeDescriptions.push(`二级分类：${targetRow?.SubCategory || "未填写"} → ${updates.subCategory}`)
+    if (effectiveUpdates.modelName !== undefined) {
+      changeDescriptions.push(`型号：${displayText(targetRow.ModelName)} → ${displayText(effectiveUpdates.modelName)}`)
     }
-    const description = changeDescriptions.length > 0
-      ? `编辑设备 ${deviceId}；${changeDescriptions.join("；")}`
-      : `编辑设备 ${deviceId}`
+    if (effectiveUpdates.category !== undefined) {
+      changeDescriptions.push(`一级分类：${displayText(targetRow.Category)} → ${displayText(effectiveUpdates.category)}`)
+    }
+    if (effectiveUpdates.subCategory !== undefined) {
+      changeDescriptions.push(`二级分类：${displayText(targetRow.SubCategory)} → ${displayText(effectiveUpdates.subCategory)}`)
+    }
+    if (effectiveUpdates.faultDescription !== undefined) {
+      changeDescriptions.push(`故障描述：${displayText(targetRow.Problem)} → ${displayText(effectiveUpdates.faultDescription)}`)
+    }
+    if (effectiveUpdates.materialCode !== undefined) {
+      changeDescriptions.push(`物料编码：${displayText(targetRow.MaterialCode)} → ${displayText(effectiveUpdates.materialCode)}`)
+    }
+    if (effectiveUpdates.quantity !== undefined) {
+      changeDescriptions.push(`数量：${targetRow.Quantity ?? "未填写"} → ${effectiveUpdates.quantity}`)
+    }
+    if (effectiveUpdates.manufactureDate !== undefined) {
+      changeDescriptions.push(`出厂日期：${displayDate(targetRow.ManufactureDate)} → ${displayDate(effectiveUpdates.manufactureDate)}`)
+    }
+    if (effectiveUpdates.arrivalDate !== undefined) {
+      changeDescriptions.push(`客户寄回日期：${displayDate(targetRow.ArrivalDate)} → ${displayDate(effectiveUpdates.arrivalDate)}`)
+    }
+    const description = `编辑设备 ${deviceId}；${changeDescriptions.join("；")}`
 
     await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
@@ -466,7 +548,7 @@ export async function PUT(
       `)
     await transaction.commit()
     transaction = null
-    return NextResponse.json({ success: true, message: "设备信息已更新" })
+    return NextResponse.json({ success: true, changed: true, message: "设备信息已更新" })
   } catch (error: unknown) {
     console.error("[Batch Devices API] 更新失败:", error)
     transaction = await rollback(transaction)

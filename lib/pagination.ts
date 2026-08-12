@@ -1,5 +1,12 @@
 export const DEFAULT_WORK_ORDER_PAGE_SIZE = 20
 
+export function parsePageParam(value: string | null | undefined): number {
+  if (!value) return 1
+
+  const page = Number(value)
+  return Number.isInteger(page) && page > 0 ? page : 1
+}
+
 function normalizePageSize(pageSize: number): number {
   return Number.isInteger(pageSize) && pageSize > 0
     ? pageSize

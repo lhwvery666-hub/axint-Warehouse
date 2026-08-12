@@ -76,8 +76,8 @@ const POST_REVIEW_STATUSES: string[] = [
 
 interface BusinessBatchReviewProps {
   batchId: string
-  onBack: () => void
-  onCompleted?: () => void
+  onBack: () => void | Promise<void>
+  onCompleted?: () => void | Promise<void>
   allowEdit?: boolean
 }
 
@@ -94,6 +94,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
   const [totalCost, setTotalCost] = useState("")
   const [clientName, setClientName] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [hasUnsavedBusinessChanges, setHasUnsavedBusinessChanges] = useState(false)
   // 根据工单状态自动判断是否为编辑模式
   // 如果状态为 BUSINESS_REVIEW（待审核），默认可编辑
   // 如果已完成审核（WAREHOUSE_SHIPPING），默认只读，需要打回才能修改
@@ -167,6 +168,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
         setIsInvoiced(result.data.isInvoiced || false)
         setTotalCost(result.data.totalCost ? result.data.totalCost.toString() : "")
         setClientName(result.data.clientName || "")
+        setHasUnsavedBusinessChanges(false)
         
         // 检测是否已有商务信息（判断是首次审核还是重新编辑）
         const hasInfo = !!(result.data.clientName || result.data.totalCost || result.data.isChargeable)
@@ -223,7 +225,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
       const result = await response.json()
       console.log("📄 [取消申请处理] 响应内容", result)
       
-      if (result.success) {
+      if (response.ok && result.success) {
         toast.success(approve ? "取消申请已批准，工单已取消" : "取消申请已拒绝")
         console.log("✅ [取消申请处理] 操作成功，重新加载数据...")
         // 重新加载数据
@@ -266,20 +268,14 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          isChargeable,
-          isPaymentReceived,
-          isInvoiced,
-          totalCost: totalCost ? parseFloat(totalCost) : null,
-          clientName: clientName.trim() || null
-        }),
+        body: JSON.stringify({}),
       })
 
       const result = await response.json()
       if (result.success) {
         toast.success(`商务审核完成，批次工单已转至仓库发货环节`)
         setIsEditMode(false)
-        onCompleted?.()
+        await onCompleted?.()
       } else {
         toast.error(result.message || "审核失败")
       }
@@ -311,6 +307,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
       const result = await response.json()
       if (result.success) {
         toast.success("商务信息已更新")
+        setHasUnsavedBusinessChanges(false)
         setIsEditMode(false)
         fetchBusinessInfo()
       } else {
@@ -389,7 +386,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
         <Info className={`h-4 w-4 ${isEditMode ? "text-blue-600" : "text-gray-600"}`} />
         <AlertDescription className={isEditMode ? "text-blue-800" : "text-gray-800"}>
           <p className="font-medium mb-1">
-            {isEditMode ? "✅ 商务审核编辑模式" : "ℹ️ 商务审核流程说明"}
+            {isEditMode ? "商务审核编辑模式" : "商务审核流程说明"}
           </p>
           <p className="text-sm">
             {isEditMode 
@@ -408,7 +405,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
           <AlertDescription>
             <div className="flex items-start justify-between">
               <div className="flex-1">
-                <p className="font-semibold text-red-900 mb-2">⚠️ 现场人员申请取消此批次工单</p>
+                <p className="font-semibold text-red-900 mb-2">现场人员申请取消此批次工单</p>
                 <p className="text-sm text-red-800 mb-2">
                   <strong>申请原因：</strong>{cancelRequestReason || "无"}
                 </p>
@@ -450,7 +447,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
             <p className="font-semibold mb-1">⏳ 等待前置流程完成</p>
             <p className="text-sm">
               {batchInfo.status === TicketStatus.CREATED && "此批次工单尚未经过仓库确认，暂时无法进行商务审核。"}
-              {batchInfo.status === TicketStatus.WAREHOUSE_CONFIRMED && "此批次工单仓库已确认，维修人员正在进行设备检测和维修，暂时无法进行商务审核。"}
+              {batchInfo.status === TicketStatus.WAREHOUSE_CONFIRMED && "此批次工单处于维修检查中，暂时无法进行商务审核。"}
               {(batchInfo.status === TicketStatus.TECHNICIAN_REPAIRING || batchInfo.status === "Technician_Repairing") && "维修人员正在进行维修，请等待维修完成后再进行商务审核。"}
             </p>
           </AlertDescription>
@@ -554,7 +551,10 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
             <Switch
               id="isChargeable"
               checked={isChargeable}
-              onCheckedChange={setIsChargeable}
+              onCheckedChange={(checked) => {
+                setIsChargeable(checked)
+                setHasUnsavedBusinessChanges(true)
+              }}
               disabled={!isEditMode}
             />
           </div>
@@ -568,7 +568,10 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                   id="totalCost"
                   type="number"
                   value={totalCost}
-                  onChange={(e) => setTotalCost(e.target.value)}
+                  onChange={(e) => {
+                    setTotalCost(e.target.value)
+                    setHasUnsavedBusinessChanges(true)
+                  }}
                   placeholder="请输入维修总费用"
                   className="font-mono"
                   disabled={!isEditMode}
@@ -580,7 +583,10 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                 <Input
                   id="clientName"
                   value={clientName}
-                  onChange={(e) => setClientName(e.target.value)}
+                  onChange={(e) => {
+                    setClientName(e.target.value)
+                    setHasUnsavedBusinessChanges(true)
+                  }}
                   placeholder="请输入客户名称"
                   disabled={!isEditMode}
                 />
@@ -594,7 +600,10 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                 <Switch
                   id="isPaymentReceived"
                   checked={isPaymentReceived}
-                  onCheckedChange={setIsPaymentReceived}
+                  onCheckedChange={(checked) => {
+                    setIsPaymentReceived(checked)
+                    setHasUnsavedBusinessChanges(true)
+                  }}
                   disabled={!isEditMode}
                 />
               </div>
@@ -607,7 +616,10 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                 <Switch
                   id="isInvoiced"
                   checked={isInvoiced}
-                  onCheckedChange={setIsInvoiced}
+                  onCheckedChange={(checked) => {
+                    setIsInvoiced(checked)
+                    setHasUnsavedBusinessChanges(true)
+                  }}
                   disabled={!isEditMode}
                 />
               </div>
@@ -640,7 +652,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                       : "开始商务审核"
                     : POST_REVIEW_STATUSES.includes(batchInfo.status)
                       ? "保存商务信息修改"
-                      : "授权发货"}
+                      : "保存信息并发送流程"}
                 </p>
                 <p className="text-sm text-muted-foreground mt-1">
                   {!isEditMode 
@@ -687,12 +699,12 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                       className="w-full md:w-auto min-w-[140px]"
                     >
                       <Save className="w-4 h-4 mr-2" />
-                      保存草稿
+                      保存信息
                     </Button>
                     <Button
                       size="lg"
                       onClick={handleConfirmBusiness}
-                      disabled={isSubmitting || (isChargeable && !totalCost)}
+                      disabled={isSubmitting || hasUnsavedBusinessChanges || (isChargeable && !totalCost)}
                       className="w-full md:w-auto min-w-[180px]"
                     >
                       {isSubmitting ? (
@@ -703,7 +715,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                       ) : (
                         <span className="flex items-center gap-2">
                           <CheckCircle className="w-4 h-4" />
-                          授权发货
+                          发送流程
                         </span>
                       )}
                     </Button>

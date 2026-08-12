@@ -5,6 +5,7 @@ import { ThemeProvider } from "@/components/theme-provider"
 import { AuthProvider } from "@/context/auth-context"
 import { RepairProvider } from "@/context/RepairContext"
 import { NotificationProvider } from "@/context/NotificationContext"
+import { Toaster } from "@/components/ui/sonner"
 import "./globals.css"
 
 export const metadata: Metadata = {
@@ -37,6 +38,7 @@ export default function RootLayout({
             <RepairProvider>
               <NotificationProvider>
                 {children}
+                <Toaster position="top-center" richColors closeButton />
                 <Analytics />
               </NotificationProvider>
             </RepairProvider>

@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Calendar as CalendarComponent } from "@/components/ui/calendar"
 import { useRepairContext } from "@/context/RepairContext"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { format, isAfter, isBefore, parseISO, subDays, subMonths } from "date-fns"
 import { cn } from "@/lib/utils"
@@ -22,7 +22,7 @@ import { getPendingStatusesForRole, calculateProgress, getCurrentStep, resolveTi
 import { TicketStatus, UserRole, normalizeTicketStatus, isTerminalStatus, TICKET_STATUS_LABELS } from "@/lib/enums"
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters } from "@/lib/repair-list-filters"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
-import { clampPage, DEFAULT_WORK_ORDER_PAGE_SIZE, paginateItems } from "@/lib/pagination"
+import { clampPage, DEFAULT_WORK_ORDER_PAGE_SIZE, paginateItems, parsePageParam } from "@/lib/pagination"
 import WorkflowProgress from "@/components/workflow-progress"
 
 interface DashboardProps {
@@ -36,8 +36,8 @@ const DASHBOARD_STATUS_FILTER = {
 } as const
 
 const DASHBOARD_STATUS_FILTER_OPTIONS = [
-  { value: DASHBOARD_STATUS_FILTER.PENDING, label: "待处理" },
-  { value: DASHBOARD_STATUS_FILTER.ACTIVE, label: "进行中（含已延期）" },
+  { value: DASHBOARD_STATUS_FILTER.PENDING, label: "待仓库确认" },
+  { value: DASHBOARD_STATUS_FILTER.ACTIVE, label: "进行中" },
 ] as const
 
 /** 计算某批次的未读消息数（与 localStorage 存储的已读数对比） */
@@ -57,7 +57,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
     // 将工单数据转换为组件需要的格式
   const [tasks, setTasks] = useState<any[]>([]);
   const [filteredTasks, setFilteredTasks] = useState<any[]>([]);
-  const [currentPage, setCurrentPage] = useState(1);
+  const [currentPage, setCurrentPage] = useState(() => parsePageParam(searchParams.get("homePage")));
   
   // 从 URL 参数恢复联合筛选状态；q 为旧版综合搜索参数的兼容入口
   const [workOrderQuery, setWorkOrderQuery] = useState(() => {
@@ -71,7 +71,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
     return searchParams.get("time") || "all";
   });
 
-  // 统计卡片联动的状态筛选："all" | "pending"（待处理） | "active"（进行中，含已延期）
+  // 统计卡片联动的状态筛选："all" | "pending"（待仓库确认） | "active"（进行中）
   // 从 URL 参数恢复，保证刷新/分享链接后筛选状态不丢失
   const [filterStatus, setFilterStatus] = useState<string>(() => {
     return searchParams.get("status") || DASHBOARD_STATUS_FILTER.ALL;
@@ -89,6 +89,47 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
     };
   });
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
+
+  const buildDashboardListUrl = useCallback(() => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("tab", "home");
+    params.delete("q");
+
+    const setOrDelete = (key: string, value: string) => {
+      if (value) {
+        params.set(key, value);
+      } else {
+        params.delete(key);
+      }
+    };
+
+    setOrDelete("workOrder", workOrderQuery.trim());
+    setOrDelete("customer", customerQuery.trim());
+    setOrDelete("device", deviceQuery.trim());
+    setOrDelete("time", filterTimeRange === "all" ? "" : filterTimeRange);
+    setOrDelete("status", filterStatus === DASHBOARD_STATUS_FILTER.ALL ? "" : filterStatus);
+    setOrDelete("homePage", currentPage === 1 ? "" : String(currentPage));
+
+    if (filterTimeRange === "custom") {
+      setOrDelete("from", dateRange.from ? format(dateRange.from, "yyyy-MM-dd") : "");
+      setOrDelete("to", dateRange.to ? format(dateRange.to, "yyyy-MM-dd") : "");
+    } else {
+      params.delete("from");
+      params.delete("to");
+    }
+
+    return `/?${params.toString()}`;
+  }, [
+    currentPage,
+    customerQuery,
+    dateRange.from,
+    dateRange.to,
+    deviceQuery,
+    filterStatus,
+    filterTimeRange,
+    searchParams,
+    workOrderQuery,
+  ]);
   
   // 弹窗状态
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -256,37 +297,8 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
   useEffect(() => {
     // 延迟更新 URL，避免在初始化时立即更新
     const timer = setTimeout(() => {
-      const params = new URLSearchParams();
-      
-      if (workOrderQuery.trim()) {
-        params.set("workOrder", workOrderQuery.trim());
-      }
-      if (customerQuery.trim()) {
-        params.set("customer", customerQuery.trim());
-      }
-      if (deviceQuery.trim()) {
-        params.set("device", deviceQuery.trim());
-      }
-      
-      if (filterTimeRange !== "all") {
-        params.set("time", filterTimeRange);
-      }
-
-      if (filterStatus !== DASHBOARD_STATUS_FILTER.ALL) {
-        params.set("status", filterStatus);
-      }
-      
-      if (filterTimeRange === "custom") {
-        if (dateRange.from) {
-          params.set("from", format(dateRange.from, "yyyy-MM-dd"));
-        }
-        if (dateRange.to) {
-          params.set("to", format(dateRange.to, "yyyy-MM-dd"));
-        }
-      }
-      
       // 使用 replace 而不是 push，避免产生过多历史记录
-      const newUrl = params.toString() ? `?${params.toString()}` : window.location.pathname;
+      const newUrl = buildDashboardListUrl();
       const currentUrl = window.location.pathname + window.location.search;
       
       // 只有当 URL 确实需要更新时才更新，避免不必要的导航
@@ -296,7 +308,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
     }, 300); // 300ms 防抖
     
     return () => clearTimeout(timer);
-  }, [workOrderQuery, customerQuery, deviceQuery, filterTimeRange, filterStatus, dateRange, router]);
+  }, [buildDashboardListUrl, router]);
 
   // 搜索、时间、状态过滤
   useEffect(() => {
@@ -311,7 +323,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
     } else if (filterStatus === DASHBOARD_STATUS_FILTER.ACTIVE) {
       filtered = filtered.filter(task => {
         const normalized = normalizeTicketStatus(task.status)
-        return normalized === TicketStatus.IN_REPAIR || normalized === TicketStatus.DELAYED
+        return normalized === TicketStatus.IN_REPAIR
       });
     }
 
@@ -327,20 +339,33 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
     setFilteredTasks(filtered);
   }, [workOrderQuery, customerQuery, deviceQuery, filterTimeRange, filterStatus, dateRange, tasks]);
 
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [workOrderQuery, customerQuery, deviceQuery, filterTimeRange, filterStatus, dateRange]);
+  const dashboardFilterSignature = [
+    workOrderQuery,
+    customerQuery,
+    deviceQuery,
+    filterTimeRange,
+    filterStatus,
+    dateRange.from?.getTime() ?? "",
+    dateRange.to?.getTime() ?? "",
+  ].join("|");
+  const previousDashboardFilterSignature = useRef(dashboardFilterSignature);
 
   useEffect(() => {
-    setCurrentPage((page) => clampPage(page, filteredTasks.length));
-  }, [filteredTasks.length]);
+    if (previousDashboardFilterSignature.current !== dashboardFilterSignature) {
+      previousDashboardFilterSignature.current = dashboardFilterSignature;
+      setCurrentPage(1);
+    }
+  }, [dashboardFilterSignature]);
+
+  useEffect(() => {
+    if (tasks.length > 0) {
+      setCurrentPage((page) => clampPage(page, filteredTasks.length));
+    }
+  }, [filteredTasks.length, tasks.length]);
 
   const paginatedTasks = paginateItems(filteredTasks, currentPage);
   
-  // ⚠️ 曾经的 bug：这里的分支没有覆盖仓库确认中/仓库已确认/仓库待发货等新流程状态，
-  // 且 ADMIN_REVIEW / PENDING_SHIPMENT 是已被 normalizeTicketStatus 归并掉的旧枚举值，永远不会命中，
-  // 导致这些状态的工单无法显示正确徽章（叠加 RepairContext 的另一个 bug后，会显示成"待处理"）。
-  // 修复：统一先用 normalizeTicketStatus 归一化，再用 TICKET_STATUS_LABELS 取文案，覆盖所有状态。
+  // 所有原始状态先归一化；历史“仓库已确认/延期”均按维修检查中展示。
   const getStatusBadge = (status: TicketStatus | string) => {
     const normalized = normalizeTicketStatus(status as string)
     if (!normalized) return null
@@ -357,13 +382,6 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
       return (
         <Badge className="bg-orange-100 text-orange-800 border-orange-300 hover:bg-orange-200">
           <Clock className="w-3 h-3 mr-1" />
-          {label}
-        </Badge>
-      )
-    } else if (normalized === TicketStatus.WAREHOUSE_CONFIRMED) {
-      return (
-        <Badge className="bg-teal-100 text-teal-800 border-teal-300 hover:bg-teal-200">
-          <CheckCircle className="w-3 h-3 mr-1" />
           {label}
         </Badge>
       )
@@ -413,13 +431,6 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
       return (
         <Badge className="bg-red-100 text-red-800 border-red-300 hover:bg-red-200">
           <AlertCircle className="w-3 h-3 mr-1" />
-          {label}
-        </Badge>
-      )
-    } else if (normalized === TicketStatus.DELAYED) {
-      return (
-        <Badge className="bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200 text-xs">
-          <Clock className="w-3 h-3 mr-1" />
           {label}
         </Badge>
       )
@@ -613,7 +624,7 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
               </p>
             </div>
             <p className="text-sm font-medium text-muted-foreground">
-              待处理{filterStatus === DASHBOARD_STATUS_FILTER.PENDING && "（已筛选，点击取消）"}
+              待仓库确认{filterStatus === DASHBOARD_STATUS_FILTER.PENDING && "（已筛选，点击取消）"}
             </p>
           </CardContent>
         </Card>
@@ -628,11 +639,11 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
             <div className="flex items-center justify-center mb-0.5">
               <Wrench className="h-4 w-4 text-warning mr-2" />
               <p className="text-2xl md:text-3xl font-bold text-warning leading-none">
-                {repairs.filter(r => r && (r.status === "processing" || r.status === "in_repair" || r.status === "delayed")).length}
+                {repairs.filter(r => r && normalizeTicketStatus(r.status) === TicketStatus.IN_REPAIR).length}
               </p>
             </div>
             <p className="text-sm font-medium text-muted-foreground">
-              进行中（含已延期）{filterStatus === DASHBOARD_STATUS_FILTER.ACTIVE && "（已筛选，点击取消）"}
+              进行中{filterStatus === DASHBOARD_STATUS_FILTER.ACTIVE && "（已筛选，点击取消）"}
             </p>
           </CardContent>
         </Card>
@@ -685,18 +696,14 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
                       reportedAt={task.reportedAt}
                       unreadCount={unread}
                       hasSignedPhoto={task.isBatch && !!task.rawData?.signedReportPhoto}
-                      delayedText={
-                        task.status === "delayed" && task.expectedCompletionDate
-                          ? `延期至 ${format(new Date(task.expectedCompletionDate), "MM-dd")}`
-                          : undefined
-                      }
                       pendingSnText={needsSupplement ? "待补录 SN" : undefined}
                       onClick={() => {
                         // 如果有批次ID（不管是批次工单还是批次中的单个设备），都跳转到批次详情页
                         // 这样可以查看批次级别的聊天和签字凭证
                         // 携带 from=home，方便详情页"返回"时能回到首页而不是被重置
                         if (task.batchId) {
-                          router.push(`/batch/${task.batchId}?from=home`);
+                          const returnTo = encodeURIComponent(buildDashboardListUrl());
+                          router.push(`/batch/${task.batchId}?from=home&returnTo=${returnTo}`);
                         } else {
                           onStartRepair(task.id);
                         }

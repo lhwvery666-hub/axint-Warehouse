@@ -1,176 +1,143 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, TicketStatus, TicketActionType, UserRole } from "@/lib/enums"
+import { TicketActionType, TicketStatus, UserRole } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
 
+const batchIdSchema = z.string().trim().min(1).max(100)
+
+interface BusinessDeviceRow {
+  Id: number
+  Status: string
+  quantity: number | null
+  IsChargeable: boolean | number | null
+  IsPaymentReceived: boolean | number | null
+  IsInvoiced: boolean | number | null
+  RepairCost: number | null
+}
+
+async function rollback(transaction: sql.Transaction | null): Promise<null> {
+  if (!transaction) return null
+  try {
+    await transaction.rollback()
+  } catch (rollbackError) {
+    console.error("[Business Confirm] 事务回滚失败:", rollbackError)
+  }
+  return null
+}
+
 // POST /api/tickets/business-confirm-batch/[batchId]
-// 商务人员确认批次工单的收款和开票
+// Advance-only endpoint: business fields must already have been saved.
 export async function POST(
-  request: Request,
-  context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
+  _request: Request,
+  context: { params: Promise<{ batchId: string }> }
 ) {
   const authResult = await checkUserRole([UserRole.ADMIN, UserRole.BUSINESS])
   if (isErrorResponse(authResult)) return authResult
 
+  let transaction: sql.Transaction | null = null
   try {
-    const body = await request.json()
-    const { isChargeable, isPaymentReceived, isInvoiced, totalCost, clientName } = body
+    const parsedBatchId = batchIdSchema.safeParse((await context.params).batchId)
+    if (!parsedBatchId.success) {
+      return NextResponse.json({ success: false, message: "批次号无效" }, { status: 400 })
+    }
+    const operatorId = Number(authResult.userId)
+    if (!Number.isSafeInteger(operatorId)) {
+      return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
+    }
 
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
-
-    const batchId = resolvedParams.batchId
-
-    if (!batchId) {
+    const batchId = parsedBatchId.data
+    const pool = await getDbConnection()
+    transaction = new sql.Transaction(pool)
+    await transaction.begin()
+    const devicesResult = await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .query<BusinessDeviceRow>(`
+        SELECT [Id], [Status], [Quantity] AS [quantity], [IsChargeable],
+               [IsPaymentReceived], [IsInvoiced], [RepairCost]
+        FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [BatchId] = @batchId AND [Status] <> 'Deleted'
+        ORDER BY [Id] ASC;
+      `)
+    const devices = devicesResult.recordset
+    if (devices.length === 0) {
+      transaction = await rollback(transaction)
+      return NextResponse.json({ success: false, message: "批次工单不存在" }, { status: 404 })
+    }
+    if (devices.some(device => device.Status !== TicketStatus.BUSINESS_REVIEW)) {
+      transaction = await rollback(transaction)
       return NextResponse.json(
-        { success: false, message: "批次号不能为空" },
+        { success: false, message: "批次状态已变化，请刷新页面后重试" },
+        { status: 409 }
+      )
+    }
+    const businessInfo = devices[0]
+    if (Boolean(businessInfo.IsChargeable) && (businessInfo.RepairCost === null || businessInfo.RepairCost < 0)) {
+      transaction = await rollback(transaction)
+      return NextResponse.json(
+        { success: false, message: "请先点击“保存信息”并填写维修费用" },
         { status: 400 }
       )
     }
 
-    // ⚠️ 任务3：发货授权与收款/开票解耦——不再因"收费但未收款"而硬阻断状态推进。
-    // 商务可以先授权发货让货物走起来，未结清的收款/开票留给"财务跟进"视图持续处理。
-
-    // 验证用户权限
-    const cookieStore = await cookies()
-    const userIdCookie = cookieStore.get("userId")?.value || null
-    if (!userIdCookie) {
+    const operatorName = authResult.realName || authResult.username
+    const updateResult = await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .input("expectedStatus", sql.NVarChar(50), TicketStatus.BUSINESS_REVIEW)
+      .input("newStatus", sql.NVarChar(50), TicketStatus.WAREHOUSE_SHIPPING)
+      .input("operatorName", sql.NVarChar(100), operatorName)
+      .query(`
+        UPDATE [dbo].[Repair_Tickets]
+        SET [Status] = @newStatus,
+            [BusinessReviewedAt] = GETUTCDATE(),
+            [BusinessReviewedBy] = @operatorName,
+            [UpdatedAt] = GETUTCDATE()
+        WHERE [BatchId] = @batchId AND [Status] = @expectedStatus;
+      `)
+    if (updateResult.rowsAffected[0] !== devices.length) {
+      transaction = await rollback(transaction)
       return NextResponse.json(
-        { success: false, message: "未登录" },
-        { status: 401 }
+        { success: false, message: "批次状态已被其他操作更新，请刷新后重试" },
+        { status: 409 }
       )
     }
 
-    const pool = await getDbConnection()
-
-    const userResult = await pool
-      .request()
-      .input("userId", userIdCookie)
+    const deviceCount = sumDeviceQuantity(devices)
+    const chargeDescription = Boolean(businessInfo.IsChargeable)
+      ? `有偿维修，${Boolean(businessInfo.IsPaymentReceived) ? "已收款" : "未收款"}，${Boolean(businessInfo.IsInvoiced) ? "已开票" : "未开票"}`
+      : "免费维修"
+    await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .input("actionType", sql.NVarChar(50), TicketActionType.BUSINESS_REVIEWED)
+      .input("operatorId", sql.Int, operatorId)
+      .input("operatorName", sql.NVarChar(100), operatorName)
+      .input("description", sql.NVarChar(sql.MAX), `商务发送流程（${chargeDescription}），共 ${deviceCount} 台设备`)
+      .input("oldStatus", sql.NVarChar(50), TicketStatus.BUSINESS_REVIEW)
+      .input("newStatus", sql.NVarChar(50), TicketStatus.WAREHOUSE_SHIPPING)
       .query(`
-        SELECT TOP 1 Role, RealName, Username
-        FROM Users
-        WHERE UserID = @userId
+        INSERT INTO [dbo].[Repair_Ticket_History] (
+          [BatchId], [ActionType], [OperatorId], [OperatorName], [Description],
+          [OldStatus], [NewStatus], [CreatedAt]
+        ) VALUES (
+          @batchId, @actionType, @operatorId, @operatorName, @description,
+          @oldStatus, @newStatus, GETUTCDATE()
+        );
       `)
 
-    if (userResult.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "用户不存在" },
-        { status: 403 }
-      )
-    }
-
-    const userRole = userResult.recordset[0].Role || ""
-    const isBusiness = userRole.toLowerCase().includes("business") || userRole === "商务" || userRole === "商务人员"
-
-    if (!isBusiness) {
-      return NextResponse.json(
-        { success: false, message: "只有商务人员可以审核批次工单" },
-        { status: 403 }
-      )
-    }
-
-    // 查询批次中的所有设备
-    const devicesResult = await pool
-      .request()
-      .input("batchId", batchId)
-      .query(`
-        SELECT ${DB_FIELDS.ID}, ${DB_FIELDS.QUANTITY} AS quantity
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-      `)
-
-    if (devicesResult.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "批次工单不存在" },
-        { status: 404 }
-      )
-    }
-    const deviceCount = sumDeviceQuantity(devicesResult.recordset)
-
-    // 更新批次中所有设备的商务审核信息和状态
-    const updatePromises = devicesResult.recordset.map(async (device: any) => {
-      return pool
-        .request()
-        .input("ticketId", device[DB_FIELDS.ID] || device.ID)
-        .input("isChargeable", isChargeable ? 1 : 0)
-        .input("isPaymentReceived", isPaymentReceived ? 1 : 0)
-        .input("isInvoiced", isInvoiced ? 1 : 0)
-        .input("totalCost", totalCost || null)
-        .input("clientName", clientName || null)
-        .input("newStatus", TicketStatus.WAREHOUSE_SHIPPING)
-        .input("updatedAt", new Date())
-        .query(`
-          UPDATE Repair_Tickets
-          SET 
-            ${DB_FIELDS.IS_CHARGEABLE} = @isChargeable,
-            ${DB_FIELDS.IS_PAYMENT_RECEIVED} = @isPaymentReceived,
-            ${DB_FIELDS.IS_INVOICED} = @isInvoiced,
-            ${DB_FIELDS.REPAIR_COST} = @totalCost,
-            ${DB_FIELDS.CLIENT_NAME} = @clientName,
-            ${DB_FIELDS.STATUS} = @newStatus,
-            ${DB_FIELDS.UPDATED_AT} = @updatedAt,
-            BusinessReviewedAt = GETUTCDATE(),
-            BusinessReviewedBy = '${userResult.recordset[0].RealName || userResult.recordset[0].Username}'
-          WHERE ${DB_FIELDS.ID} = @ticketId
-        `)
-    })
-
-    await Promise.all(updatePromises)
-
-    // 写入操作记录（仅写一条批次级别的记录）
-    try {
-      const operatorName = userResult.recordset[0].RealName || userResult.recordset[0].Username || "商务人员"
-      const chargeDesc = isChargeable
-        ? `有偿维修，收款状态：${isPaymentReceived ? "已收款" : "未收款"}，开票：${isInvoiced ? "已开票" : "未开票"}`
-        : "免费维修"
-
-      // OperatorId 必须是合法整数，否则 SQL Server INT 列报错导致日志丢失
-      const operatorIdNum = parseInt(userIdCookie, 10)
-      const safeOperatorId = isNaN(operatorIdNum) ? null : operatorIdNum
-
-      const histReq = pool
-        .request()
-        .input("batchId",      batchId)
-        .input("actionType",   TicketActionType.BUSINESS_REVIEWED)
-        .input("operatorName", operatorName)
-        .input("description",  `商务审核完成（${chargeDesc}），共 ${deviceCount} 台设备`)
-        .input("createdAt",    new Date())
-
-      if (safeOperatorId !== null) histReq.input("operatorId", safeOperatorId)
-
-      const insertSql = safeOperatorId !== null
-        ? `INSERT INTO Repair_Ticket_History (BatchId, ActionType, OperatorId, OperatorName, Description, CreatedAt)
-           VALUES (@batchId, @actionType, @operatorId, @operatorName, @description, @createdAt)`
-        : `INSERT INTO Repair_Ticket_History (BatchId, ActionType, OperatorName, Description, CreatedAt)
-           VALUES (@batchId, @actionType, @operatorName, @description, @createdAt)`
-
-      await histReq.query(insertSql)
-      console.log(`[Business Confirm] 操作记录已写入 Repair_Ticket_History`)
-    } catch (historyErr: unknown) {
-      const msg = historyErr instanceof Error ? historyErr.message : "未知错误"
-      console.error(`[Business Confirm] 写入操作记录失败（非致命）: ${msg}`)
-    }
-
+    await transaction.commit()
+    transaction = null
     return NextResponse.json({
       success: true,
-      message: `商务审核完成，共 ${deviceCount} 台设备`,
-      data: {
-        batchId,
-        deviceCount
-      }
+      message: `发送流程成功，共 ${deviceCount} 台设备进入待仓库发货`,
+      data: { batchId, deviceCount, newStatus: TicketStatus.WAREHOUSE_SHIPPING },
     })
-
-  } catch (error: any) {
-    console.error("商务审核失败:", error)
+  } catch (error: unknown) {
+    console.error("[Business Confirm] 发送流程失败:", error)
+    transaction = await rollback(transaction)
     return NextResponse.json(
-      { 
-        success: false, 
-        message: error.message || "商务审核失败" 
-      },
+      { success: false, message: "发送流程失败，请稍后重试" },
       { status: 500 }
     )
   }

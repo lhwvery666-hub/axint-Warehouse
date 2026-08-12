@@ -62,8 +62,8 @@ interface BatchInfo {
 
 interface WarehouseBatchShippingProps {
   batchId: string
-  onBack: () => void
-  onCompleted?: () => void
+  onBack: () => void | Promise<void>
+  onCompleted?: () => void | Promise<void>
   allowEdit?: boolean
 }
 
@@ -85,6 +85,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
   const [returnDate, setReturnDate] = useState<Date | null>(null)
   const [returnTrackingNum, setReturnTrackingNum] = useState("")
   const [returnQuantity, setReturnQuantity] = useState("")
+  const [hasUnsavedShippingChanges, setHasUnsavedShippingChanges] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isSavingDates, setIsSavingDates] = useState(false)
   const [manufactureDates, setManufactureDates] = useState<Record<string, Date | null>>({})
@@ -147,6 +148,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
         if (result.data.returnDate) setReturnDate(new Date(result.data.returnDate))
         if (result.data.returnTrackingNum) setReturnTrackingNum(result.data.returnTrackingNum)
         if (result.data.returnQuantity) setReturnQuantity(result.data.returnQuantity.toString())
+        setHasUnsavedShippingChanges(false)
       }
     } catch (err: any) {
       console.error("获取发货信息失败:", err)
@@ -179,7 +181,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
         body: JSON.stringify({ factoryTrackingNum: factoryTrackingInput.trim(), factoryShipDate: new Date().toISOString() }),
       })
       const result = await response.json()
-      if (result.success) {
+      if (response.ok && result.success) {
         toast.success("返厂快递单号已保存")
         await fetchBatchData()
       } else {
@@ -295,6 +297,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
       const result = await response.json()
       if (result.success) {
         toast.success(result.message || "发货信息已更新")
+        setHasUnsavedShippingChanges(false)
         setIsEditShippingMode(false)
         await fetchBatchData()
         await fetchShippingInfo()
@@ -319,27 +322,10 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
 
     setIsSubmitting(true)
     try {
-      // 先静默保存有改动的出厂日期
-      const devicesToUpdate = devices.filter(d => manufactureDates[d.id])
-      if (devicesToUpdate.length > 0) {
-        const saves = await Promise.all(
-          devicesToUpdate.map(d => saveManufactureDateForDevice(d.id, manufactureDates[d.id]!))
-        )
-        const savedQuantity = sumDeviceQuantity(
-          devicesToUpdate.filter((_, index) => saves[index]?.success)
-        )
-        console.log(`[确认发货] 出厂日期已保存 ${savedQuantity} 台`)
-      }
-
       const response = await fetch(`/api/tickets/warehouse-shipping-batch/${batchId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          shippingType,
-          returnDate: returnDate?.toISOString(),
-          returnTrackingNum: returnTrackingNum.trim(),
-          returnQuantity: parseInt(returnQuantity) || totalDeviceQuantity
-        }),
+        body: JSON.stringify({}),
       })
 
       const result = await response.json()
@@ -349,7 +335,11 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
             ? `批次设备已发回客户，共 ${totalDeviceQuantity} 台`
             : `批次设备已入库，共 ${totalDeviceQuantity} 台`
         )
-        onCompleted?.()
+        if (onCompleted) {
+          await onCompleted()
+        } else {
+          await Promise.all([fetchBatchData(), fetchShippingInfo(), fetchOperationLogs()])
+        }
       } else {
         toast.error(result.message || "操作失败")
       }
@@ -850,7 +840,10 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
           {/* 发货方式选择（首次填写 or 编辑模式下可交互）*/}
           <RadioGroup
             value={shippingType}
-            onValueChange={(value) => setShippingType(value as "return" | "stock")}
+            onValueChange={(value) => {
+              setShippingType(value as "return" | "stock")
+              setHasUnsavedShippingChanges(true)
+            }}
             disabled={!isEditShippingMode && !isShippingStage}
           >
             <div className="flex items-center space-x-2 p-4 border rounded-lg hover:bg-muted/30 cursor-pointer">
@@ -917,7 +910,10 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                       <Calendar
                         mode="single"
                         selected={returnDate || undefined}
-                        onSelect={(date) => setReturnDate(date || null)}
+                        onSelect={(date) => {
+                          setReturnDate(date || null)
+                          setHasUnsavedShippingChanges(true)
+                        }}
                         initialFocus
                         locale={zhCN}
                         captionLayout="dropdown"
@@ -937,7 +933,10 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                     min="1"
                     max={totalDeviceQuantity}
                     value={returnQuantity}
-                    onChange={(e) => setReturnQuantity(e.target.value)}
+                    onChange={(e) => {
+                      setReturnQuantity(e.target.value)
+                      setHasUnsavedShippingChanges(true)
+                    }}
                     placeholder="请输入发货数量"
                     disabled={!isEditShippingMode && !isShippingStage}
                   />
@@ -948,7 +947,10 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                   <Input
                     id="returnTrackingNum"
                     value={returnTrackingNum}
-                    onChange={(e) => setReturnTrackingNum(e.target.value)}
+                    onChange={(e) => {
+                      setReturnTrackingNum(e.target.value)
+                      setHasUnsavedShippingChanges(true)
+                    }}
                     placeholder="请输入快递单号"
                     className="font-mono"
                     disabled={!isEditShippingMode && !isShippingStage}
@@ -981,28 +983,18 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
               <CheckCircle className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
               <div>
                 <p className="font-semibold">
-                  {isEditShippingMode
-                    ? "保存发货信息修改"
-                    : isCompleted
-                      ? "发货流程已完成"
-                      : shippingType === "return"
-                        ? "完成发货并结束流程"
-                        : "完成入库并结束流程"
-                  }
+                  {isCompleted ? "发货流程已完成" : "保存信息与发送流程相互独立"}
                 </p>
                 <p className="text-sm text-muted-foreground mt-1">
-                  {isEditShippingMode
-                    ? "保存修改后的发货信息（不改变工单终态）"
-                    : shippingType === "return"
-                      ? `设备将发回客户，批次工单状态将变更为"已完成"`
-                      : `设备将入库存储，批次工单状态将变更为"已完成"`
+                  {isCompleted
+                    ? "如需修正发货资料，可进入编辑模式后单独保存"
+                    : "请先保存信息，再点击发送流程进入已完成"
                   }
                 </p>
               </div>
             </div>
 
-            {/* 发货信息保存按钮（仅在 isEditShippingMode 时）*/}
-            {isEditShippingMode ? (
+            {isCompleted && isEditShippingMode ? (
               <Button
                 size="lg"
                 onClick={handleSaveShippingInfo}
@@ -1017,17 +1009,27 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                 ) : (
                   <span className="flex items-center gap-2">
                     <Save className="w-4 h-4" />
-                    保存发货信息
+                    保存信息
                   </span>
                 )}
               </Button>
             ) : !isCompleted ? (
-              /* 确认发货/入库（终态提交）*/
+              <div className="flex w-full flex-col gap-2 md:w-auto md:flex-row">
+              <Button
+                size="lg"
+                variant="outline"
+                onClick={handleSaveShippingInfo}
+                disabled={isSubmitting || (shippingType === "return" && (!returnDate || !returnTrackingNum.trim()))}
+                className="w-full md:w-auto min-w-[150px]"
+              >
+                <Save className="mr-2 h-4 w-4" />
+                保存信息
+              </Button>
               <Button
                 size="lg"
                 onClick={handleCompleteShipping}
-                disabled={isSubmitting || (shippingType === "return" && (!returnDate || !returnTrackingNum.trim()))}
-                className="w-full md:w-auto min-w-[180px]"
+                disabled={isSubmitting || hasUnsavedShippingChanges || (shippingType === "return" && (!returnDate || !returnTrackingNum.trim()))}
+                className="w-full md:w-auto min-w-[150px]"
               >
                 {isSubmitting ? (
                   <span className="flex items-center gap-2">
@@ -1037,10 +1039,11 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                 ) : (
                   <span className="flex items-center gap-2">
                     <CheckCircle className="w-4 h-4" />
-                    {shippingType === "return" ? "确认发货" : "确认入库"}
+                    发送流程
                   </span>
                 )}
               </Button>
+              </div>
             ) : null}
           </div>
         </CardContent>

@@ -252,7 +252,7 @@ export async function GET(
         case TicketActionType.STATUS_CHANGE:
           return OperationLogType.WAREHOUSE_CONFIRMED
         case TicketActionType.BATCH_UPDATED:
-          return OperationLogType.CREATED
+          return OperationLogType.UPDATED
         case TicketActionType.MANUFACTURE_DATE_OVERRIDE:
           return OperationLogType.WAREHOUSE_CONFIRMED
         case TicketActionType.RMA_REQUEST:

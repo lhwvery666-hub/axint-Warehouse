@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { ArrowLeft, CalendarIcon, Clock, AlertCircle, FileText, Truck, MapPin, Camera, Calendar, ClockIcon, ShieldCheck, ShieldAlert, User, Wrench, Save, RefreshCw, FileCheck, CheckCircle, CheckCircle2, Pencil, ZoomIn, Download, Copy } from "lucide-react"
+import { ArrowLeft, CalendarIcon, Clock, AlertCircle, FileText, Truck, MapPin, Camera, ClockIcon, ShieldCheck, ShieldAlert, User, Wrench, Save, RefreshCw, FileCheck, CheckCircle, CheckCircle2, Pencil, ZoomIn, Download, Copy } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -23,12 +23,13 @@ import { Calendar as CalendarComponent } from "@/components/ui/calendar"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
 import { Switch } from "@/components/ui/switch"
-import { format, addDays } from "date-fns"
+import { format } from "date-fns"
 import { zhCN } from "date-fns/locale"
 import { cn } from "@/lib/utils"
 import { LOGISTICS } from "@/lib/mock-data"
 import { useNotificationContext } from "@/context/NotificationContext"
 import { useAuth } from "@/context/auth-context"
+import { useRepairContext } from "@/context/RepairContext"
 import WorkflowProgress from "@/components/workflow-progress"
 import { calculateProgress, getCurrentStep, getNextStep, STATUS_TRANSITIONS } from "@/lib/workflow-utils"
 import { UserRole, TicketStatus, normalizeTicketStatus, TERMINAL_STATUSES, WarrantyStatus, FaultCategory, RepairAction, REPAIR_ACTION_LABELS, FinalOutcome, FINAL_OUTCOME_LABELS, TICKET_STATUS_LABELS, isPendingSNPlaceholder } from "@/lib/enums"
@@ -41,13 +42,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 
 interface RepairDetailProps {
   taskId: string
-  onBack: () => void
+  onBack: () => void | Promise<void>
   inBatchMode?: boolean  // 标识是否在批次工单详情页中显示
 }
 
 export default function RepairDetail({ taskId, onBack, inBatchMode = false }: RepairDetailProps) {
   const { addNotification } = useNotificationContext();
   const { user } = useAuth();
+  const { refreshRepairs } = useRepairContext();
   
   // 获取报告人头像
   const [reporterAvatar, setReporterAvatar] = useState<string>("/placeholder-user.jpg");
@@ -97,7 +99,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
     projectLocation: "",
     repairReason: "",
     reportDate: new Date(),
-    expectedCompletionDate: addDays(new Date(), 3),
     expressCompany: "",
     trackingNumber: "",
     devicePhotos: [] as string[],
@@ -138,6 +139,7 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
   const [warrantyStatusOverride, setWarrantyStatusOverride] = useState<WarrantyStatus | null>(null)
   const [faultCategory, setFaultCategory] = useState<FaultCategory | null>(null)
   const [repairAction, setRepairAction] = useState<RepairAction | null>(null)
+  const [savedRepairAction, setSavedRepairAction] = useState<RepairAction | null>(null)
   const [repairNotes, setRepairNotes] = useState("")
   /** 故障点与处理说明合并为一个输入框，提交时同时写入 faultPoint 与 repairNotes */
   const [faultAndNotesCombined, setFaultAndNotesCombined] = useState("")
@@ -227,8 +229,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
               reporterPhone?: string
               deviceImages?: string
               damageImages?: string
-              expectedCompletionDate?: string
-              delayReason?: string
               // 新字段
               submitDate?: string
               trackingNumberIn?: string
@@ -323,12 +323,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
               映射结果: mappedStatus 
             })
             
-            // 如果后端返回了延期信息，使用后端的预计完成时间和原因
-            const expectedCompletionDateFromApi =
-              ticket.expectedCompletionDate
-                ? new Date(ticket.expectedCompletionDate)
-                : addDays(new Date(), 3)
-
             // 解析日期字段
             const parseDate = (dateStr: string | undefined) => dateStr ? new Date(dateStr) : null
             
@@ -391,7 +385,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
               projectLocation: ticket.projectLocation || "",
               repairReason: ticket.problem || "",
               reportDate: ticket.reportedAt ? new Date(ticket.reportedAt) : new Date(),
-              expectedCompletionDate: expectedCompletionDateFromApi,
               expressCompany: ticket.courierCompany || "",
               trackingNumber: ticket.trackingNumber || "",
               devicePhotos: devicePhotosFromDb,
@@ -426,6 +419,9 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
               (ticket.faultCategory as FaultCategory | null) || null
             )
             setRepairAction(
+              (ticket.repairAction as RepairAction | null) || null
+            )
+            setSavedRepairAction(
               (ticket.repairAction as RepairAction | null) || null
             )
             setRepairNotes(ticket.repairNotes || "")
@@ -471,11 +467,7 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
               returnTrackingNum: newRepairData.returnTrackingNum,
             })
 
-            // 从后端填充延期原因和报告人电话，用于展示
-            if (ticket.delayReason) {
-              setDelayReason(ticket.delayReason)
-            }
-
+            // 从后端填充报告人电话。
             if (ticket.reporterPhone) {
               setReporterPhone(ticket.reporterPhone)
             } else {
@@ -554,10 +546,15 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
     }
   }, [user]);
 
-  // 加载当前设备已保存的 finalOutcome（TECHNICIAN_REPAIRING 阶段）
+  // 加载当前设备已保存的 finalOutcome。Factory_Finished 仅兼容历史数据，
+  // 新流程在仓库移交后会直接回到 TECHNICIAN_REPAIRING。
   useEffect(() => {
     const ns = normalizeTicketStatus(repairData.status || "")
-    if (ns !== TicketStatus.TECHNICIAN_REPAIRING || !taskId) return
+    if (
+      ![TicketStatus.TECHNICIAN_REPAIRING, TicketStatus.FACTORY_FINISHED].includes(
+        ns as TicketStatus
+      ) || !taskId
+    ) return
     fetch(`/api/tickets/${taskId}/final-outcome`)
       .then(r => r.json())
       .then(result => {
@@ -709,8 +706,11 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
     }
   }
 
-  // 检查是否为复检模式（状态为 Factory_Finished）
-  const isRecheckMode = repairData.status === "Factory_Finished" || repairData.status === "factory_finished"
+  const normalizedRepairStatus = normalizeTicketStatus(repairData.status || "")
+  const isRepairingStage = [
+    TicketStatus.TECHNICIAN_REPAIRING,
+    TicketStatus.FACTORY_FINISHED,
+  ].includes(normalizedRepairStatus as TicketStatus)
   
   // 根据维修动作自动推导是否为返厂模式（RMA）
   useEffect(() => {
@@ -719,18 +719,12 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
   
   // 保存维修工作台数据
   const handleSaveRepair = async () => {
-    // 如果是复检模式，需要验证故障点
-    if (isRecheckMode && !faultAndNotesCombined.trim()) {
-      alert("复检模式需要填写故障点与处理说明")
-      return
-    }
-    
     setIsSavingRepair(true)
     try {
       const requestBody: Record<string, unknown> = {}
       
-      // 新版 RMA 流程：先保存当前设备的返厂资料，但不在资料接口里隐式改变状态；
-      // 待同批次每台设备资料完整后，再由显式工作流动作将整批原子流转到 Pending_Factory。
+      // RMA 流程：先保存当前设备的返厂资料，但不在资料接口里隐式改变状态；
+      // 保存成功后，再由显式工作流动作仅流转当前设备。
       if (isOutsourced) {
         // RMA 模式：仅保存资料，不改变状态。
         requestBody.supplierName       = repairFormData.supplierName || null
@@ -742,12 +736,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
         requestBody.fullSpec           = repairFormData.fullSpec      || null
         requestBody.faultPoint         = faultAndNotesCombined.trim() || null
         // ✅ 不再设置 requestBody.status = PENDING_FACTORY
-      } else if (isRecheckMode) {
-        // 复检模式：仅保存复检资料，后续状态流转仍由专用工作流动作完成。
-        requestBody.faultPoint = faultAndNotesCombined
-        requestBody.materialCode = repairFormData.materialCode
-        requestBody.deviceName = repairFormData.deviceName
-        requestBody.fullSpec = repairFormData.fullSpec
       } else {
         // 正常维修模式
         requestBody.materialCode = repairFormData.materialCode
@@ -780,18 +768,19 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
 
       const result = await response.json()
       if (result.success) {
+        setSavedRepairAction(repairAction)
         // 更新本地数据
-        setRepairData({
-          ...repairData,
+        setRepairData((current) => ({
+          ...current,
           ...requestBody,
           // 资料保存不改变状态，后续流转统一由专用工作流动作完成。
-          status: repairData.status,
-        })
+          status: current.status,
+        }))
         // 报告修改保存后退出编辑模式，回到只读"已提交"状态
         setIsEditingRepairAfterSubmit(false)
-        alert(isRecheckMode ? "复检记录保存成功，请执行后续工作流动作" : "维修记录保存成功")
-        // 刷新数据
-        window.location.reload()
+        alert("维修记录保存成功")
+        // 仅刷新列表上下文；当前详情页保留滚动位置和已展开区域。
+        void refreshRepairs()
       } else {
         alert(result.message || "保存失败")
       }
@@ -852,7 +841,14 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
         alert(result.message || "返厂流程操作失败")
         return false
       }
-      window.location.reload()
+      const newStatus = typeof result.data?.newStatus === "string"
+        ? result.data.newStatus
+        : action === TicketAction.REQUEST_FACTORY_REPAIR
+          ? TicketStatus.PENDING_FACTORY
+          : repairData.status
+      setRepairData((current) => ({ ...current, status: newStatus }))
+      void refreshRepairs()
+      alert(result.message || "返厂流程操作成功")
       return true
     } catch (error: unknown) {
       console.error("返厂流程操作失败:", error)
@@ -864,19 +860,30 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
   }
 
   const handleRequestFactoryRepair = async () => {
-    if (!confirm("确认将该批次全部设备提交原厂返修？请先保存每台设备的返厂方式、供应商和快递单号。")) {
+    if (normalizedRepairStatus !== TicketStatus.TECHNICIAN_REPAIRING) {
+      alert("现场签字凭证回传并进入维修作业中后，才能正式发送返厂流程。返厂资料可先保存。")
+      return
+    }
+    if (!repairData.signedReportPhoto?.trim()) {
+      alert("现场签字凭证尚未回传，当前设备不能正式发送返厂流程。")
+      return
+    }
+    if (!areFactoryDetailsSaved) {
+      alert("返厂资料尚未保存。请先点击“保存当前设备返厂资料”，保存成功后再发送流程。")
+      return
+    }
+    if (!confirm("确认将当前设备提交返厂维修？同一工单内的其他设备不会被改变。")) {
       return
     }
     await executeFactoryWorkflowAction(TicketAction.REQUEST_FACTORY_REPAIR)
   }
 
-  // 确认收到原厂寄回设备
-  const handleConfirmFactoryReceived = async () => {
-    if (!confirm("确认已收到该批次全部原厂返修设备？此操作将整批通知维修人员复检。")) {
-      return
-    }
-    await executeFactoryWorkflowAction(TicketAction.CONFIRM_FACTORY_RETURN)
-  }
+  const areFactoryDetailsSaved =
+    savedRepairAction === RepairAction.RMA &&
+    Boolean(repairData.supplierName.trim()) &&
+    Boolean(repairData.factoryTrackingNum.trim()) &&
+    repairData.supplierName.trim() === repairFormData.supplierName.trim() &&
+    repairData.factoryTrackingNum.trim() === repairFormData.factoryTrackingNum.trim()
 
   // 保存管理员工作台数据
   const handleSaveAdmin = async () => {
@@ -1285,9 +1292,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
     }
   }
 
-  // 延期申请状态
-  const [isDelayDialogOpen, setIsDelayDialogOpen] = useState(false)
-  
   // 判定报废相关状态（已迁移至批次级别，保留兼容性）
   const [isScrappedDialogOpen, setIsScrappedDialogOpen] = useState(false)
   const [scrappedReason, setScrappedReason] = useState("")
@@ -1304,85 +1308,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
   const [isCancelRequestDialogOpen, setIsCancelRequestDialogOpen] = useState(false)
   const [cancelRequestReason, setCancelRequestReason] = useState("")
   const [isSubmittingCancelRequest, setIsSubmittingCancelRequest] = useState(false)
-  const [newCompletionDate, setNewCompletionDate] = useState<Date | undefined>(undefined)
-  // 存放从后端读取到的延期原因（用于展示）
-  const [delayReason, setDelayReason] = useState("")
-  const [delayReasonError, setDelayReasonError] = useState("")
-  const [isSubmitting, setIsSubmitting] = useState(false)
-
-  // 处理延期申请提交
-  const handleDelaySubmit = async () => {
-    // 验证
-    if (!newCompletionDate) {
-      return
-    }
-    
-    if (!delayReason.trim()) {
-      setDelayReasonError("请填写延期原因")
-      return
-    }
-    setIsSubmitting(true)
-    
-    // 调用后端 API，保存延期信息并更新状态
-    try {
-      const response = await fetch(`/api/tickets/${taskId}/update`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          action: "delay",
-          id: taskId,
-          delayTo: newCompletionDate.toISOString(),
-          delayReason: delayReason.trim(),
-        }),
-      })
-
-      const result = await response.json().catch(() => ({}))
-      if (!response.ok || !result?.success) {
-        throw new Error(result?.message || "延期申请失败")
-      }
-
-      // 更新前端状态：状态改为 delayed，并更新预计完成时间和延期原因
-      setRepairData({
-        ...repairData,
-        expectedCompletionDate: newCompletionDate,
-        status: "delayed",
-      })
-
-      // 发送通知给现场报告人员，告知已延期
-      if (repairData.reporter) {
-        try {
-          addNotification({
-            type: "repair_delayed",
-            title: "维修延期通知",
-            message: `您报修的设备“${repairData.deviceName || repairData.deviceModel}”已申请延期至 ${format(
-              newCompletionDate,
-              "yyyy年MM月dd日",
-              { locale: zhCN }
-            )}`,
-            repairId: taskId,
-            deviceName: repairData.deviceName,
-            deviceModel: repairData.deviceModel,
-            status: "delayed",
-            recipient: repairData.reporter,
-          })
-        } catch (notifyError) {
-          console.error("发送延期通知失败:", notifyError)
-        }
-      }
-      
-      // 关闭对话框
-      setIsDelayDialogOpen(false)
-      // 保留 delayReason 用于处理记录展示
-      setDelayReasonError("")
-    } catch (error) {
-      console.error("延期申请失败", error)
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
-
   // 获取状态标签
   const getStatusBadge = (status: string) => {
     // 处理新状态
@@ -1405,13 +1330,12 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
         return <Badge className="bg-warning/15 text-warning-foreground border-warning/30">待处理</Badge>
       case TicketStatus.WAREHOUSE_CONFIRMING:
         return <Badge className="bg-orange-100 text-orange-800 border-orange-300">待仓库确认</Badge>
-      case TicketStatus.WAREHOUSE_CONFIRMED:
-        return <Badge className="bg-emerald-100 text-emerald-800 border-emerald-300">仓库已确认</Badge>
       case TicketStatus.IN_REPAIR:
         return <Badge className="bg-primary/15 text-primary border-primary/30">维修检查中</Badge>
       case TicketStatus.PENDING_REPORTER_CONFIRM:
         return <Badge className="bg-cyan-100 text-cyan-800 border-cyan-300">待现场确认</Badge>
       case TicketStatus.TECHNICIAN_REPAIRING:
+      case TicketStatus.FACTORY_FINISHED:
         return <Badge className="bg-indigo-100 text-indigo-800 border-indigo-300">维修作业中</Badge>
       case TicketStatus.BUSINESS_REVIEW:
         return <Badge className="bg-blue-100 text-blue-800 border-blue-300">待商务处理</Badge>
@@ -1419,8 +1343,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
         return <Badge className="bg-purple-100 text-purple-800 border-purple-300">待发货</Badge>
       case TicketStatus.COMPLETED:
         return <Badge className="bg-success/15 text-success border-success/30">已完成</Badge>
-      case TicketStatus.DELAYED:
-        return <Badge className="bg-destructive/15 text-destructive border-destructive/30">已申请延期</Badge>
       case TicketStatus.UNREPAIRABLE:
         return <Badge className="bg-red-100 text-red-800 border-red-300">无法维修</Badge>
       default:
@@ -1478,9 +1400,8 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
         <WorkflowProgress ticket={repairData} showDetails={true} />
         
         {/* 工作流操作栏（动作驱动）
-            ⚠️ 维修人员在 IN_REPAIR 状态下的"发送报告"动作已移至批次维修报告编辑页面
-            （repairs/edit/[batchId]），此处不再重复显示，避免操作入口混乱。
-            其他角色（现场人员上传签字、商务审核）仍正常显示。
+            "发送维修报告至现场确认"是整批动作，只能在批次维修报告页面执行。
+            单设备详情仅保存当前设备的维修/复检结果；其他角色动作仍正常显示。
         */}
         {!inBatchMode && user && !(
           user.role === UserRole.TECHNICIAN &&
@@ -1504,31 +1425,19 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
               name: user?.realName || "未知用户",
               role: (user?.role ?? UserRole.TECHNICIAN) as UserRole,
             }}
-            onActionSuccess={() => {
-              // 刷新工单数据
+            onActionSuccess={async () => {
+              // 同时刷新详情和全局列表，避免返回后仍显示旧状态。
+              await refreshRepairs();
               loadTicketData();
             }}
             excludedActions={[
+              TicketAction.SEND_REPORT_FOR_SIGN,
               TicketAction.REQUEST_FACTORY_REPAIR,
               TicketAction.CONFIRM_FACTORY_RETURN,
             ]}
           />
         )}
         
-        {/* 只有维修工程师才能看到延期按钮 */}
-        {(user?.role === UserRole.TECHNICIAN && (repairData.status === "in_repair" || repairData.status === "processing")) && (
-          <div className="flex justify-end mb-4">
-            <Button 
-              variant="outline" 
-              size="sm" 
-              onClick={() => setIsDelayDialogOpen(true)}
-              className="text-muted-foreground"
-            >
-              <Calendar className="w-4 h-4 mr-2" />
-              申请延期
-            </Button>
-          </div>
-        )}
         <Tabs defaultValue="workbench" className="w-full">
           <TabsList className="grid w-full max-w-3xl grid-cols-2">
             <TabsTrigger value="workbench">工作台</TabsTrigger>
@@ -1752,8 +1661,7 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                          !isEditingRepairAfterSubmit) ||
                         // 现场已签字、进入选择最终处理结果阶段（Technician_Repairing），维修内容只读，
                         // 仅"最终处理结果"卡片通过 pointer-events-auto 保持可交互
-                        (user?.role === UserRole.TECHNICIAN &&
-                         normalizeTicketStatus(repairData.status || "") === TicketStatus.TECHNICIAN_REPAIRING)
+                        (user?.role === UserRole.TECHNICIAN && isRepairingStage)
                         ) && "pointer-events-none opacity-75"
                       )}>
                         {/* SN 码非强制项软提醒：不阻塞表单编辑，仅提示核实。
@@ -1850,12 +1758,12 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                           </div>
                         )}
                         
-                        {/* 复检模式提示 */}
-                        {isRecheckMode && (
+                        {/* 历史 Factory_Finished 数据按“维修作业中”继续处理。 */}
+                        {normalizedRepairStatus === TicketStatus.FACTORY_FINISHED && (
                           <Alert className="mb-4 border-orange-200 bg-orange-50">
                             <AlertCircle className="h-4 w-4 text-orange-600" />
                             <AlertDescription className="text-orange-800">
-                              设备已从原厂返回，请进行最终检测并录入维修结果。
+                              设备已从原厂返回，当前按维修作业中处理，请完成最终检查并确认处理结果。
                             </AlertDescription>
                           </Alert>
                         )}
@@ -1920,17 +1828,11 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                                 id="faultAndNotes"
                                 value={faultAndNotesCombined}
                                 onChange={(e) => setFaultAndNotesCombined(e.target.value)}
-                                placeholder={
-                                  isRecheckMode
-                                    ? "请描述复检结果、故障点及处理过程..."
-                                    : "请描述故障点与本次维修过程、使用的手段、替换的部件等（可合并填写）..."
-                                }
+                                placeholder="请描述故障点与本次维修过程、使用的手段、替换的部件等（可合并填写）..."
                                 className="min-h-[120px]"
                               />
                               <p className="text-xs text-muted-foreground">
-                                {isRecheckMode
-                                  ? '填写完成后，请通过下方"工作流操作栏"发送维修报告至现场确认'
-                                  : '填写完成后，请通过下方"工作流操作栏"发送维修报告至现场确认'}
+                                请先保存当前设备的维修结果；批次内全部设备完成后，再到批次维修报告页面统一发送流程。
                               </p>
                             </div>
 
@@ -1999,24 +1901,41 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                                   [TicketStatus.IN_REPAIR, TicketStatus.TECHNICIAN_REPAIRING].includes(
                                     normalizeTicketStatus(repairData.status) as TicketStatus
                                   ) && (
-                                  <div className="pointer-events-auto space-y-2 border-t pt-3">
+                                  <div className="pointer-events-auto space-y-3 border-t pt-3">
                                     <p className="text-xs text-muted-foreground">
-                                      请先保存本批次每台设备的返厂资料，再执行整批状态流转。
+                                      {normalizedRepairStatus === TicketStatus.TECHNICIAN_REPAIRING
+                                        ? "现场签字凭证已回传。先确认返厂资料已保存，再发送当前设备进入返厂流程；同一工单内其他设备不受影响。"
+                                        : "返厂资料可以提前保存；现场签字凭证回传并进入维修作业中后，才会开放正式发送返厂流程。"}
                                     </p>
-                                    <Button
-                                      type="button"
-                                      variant="outline"
-                                      onClick={handleRequestFactoryRepair}
-                                      disabled={
-                                        isSavingRepair ||
-                                        isSubmittingFactoryAction ||
-                                        !repairFormData.supplierName.trim() ||
-                                        !repairFormData.factoryTrackingNum.trim()
-                                      }
-                                    >
-                                      <Truck className="mr-2 h-4 w-4" />
-                                      {isSubmittingFactoryAction ? "提交中..." : "提交整批返厂申请"}
-                                    </Button>
+                                    <div className="flex flex-wrap gap-2">
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        onClick={handleSaveRepair}
+                                        disabled={
+                                          isSavingRepair ||
+                                          isSubmittingFactoryAction
+                                        }
+                                      >
+                                        <Save className="mr-2 h-4 w-4" />
+                                        {isSavingRepair ? "保存中..." : "保存当前设备返厂资料"}
+                                      </Button>
+                                      {normalizedRepairStatus === TicketStatus.TECHNICIAN_REPAIRING && (
+                                        <Button
+                                          type="button"
+                                          onClick={handleRequestFactoryRepair}
+                                          disabled={
+                                            isSavingRepair ||
+                                            isSubmittingFactoryAction ||
+                                            !areFactoryDetailsSaved ||
+                                            !repairData.signedReportPhoto?.trim()
+                                          }
+                                        >
+                                          <Truck className="mr-2 h-4 w-4" />
+                                          {isSubmittingFactoryAction ? "提交中..." : "发送当前设备返厂流程"}
+                                        </Button>
+                                      )}
+                                    </div>
                                   </div>
                                 )}
                               </div>
@@ -2108,29 +2027,21 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                         </Card>
                         {/* 保存按钮：TECHNICIAN_REPAIRING 阶段维修内容已锁定，隐藏此按钮，
                             仅通过下方"最终处理结果"卡片操作 */}
-                        {!(user?.role === UserRole.TECHNICIAN &&
-                            normalizeTicketStatus(repairData.status || "") === TicketStatus.TECHNICIAN_REPAIRING) && (
+                        {!(user?.role === UserRole.TECHNICIAN && isRepairingStage) && (
                           <div className="flex justify-end pt-4 border-t">
                             <Button 
                               onClick={handleSaveRepair} 
-                              disabled={
-                                isSavingRepair || 
-                                (isRecheckMode && !faultAndNotesCombined.trim())
-                              }
+                              disabled={isSavingRepair}
                             >
                               <Save className="w-4 h-4 mr-2" />
-                              {isSavingRepair 
-                                ? "保存中..." 
-                                : isRecheckMode
-                                  ? "维修完成 (复检通过)"
-                                  : "保存维修记录"}
+                              {isSavingRepair ? "保存中..." : "保存维修记录"}
                             </Button>
                           </div>
                         )}
 
                         {/* ── TECHNICIAN_REPAIRING 阶段：维修内容只读提示 ─────────────── */}
                         {user?.role === UserRole.TECHNICIAN &&
-                          normalizeTicketStatus(repairData.status) === TicketStatus.TECHNICIAN_REPAIRING && (
+                          isRepairingStage && (
                           <Alert className="mb-2 border-indigo-300 bg-indigo-50 pointer-events-auto">
                             <CheckCircle2 className="h-4 w-4 text-indigo-600" />
                             <AlertDescription className="text-indigo-800">
@@ -2140,9 +2051,9 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                           </Alert>
                         )}
 
-                        {/* ── 最终处理结果（仅 TECHNICIAN_REPAIRING 阶段可见）──────────── */}
+                        {/* ── 最终处理结果（维修作业中可见；兼容历史 Factory_Finished）── */}
                         {user?.role === UserRole.TECHNICIAN &&
-                          normalizeTicketStatus(repairData.status) === TicketStatus.TECHNICIAN_REPAIRING && (
+                          isRepairingStage && (
                           <Card className="border-2 border-indigo-300 bg-indigo-50/50 mt-4 pointer-events-auto">
                             <CardHeader className="pb-2">
                               <CardTitle className="text-base font-semibold text-indigo-800 flex items-center gap-2">
@@ -2342,13 +2253,9 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                                   <Save className="w-4 h-4 mr-2" />
                                   保存返厂物流信息
                                 </Button>
-                                <Button 
-                                  onClick={handleConfirmFactoryReceived}
-                                  disabled={isSavingAdmin || isSubmittingFactoryAction}
-                                >
-                                  <Truck className="w-4 h-4 mr-2" />
-                                  确认收到原厂寄回设备
-                                </Button>
+                                <p className="self-center text-sm text-muted-foreground">
+                                  收货移交请由仓库在“待移交”列表按单台设备确认
+                                </p>
                               </div>
                           )}
                         </div>
@@ -2368,7 +2275,7 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                                 )} />
                                 <div>
                                   <p className="font-semibold text-sm">
-                                    {repairData.warrantyStatus === "InWarranty" ? "✅ 在保修期内" : "⚠️ 已过保修期"}
+                                    {repairData.warrantyStatus === "InWarranty" ? "在保修期内" : "已过保修期"}
                                   </p>
                                   <p className="text-xs text-muted-foreground mt-0.5">
                                     出厂日期：{format(new Date(repairData.manufactureDate), "yyyy-MM-dd", { locale: zhCN })}
@@ -2764,103 +2671,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                   </span>
                 ) : (
                   "确认补录"
-                )}
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-
-        {/* 延期申请对话框 - 只有维修工程师可以看到 */}
-        <Dialog open={isDelayDialogOpen} onOpenChange={setIsDelayDialogOpen}>
-          <DialogContent className="sm:max-w-[425px]">
-            <DialogHeader>
-              <DialogTitle>申请延期</DialogTitle>
-              <DialogDescription>
-                请选择新的预计完成时间并填写延期原因
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-4 py-4">
-              <div className="space-y-2">
-                <Label htmlFor="newCompletionDate">新的预计完成时间</Label>
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <Button
-                      id="newCompletionDate"
-                      variant="outline"
-                      className={cn(
-                        "w-full justify-start text-left font-normal",
-                        !newCompletionDate && "text-muted-foreground"
-                      )}
-                    >
-                      <CalendarIcon className="mr-2 h-4 w-4" />
-                      {newCompletionDate ? (
-                        format(newCompletionDate, "yyyy年MM月dd日", { locale: zhCN })
-                      ) : (
-                        <span>选择日期</span>
-                      )}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0" align="start">
-                    <CalendarComponent
-                      mode="single"
-                      selected={newCompletionDate}
-                      onSelect={setNewCompletionDate}
-                      initialFocus
-                      disabled={(date) => 
-                        date < new Date() || 
-                        date <= repairData.expectedCompletionDate
-                      }
-                      locale={zhCN}
-                      captionLayout="dropdown"
-                      fromYear={2010}
-                      toYear={new Date().getFullYear() + 5}
-                    />
-                  </PopoverContent>
-                </Popover>
-                {!newCompletionDate && (
-                  <p className="text-xs text-muted-foreground">
-                    必须选择晚于当前预计完成时间的日期
-                  </p>
-                )}
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="delayReason">延期原因</Label>
-                <Textarea
-                  id="delayReason"
-                  value={delayReason}
-                  onChange={(e) => {
-                    setDelayReason(e.target.value)
-                    if (e.target.value.trim()) {
-                      setDelayReasonError("")
-                    }
-                  }}
-                  placeholder="请详细说明延期原因..."
-                  className={cn(
-                    "resize-none",
-                    delayReasonError && "border-destructive focus-visible:ring-destructive"
-                  )}
-                />
-                {delayReasonError && (
-                  <p className="text-xs text-destructive flex items-center gap-1">
-                    <AlertCircle className="h-3 w-3" />
-                    {delayReasonError}
-                  </p>
-                )}
-              </div>
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setIsDelayDialogOpen(false)}>取消</Button>
-              <Button 
-                onClick={handleDelaySubmit} 
-                disabled={isSubmitting || !newCompletionDate || !delayReason.trim()}
-              >
-                {isSubmitting ? (
-                  <span className="flex items-center gap-2">
-                    <span className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
-                    提交中...
-                  </span>
-                ) : (
-                  "确认更改"
                 )}
               </Button>
             </DialogFooter>

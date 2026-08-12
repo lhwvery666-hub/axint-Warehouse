@@ -30,6 +30,7 @@ import { RepairStatusTimeline } from "@/components/repair-status-timeline"
 import BatchInfoEditor from "@/components/batch-info-editor"
 import RepairForm from "@/components/repair-form"
 import { useAuth } from "@/context/auth-context"
+import { useRepairContext } from "@/context/RepairContext"
 import { UserRole, TicketStatus, OperationLogType, normalizeTicketStatus, TERMINAL_STATUSES, REPAIR_ACTION_LABELS, RepairAction, FinalOutcome, FINAL_OUTCOME_LABELS, TICKET_STATUS_LABELS } from "@/lib/enums"
 import { format } from "date-fns"
 import { zhCN } from "date-fns/locale"
@@ -41,7 +42,7 @@ import { canEditDeviceIdentity } from "@/lib/device-identity-permissions"
 
 interface BatchWorkOrderDetailProps {
   batchId: string
-  onBack: () => void
+  onBack: () => void | Promise<void>
 }
 
 interface Device {
@@ -92,15 +93,29 @@ interface OperationLog {
   description: string
 }
 
+function isRepairingWorkStatus(status: string | null | undefined): boolean {
+  const normalizedStatus = normalizeTicketStatus(status || "")
+  return [
+    TicketStatus.TECHNICIAN_REPAIRING,
+    TicketStatus.FACTORY_FINISHED,
+  ].includes(normalizedStatus as TicketStatus)
+}
+
 export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrderDetailProps) {
   const router = useRouter()
   const { user } = useAuth()
+  const { refreshRepairs } = useRepairContext()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [batchInfo, setBatchInfo] = useState<BatchInfo | null>(null)
   const [devices, setDevices] = useState<Device[]>([])
   const [operationLogs, setOperationLogs] = useState<OperationLog[]>([])
   const [isCompletingRepair, setIsCompletingRepair] = useState(false)
+  const areAllDevicesInRepairingStage =
+    devices.length > 0 && devices.every((device) => isRepairingWorkStatus(device.status))
+  const hasPendingFactoryDevice = devices.some(
+    (device) => normalizeTicketStatus(device.status || "") === TicketStatus.PENDING_FACTORY
+  )
   
   // 已取消工单的操作状态
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
@@ -110,7 +125,12 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
   // 编辑工单对话框（现场人员统一编辑整个批次）
   const [isEditBatchDialogOpen, setIsEditBatchDialogOpen] = useState(false)
   const [editingIdentityDevice, setEditingIdentityDevice] = useState<Device | null>(null)
-  const [identityForm, setIdentityForm] = useState({ deviceName: "", modelName: "" })
+  const [identityForm, setIdentityForm] = useState({
+    category: "",
+    subCategory: "",
+    deviceName: "",
+    modelName: "",
+  })
   const [isSavingIdentity, setIsSavingIdentity] = useState(false)
 
   // 签字凭证上传状态（现场人员在 PENDING_REPORTER_CONFIRM 阶段使用）
@@ -278,7 +298,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
 
   // 完成维修（维修人员）
   const handleCompleteRepair = async () => {
-    const confirmed = window.confirm(`确认完成批次工单的维修工作吗？\n\n完成后，批次工单将流转至商务审核环节。`)
+    const confirmed = window.confirm(`确认发送本批次流程吗？\n\n系统会检查是否收费，并流转至商务审核或仓库发货。`)
     if (!confirmed) return
 
     setIsCompletingRepair(true)
@@ -291,9 +311,9 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
       })
 
       const result = await response.json()
-      if (result.success) {
-        toast.success(`维修工作已完成，批次工单已流转至商务审核`)
-        fetchBatchDevices()
+      if (response.ok && result.success) {
+        toast.success(`处理结果已发送，系统已按收费情况进入下一流程`)
+        await Promise.all([fetchBatchDevices(), fetchOperationLogs(), refreshRepairs()])
       } else {
         toast.error(result.message || "操作失败")
       }
@@ -322,7 +342,8 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
         toast.success(`批次工单已删除，共删除 ${result.data.deletedCount} 台设备`)
         setIsDeleteDialogOpen(false)
         // 返回列表
-        onBack()
+        await refreshRepairs()
+        await onBack()
       } else {
         toast.error(result.message || "删除失败")
       }
@@ -338,6 +359,8 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
   const openDeviceIdentityEditor = (device: Device) => {
     setEditingIdentityDevice(device)
     setIdentityForm({
+      category: device.category || "",
+      subCategory: device.subCategory || "",
       deviceName: device.deviceName || "",
       modelName: device.modelName || "",
     })
@@ -345,10 +368,23 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
 
   const handleSaveDeviceIdentity = async () => {
     if (!editingIdentityDevice) return
+    const category = identityForm.category.trim()
+    const subCategory = identityForm.subCategory.trim()
     const deviceName = identityForm.deviceName.trim()
     const modelName = identityForm.modelName.trim()
-    if (!deviceName || !modelName) {
-      toast.error("产品名称和型号不能为空")
+    if (!category || !subCategory || !deviceName || !modelName) {
+      toast.error("一级分类、二级分类、产品名称和型号不能为空")
+      return
+    }
+
+    const hasChanges =
+      category !== (editingIdentityDevice.category || "").trim()
+      || subCategory !== (editingIdentityDevice.subCategory || "").trim()
+      || deviceName !== (editingIdentityDevice.deviceName || "").trim()
+      || modelName !== (editingIdentityDevice.modelName || "").trim()
+    if (!hasChanges) {
+      toast.info("信息未发生变化，无需保存")
+      setEditingIdentityDevice(null)
       return
     }
 
@@ -359,20 +395,23 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           deviceId: Number(editingIdentityDevice.id),
-          updates: { deviceName, modelName },
+          updates: { category, subCategory, deviceName, modelName },
         }),
       })
       const result = await response.json().catch(() => null) as {
         success?: boolean
         message?: string
+        changed?: boolean
       } | null
       if (!response.ok || !result?.success) {
         throw new Error(result?.message || "保存失败")
       }
 
-      toast.success("产品名称和型号已更新")
+      toast.success(result.changed === false ? "信息未发生变化，无需保存" : "设备分类、产品名称和型号已更新")
       setEditingIdentityDevice(null)
-      await Promise.all([fetchBatchDevices(), fetchOperationLogs()])
+      if (result.changed !== false) {
+        await Promise.all([fetchBatchDevices(), fetchOperationLogs()])
+      }
     } catch (saveError: unknown) {
       const message = saveError instanceof Error ? saveError.message : "保存失败"
       toast.error(message)
@@ -394,9 +433,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
   }
 
   /**
-   * 提交签字凭证：
-   * 直接交给 reporter-confirm 安全上传并在同一业务动作中写入关联，
-   * 避免先上传后确认失败产生孤立文件。
+   * 保存签字凭证：只写入附件，不改变流程状态。
    */
   const handleUploadSignature = async () => {
     if (!signatureFile) return
@@ -416,7 +453,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
         return
       }
 
-      toast.success("签字凭证已上传，工单已推进至维修阶段")
+      toast.success("签字凭证已保存，请确认无误后点击“发送流程”")
       // 重置上传状态
       setSignatureFile(null)
       if (signaturePreview) {
@@ -424,8 +461,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
         setSignaturePreview(null)
       }
       // 刷新页面数据
-      fetchBatchDevices()
-      fetchOperationLogs()
+      await Promise.all([fetchBatchDevices(), fetchOperationLogs()])
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "操作失败，请重试"
       console.error("[签字凭证上传] 失败:", err)
@@ -435,7 +471,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
     }
   }
 
-  // ── 使用已有签字凭证重新发送流程（流程回退后已有照片时使用）──────────────────
+  // ── 使用已保存的签字凭证显式发送流程 ─────────────────────────────
   const [isReconfirming, setIsReconfirming] = useState(false)
 
   const handleReconfirmWithExistingPhoto = async () => {
@@ -444,6 +480,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
     try {
       const confirmForm = new FormData()
       confirmForm.append("reuseExistingPhoto", "true")
+      confirmForm.append("advanceFlow", "true")
 
       const confirmRes = await fetch(`/api/tickets/reporter-confirm/${batchId}`, {
         method: "PUT",
@@ -456,9 +493,8 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
         return
       }
 
-      toast.success("已使用原签字凭证重新发送，工单已推进至维修阶段")
-      fetchBatchDevices()
-      fetchOperationLogs()
+      toast.success("发送流程成功，工单已进入维修作业阶段")
+      await Promise.all([fetchBatchDevices(), fetchOperationLogs(), refreshRepairs()])
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "操作失败，请重试"
       console.error("[重新确认签字] 失败:", err)
@@ -483,6 +519,10 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
   const getStatusBadge = (status: string) => {
     const normalizedStatus = normalizeTicketStatus(status || "")
     if (!normalizedStatus) return null
+    const displayLabel = user?.role === UserRole.REPORTER &&
+      normalizedStatus === TicketStatus.TECHNICIAN_REPAIRING
+      ? "维修中"
+      : TICKET_STATUS_LABELS[normalizedStatus]
 
     const classNameMap: Partial<Record<TicketStatus, string>> = {
       [TicketStatus.CREATED]: "bg-yellow-100 text-yellow-800 border-yellow-300",
@@ -491,6 +531,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
       [TicketStatus.IN_REPAIR]: "bg-blue-100 text-blue-800 border-blue-300",
       [TicketStatus.PENDING_REPORTER_CONFIRM]: "bg-cyan-100 text-cyan-800 border-cyan-300",
       [TicketStatus.TECHNICIAN_REPAIRING]: "bg-indigo-100 text-indigo-800 border-indigo-300",
+      [TicketStatus.FACTORY_FINISHED]: "bg-indigo-100 text-indigo-800 border-indigo-300",
       [TicketStatus.BUSINESS_REVIEW]: "bg-purple-100 text-purple-800 border-purple-300",
       [TicketStatus.WAREHOUSE_SHIPPING]: "bg-green-100 text-green-800 border-green-300",
       [TicketStatus.COMPLETED]: "bg-green-100 text-green-800 border-green-300",
@@ -503,7 +544,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
 
     return (
       <Badge variant="outline" className={classNameMap[normalizedStatus] || "bg-muted text-muted-foreground border-border"}>
-        {TICKET_STATUS_LABELS[normalizedStatus]}
+        {displayLabel}
       </Badge>
     )
   }
@@ -580,7 +621,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
           <AlertCircle className="h-5 w-5 text-red-600" />
           <AlertDescription>
             <p className="font-semibold text-red-900 mb-3">
-              ⚠️ 此批次工单已被取消
+              此批次工单已被取消
             </p>
             <p className="text-sm text-red-800 mb-4">
               您可以选择删除此工单（不保留数据），或修改信息后重新提交。
@@ -641,7 +682,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                       <FileText className="w-4 h-4 mr-2" />
                       编辑维修报告（等待仓库确认）
                     </Button>
-                  ) : batchInfo?.status === TicketStatus.TECHNICIAN_REPAIRING ? (
+                  ) : areAllDevicesInRepairingStage ? (
                     (() => {
                       // 一条明细可能代表多台设备，必须按 Quantity 汇总，而不是统计明细行数
                       const pendingCount = sumDeviceQuantity(devices.filter(d => !d.finalOutcome))
@@ -650,7 +691,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                         <div className="flex flex-col items-end gap-1">
                           {hasBlocked && (
                             <p className="text-xs text-destructive font-medium">
-                              ⚠️ 还有 {pendingCount} 台设备未选择最终处理结果，请在各设备详情页完成选择后再提交整批工单。
+                              还有 {pendingCount} 台设备未选择最终处理结果，请在各设备详情页完成选择后再提交整批工单。
                             </p>
                           )}
                           <Button
@@ -667,13 +708,18 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                             ) : (
                               <>
                                 <CheckCircle className="w-4 h-4 mr-2" />
-                                提交全部处理结果
+                                发送流程
                               </>
                             )}
                           </Button>
                         </div>
                       )
                     })()
+                  ) : hasPendingFactoryDevice ? (
+                    <Button variant="outline" disabled className="opacity-60">
+                      <FileText className="w-4 h-4 mr-2" />
+                      等待返厂设备由仓库移交
+                    </Button>
                   ) : (
                     <Button
                       variant="outline"
@@ -695,8 +741,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
               {/* 编辑工单：仅现场人员可以编辑，且只在维修人员介入之前（仓库确认阶段及之前）才允许修改 */}
               {user?.role === UserRole.REPORTER && (
                 batchInfo?.status === TicketStatus.CREATED ||
-                batchInfo?.status === TicketStatus.WAREHOUSE_CONFIRMING ||
-                batchInfo?.status === TicketStatus.WAREHOUSE_CONFIRMED
+                batchInfo?.status === TicketStatus.WAREHOUSE_CONFIRMING
               ) && (
                 <Button
                   variant="outline"
@@ -779,12 +824,12 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
         </Alert>
       )}
 
-      {/* 仓库已确认，待维修检查 */}
-      {batchInfo && batchInfo.status === TicketStatus.WAREHOUSE_CONFIRMED && user?.role === UserRole.TECHNICIAN && (
+      {/* 历史中间状态按维修检查中继续处理，不再对员工暴露“仓库已确认”。 */}
+      {batchInfo && normalizeTicketStatus(batchInfo.status) === TicketStatus.IN_REPAIR && user?.role === UserRole.TECHNICIAN && (
         <Alert className="border-blue-200 bg-blue-50">
           <Info className="h-4 w-4 text-blue-600" />
           <AlertDescription className="text-blue-800">
-            <p className="font-medium mb-2">仓库已确认，可以开始检查</p>
+            <p className="font-medium mb-2">当前处于维修检查中</p>
             <p className="text-sm">
               出厂日期已填写，保修状态已确认。请点击"编辑维修报告"开始检查设备并填写维修方案。
             </p>
@@ -817,10 +862,10 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
               /* 已有签字凭证（流程回退场景） */
               <>
                 <p className="text-sm text-amber-900 font-medium">
-                  检测到此批次已有签字凭证（可能因仓库重新核对出厂日期导致流程回退）。
+                  此批次已保存签字凭证，请确认凭证内容无误。
                 </p>
                 <p className="text-sm text-amber-800">
-                  如签字内容仍有效，可直接使用原凭证发送流程；如需重新签字，可滚动至底部重新上传。
+                  点击“发送流程”后工单才会进入维修作业阶段；保存凭证本身不会改变状态。
                 </p>
                 <div className="flex gap-3 pt-1">
                   <Button
@@ -831,7 +876,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                   >
                     {isReconfirming
                       ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />发送中...</>
-                      : <><CheckCircle className="w-4 h-4 mr-2" />使用原签字凭证，发送流程</>
+                      : <><CheckCircle className="w-4 h-4 mr-2" />发送流程</>
                     }
                   </Button>
                   <Button
@@ -886,13 +931,13 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
       )}
 
       {/* 维修进行中 */}
-      {batchInfo && batchInfo.status === TicketStatus.TECHNICIAN_REPAIRING && user?.role === UserRole.TECHNICIAN && (
+      {batchInfo && areAllDevicesInRepairingStage && user?.role === UserRole.TECHNICIAN && (
         <Alert className="border-indigo-200 bg-indigo-50">
           <CheckCircle className="h-4 w-4 text-indigo-600" />
           <AlertDescription className="text-indigo-800">
             <p className="font-medium mb-2">现场已签字，可以开始维修</p>
             <p className="text-sm">
-              签字凭证已收到，请查看下方签字照片。维修完成后，点击"完成维修"按钮流转至商务审核。
+              签字凭证已收到，请查看下方签字照片。所有设备完成维修并保存最终处理结果后，点击“发送流程”继续流转。
             </p>
           </AlertDescription>
         </Alert>
@@ -1025,7 +1070,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                       {user?.role === UserRole.TECHNICIAN && (
                         <TableCell>
                           {/* TECHNICIAN_REPAIRING 阶段：显示最终处理结果 */}
-                          {normalizeTicketStatus(batchInfo?.status || "") === TicketStatus.TECHNICIAN_REPAIRING ? (
+                          {isRepairingWorkStatus(device.status) ? (
                             device.finalOutcome ? (
                               <Badge className={
                                 device.finalOutcome === FinalOutcome.COMPLETED
@@ -1045,11 +1090,11 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                             /* 其他阶段：显示维修动作 */
                             device.repairAction ? (
                               <Badge className="bg-green-100 text-green-800 border-green-300 hover:bg-green-100">
-                                🟢 {REPAIR_ACTION_LABELS[device.repairAction as RepairAction] ?? device.repairAction}
+                                {REPAIR_ACTION_LABELS[device.repairAction as RepairAction] ?? device.repairAction}
                               </Badge>
                             ) : (
                               <Badge variant="secondary" className="text-muted-foreground">
-                                ⚪ 待处理
+                                待处理
                               </Badge>
                             )
                           )}
@@ -1362,7 +1407,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                         <p className="font-medium text-cyan-900">需要上传签字凭证</p>
                         <p className="text-sm text-cyan-700">
                           维修工程师已提交维修报告并等待您确认。请打印报告，让客户签字后拍照上传，
-                          工单将自动推进至维修阶段。
+                          先保存签字凭证，确认无误后再点击“发送流程”。
                         </p>
                       </div>
                     </div>
@@ -1419,7 +1464,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                     )}
                   </div>
 
-                  {/* 提交按钮 */}
+                  {/* 保存按钮：上传只保存凭证，不隐式流转 */}
                   <Button
                     className="w-full bg-cyan-600 hover:bg-cyan-700 text-white"
                     size="lg"
@@ -1434,7 +1479,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                     ) : (
                       <>
                         <Upload className="mr-2 h-4 w-4" />
-                        确认并上传凭证
+                        保存信息
                       </>
                     )}
                   </Button>
@@ -1538,7 +1583,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
           <Alert className="border-red-200 bg-red-50">
             <AlertCircle className="h-4 w-4 text-red-600" />
             <AlertDescription className="text-red-800 text-sm">
-              <p className="font-medium mb-1">⚠️ 警告</p>
+              <p className="font-medium mb-1">警告</p>
               <p>删除后，所有设备信息、维修记录、聊天记录都将被清除，此操作不可撤销！</p>
             </AlertDescription>
           </Alert>
@@ -1578,35 +1623,61 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
           if (!open && !isSavingIdentity) setEditingIdentityDevice(null)
         }}
       >
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>修改产品名称和型号</DialogTitle>
+            <DialogTitle>修改设备分类、产品名称和型号</DialogTitle>
             <DialogDescription>
               仅更正当前工单设备信息，不会修改设备 SN、数量或工作流状态。
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-2">
+          <div className="grid gap-4 py-2 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="device-identity-name">产品名称</Label>
+              <Label htmlFor="device-identity-category">一级分类 *</Label>
               <Input
-                id="device-identity-name"
-                value={identityForm.deviceName}
+                id="device-identity-category"
+                value={identityForm.category}
                 onChange={(event) => setIdentityForm((current) => ({
                   ...current,
-                  deviceName: event.target.value,
+                  category: event.target.value,
                 }))}
                 maxLength={200}
                 disabled={isSavingIdentity}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="device-identity-model">型号</Label>
+              <Label htmlFor="device-identity-subcategory">二级分类 *</Label>
+              <Input
+                id="device-identity-subcategory"
+                value={identityForm.subCategory}
+                onChange={(event) => setIdentityForm((current) => ({
+                  ...current,
+                  subCategory: event.target.value,
+                }))}
+                maxLength={200}
+                disabled={isSavingIdentity}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="device-identity-model">型号 *</Label>
               <Input
                 id="device-identity-model"
                 value={identityForm.modelName}
                 onChange={(event) => setIdentityForm((current) => ({
                   ...current,
                   modelName: event.target.value,
+                }))}
+                maxLength={200}
+                disabled={isSavingIdentity}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="device-identity-name">产品名称 *</Label>
+              <Input
+                id="device-identity-name"
+                value={identityForm.deviceName}
+                onChange={(event) => setIdentityForm((current) => ({
+                  ...current,
+                  deviceName: event.target.value,
                 }))}
                 maxLength={200}
                 disabled={isSavingIdentity}

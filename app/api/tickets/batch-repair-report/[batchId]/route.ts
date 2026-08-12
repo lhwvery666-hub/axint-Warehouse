@@ -1,8 +1,14 @@
 import { NextResponse } from "next/server"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, UserRole, REPAIR_ACTION_LABELS, RepairAction, TicketActionType, TERMINAL_STATUSES, normalizeTicketStatus } from "@/lib/enums"
+import { DB_FIELDS, UserRole, REPAIR_ACTION_LABELS, RepairAction, TicketActionType } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
-import { sumDeviceQuantity } from "@/lib/device-quantity"
+import {
+  canViewFactoryDetails,
+  getVisibleRepairAction,
+  getVisibleTicketStatus,
+} from "@/lib/ticket-visibility"
 
 const REPAIR_REPORT_READ_ROLES: UserRole[] = [
   UserRole.ADMIN,
@@ -30,6 +36,12 @@ export async function GET(
         : (context as { params: { batchId: string } }).params
 
     const batchId = resolvedParams.batchId
+    const viewerRole = authResult.normalizedRole
+    const mayViewFactoryDetails = canViewFactoryDetails(viewerRole)
+    const reporterUserId = Number(authResult.userId)
+    if (viewerRole === UserRole.REPORTER && !Number.isSafeInteger(reporterUserId)) {
+      return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
+    }
 
     if (!batchId) {
       return NextResponse.json(
@@ -43,10 +55,13 @@ export async function GET(
     const pool = await getDbConnection()
 
     // 查询该批次下的所有设备
-    const result = await pool
+    const reportRequest = pool
       .request()
       .input("batchId", batchId)
-      .query(`
+    if (viewerRole === UserRole.REPORTER) {
+      reportRequest.input("reporterUserId", sql.Int, reporterUserId)
+    }
+    const result = await reportRequest.query(`
         SELECT 
           ${DB_FIELDS.ID},
           ${DB_FIELDS.DEVICE_SN},
@@ -83,6 +98,7 @@ export async function GET(
           ${DB_FIELDS.REPAIR_NOTES}
         FROM Repair_Tickets
         WHERE ${DB_FIELDS.BATCH_ID} = @batchId
+          ${viewerRole === UserRole.REPORTER ? "AND ReportByUserID = @reporterUserId" : ""}
         ORDER BY ${DB_FIELDS.ID} ASC
       `)
 
@@ -123,7 +139,7 @@ export async function GET(
       reporterName: firstRecord.ReportedBy || "",
       signedReportPhoto: signedPhotoPath,
       isChargeable: firstRecord[DB_FIELDS.IS_CHARGEABLE] || false,
-      status: firstRecord[DB_FIELDS.STATUS] || "Created",
+      status: getVisibleTicketStatus(firstRecord[DB_FIELDS.STATUS], viewerRole),
       signedPhotoViewedBy: firstRecord[DB_FIELDS.SIGNED_PHOTO_VIEWED_BY] || null,
       signedPhotoViewedAt: firstRecord[DB_FIELDS.SIGNED_PHOTO_VIEWED_AT] ? formatDate(firstRecord[DB_FIELDS.SIGNED_PHOTO_VIEWED_AT]) : null,
       signedPhotoModifyRequest: firstRecord[DB_FIELDS.SIGNED_PHOTO_MODIFY_REQUEST] || null,
@@ -141,6 +157,10 @@ export async function GET(
         console.error("解析维修报告内容失败:", e)
       }
 
+      const rawRepairAction = row[DB_FIELDS.REPAIR_ACTION] || row.RepairAction || null
+      const visibleRepairAction = getVisibleRepairAction(rawRepairAction, viewerRole)
+      const isReporterRma = viewerRole === UserRole.REPORTER && rawRepairAction === RepairAction.RMA
+
       return {
         id: row[DB_FIELDS.ID] || row.Id,
         deviceSerialNumber: row[DB_FIELDS.DEVICE_SN] || row.DeviceSN || "未填写",
@@ -151,16 +171,14 @@ export async function GET(
         faultPoint: row[DB_FIELDS.FAULT_POINT] || row.FaultPoint || "",
         problem: row[DB_FIELDS.PROBLEM] || row.Problem || "",
         quantity: row[DB_FIELDS.QUANTITY] || row.Quantity || 1,
-        repairCost: row[DB_FIELDS.REPAIR_COST] || row.RepairCost || 0,
-        repairAction: row[DB_FIELDS.REPAIR_ACTION] || row.RepairAction || null,
-        repairActionLabel: (() => {
-          const raw = row[DB_FIELDS.REPAIR_ACTION] || row.RepairAction
-          if (!raw) return null
-          return REPAIR_ACTION_LABELS[raw as RepairAction] ?? raw
-        })(),
+        repairCost: isReporterRma ? 0 : row[DB_FIELDS.REPAIR_COST] || row.RepairCost || 0,
+        repairAction: visibleRepairAction,
+        repairActionLabel: visibleRepairAction
+          ? REPAIR_ACTION_LABELS[visibleRepairAction as RepairAction] ?? visibleRepairAction
+          : null,
         repairNotes: row[DB_FIELDS.REPAIR_NOTES] || row.RepairNotes || "",
         isInvoiced: row.IsInvoiced || false,
-        factoryRepairDate: formatDate(row.FactoryRepairDate),
+        factoryRepairDate: mayViewFactoryDetails ? formatDate(row.FactoryRepairDate) : "",
         returnDate: formatDate(row.ReturnDate),
         // 优先使用技术人员人工判定的覆盖值，再回落到系统计算值
         warrantyStatus: row[DB_FIELDS.WARRANTY_STATUS_OVERRIDE] || row.WarrantyStatusOverride
@@ -210,224 +228,158 @@ export async function PUT(
   const authResult = await checkUserRole([UserRole.ADMIN, UserRole.TECHNICIAN])
   if (isErrorResponse(authResult)) return authResult
 
+  let transaction: sql.Transaction | null = null
+
   try {
-    const pool = await getDbConnection()
-    const resolvedParams = await context.params
-
-    const batchId = resolvedParams.batchId
-    const body = await request.json()
-    // sendToReporter: true = 发送流程（改变状态）
-    // isRevision:     true = 已发送后的修改（需要回退状态 + 写入变更日志）
-    const { devices, sendToReporter, isRevision } = body
-
-    if (!devices || !Array.isArray(devices)) {
+    const { batchId } = await context.params
+    if (!batchId || batchId.length > 100) {
       return NextResponse.json(
-        { success: false, message: "设备数据格式不正确" },
+        { success: false, message: "批次ID无效" },
         { status: 400 }
       )
     }
 
-    const quantityResult = await pool
-      .request()
-      .input("batchId", batchId)
-      .query<{ totalQuantity: number }>(`
-        SELECT SUM(CASE WHEN ISNULL(${DB_FIELDS.QUANTITY}, 0) > 0 THEN ${DB_FIELDS.QUANTITY} ELSE 1 END) AS totalQuantity
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-      `)
-    const totalQuantity = Number(quantityResult.recordset[0]?.totalQuantity) || sumDeviceQuantity(devices)
-    console.log(`📝 维修人员 ${authResult.realName} 更新批次维修报告: ${batchId}, ${totalQuantity} 台设备, sendToReporter=${sendToReporter}, isRevision=${isRevision}`)
-
-    // ── 若是修订模式，先读取旧值用于比对 ──
-    // 只关心 repairCost（金额是最常见的修改项）
-    type OldDevice = { Id: number; RepairCost: number | null; RepairReportContent: string | null }
-    const oldDeviceMap: Map<number, OldDevice> = new Map()
-    if (isRevision === true) {
-      const oldResult = await pool
-        .request()
-        .input("batchId", batchId)
-        .query(`
-          SELECT ${DB_FIELDS.ID}, ${DB_FIELDS.REPAIR_COST}, RepairReportContent
-          FROM Repair_Tickets
-          WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-        `)
-      for (const row of oldResult.recordset) {
-        oldDeviceMap.set(row[DB_FIELDS.ID] ?? row.Id, {
-          Id: row[DB_FIELDS.ID] ?? row.Id,
-          RepairCost: row[DB_FIELDS.REPAIR_COST] ?? row.RepairCost ?? null,
-          RepairReportContent: row.RepairReportContent ?? null,
-        })
-      }
+    const bodySchema = z.object({
+      devices: z.array(z.object({
+        id: z.coerce.number().int().positive(),
+        repairContent: z.string().max(10000).default(""),
+        improvements: z.string().max(10000).default(""),
+        repairCost: z.coerce.number().finite().min(0).max(100000000).default(0),
+      }).passthrough()).min(1).max(500),
+      remarks: z.string().max(5000).optional(),
+      sendToReporter: z.boolean().optional(),
+      isRevision: z.boolean().optional(),
+    }).strict()
+    const parsedBody = bodySchema.safeParse(await request.json().catch(() => null))
+    if (!parsedBody.success) {
+      return NextResponse.json(
+        { success: false, message: "维修报告数据格式不正确" },
+        { status: 400 }
+      )
+    }
+    if (parsedBody.data.sendToReporter === true || parsedBody.data.isRevision === true) {
+      return NextResponse.json(
+        { success: false, message: "保存信息不能改变流程状态，请使用独立的“发送流程”按钮" },
+        { status: 400 }
+      )
     }
 
-    // 逐个更新每个设备的维修报告内容
+    const devices = parsedBody.data.devices
+    const requestedIds = new Set(devices.map((device) => device.id))
+    if (requestedIds.size !== devices.length) {
+      return NextResponse.json(
+        { success: false, message: "设备列表中存在重复记录" },
+        { status: 400 }
+      )
+    }
+
+    const pool = await getDbConnection()
+    transaction = new sql.Transaction(pool)
+    await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE)
+
+    interface BatchDeviceRow {
+      Id: number
+      Status: string
+      Quantity: number | null
+    }
+    const lockedRows = await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .query<BatchDeviceRow>(`
+        SELECT ${DB_FIELDS.ID} AS Id, ${DB_FIELDS.STATUS} AS Status,
+               ${DB_FIELDS.QUANTITY} AS Quantity
+        FROM Repair_Tickets WITH (UPDLOCK, HOLDLOCK)
+        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
+          AND ${DB_FIELDS.STATUS} <> 'Deleted'
+      `)
+
+    if (lockedRows.recordset.length === 0) {
+      await transaction.rollback()
+      transaction = null
+      return NextResponse.json(
+        { success: false, message: "未找到该批次设备" },
+        { status: 404 }
+      )
+    }
+    const persistedIds = new Set(lockedRows.recordset.map((row) => Number(row.Id)))
+    if (persistedIds.size !== requestedIds.size || [...requestedIds].some((id) => !persistedIds.has(id))) {
+      await transaction.rollback()
+      transaction = null
+      return NextResponse.json(
+        { success: false, message: "设备列表已经变化，请刷新页面后重试" },
+        { status: 409 }
+      )
+    }
+
     for (const device of devices) {
-      const deviceId = device.id
-      if (!deviceId) { console.warn("设备ID为空，跳过"); continue }
-
-      const reportContent = {
-        repairContent: device.repairContent || "",
-        improvements: device.improvements || "",
-      }
-
-      await pool
-        .request()
-        .input("deviceId", deviceId)
-        .input("reportContent", JSON.stringify(reportContent))
-        .input("repairCost", device.repairCost || 0)
+      const reportContent = JSON.stringify({
+        repairContent: device.repairContent,
+        improvements: device.improvements,
+      })
+      const updated = await new sql.Request(transaction)
+        .input("deviceId", sql.Int, device.id)
+        .input("batchId", sql.NVarChar(100), batchId)
+        .input("reportContent", sql.NVarChar(sql.MAX), reportContent)
+        .input("repairCost", sql.Decimal(18, 2), device.repairCost)
         .query(`
           UPDATE Repair_Tickets
-          SET 
-            RepairReportContent = @reportContent,
-            ${DB_FIELDS.REPAIR_COST} = @repairCost
+          SET RepairReportContent = @reportContent,
+              ${DB_FIELDS.REPAIR_COST} = @repairCost,
+              UpdatedAt = GETUTCDATE()
           WHERE ${DB_FIELDS.ID} = @deviceId
+            AND ${DB_FIELDS.BATCH_ID} = @batchId
+            AND ${DB_FIELDS.STATUS} <> 'Deleted'
         `)
+      if (updated.rowsAffected[0] !== 1) {
+        throw new Error("REPORT_SAVE_CONFLICT")
+      }
     }
 
-    // 检查是否所有设备都已填写维修内容
-    const allFilled = devices.every((device: any) =>
-      device.repairContent && device.repairContent.trim() !== ""
+    const currentStatus = lockedRows.recordset[0].Status
+    const totalQuantity = lockedRows.recordset.reduce(
+      (sum, row) => sum + (Number(row.Quantity) > 0 ? Number(row.Quantity) : 1),
+      0
     )
-
-    // ── 查询当前状态（用于下方逻辑判断）──
-    const currentStatusResult = await pool
-      .request()
-      .input("batchId", batchId)
+    await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batchId)
+      .input("actionType", sql.NVarChar(50), TicketActionType.REPAIR_REPORT_SAVED)
+      .input("operatorId", sql.Int, Number(authResult.userId))
+      .input("operatorName", sql.NVarChar(100), authResult.realName || "维修人员")
+      .input("oldStatus", sql.NVarChar(50), currentStatus)
+      .input("newStatus", sql.NVarChar(50), currentStatus)
+      .input("description", sql.NVarChar(500), `保存维修报告信息，共 ${totalQuantity} 台设备；流程状态保持不变`)
       .query(`
-        SELECT TOP 1 ${DB_FIELDS.STATUS} AS CurrentStatus
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
+        INSERT INTO Repair_Ticket_History (
+          BatchId, ActionType, OperatorId, OperatorName,
+          OldStatus, NewStatus, Description, CreatedAt
+        ) VALUES (
+          @batchId, @actionType, @operatorId, @operatorName,
+          @oldStatus, @newStatus, @description, GETUTCDATE()
+        )
       `)
-    const currentStatus = currentStatusResult.recordset[0]?.CurrentStatus ?? ""
-    const isTerminal = TERMINAL_STATUSES.includes(normalizeTicketStatus(currentStatus) as any)
 
-    // ────────────────────────────────────────────────────────────
-    // 分支 A：修订模式（isRevision === true）
-    //   → 回退状态至 In_Repair + 写入修改记录
-    // ────────────────────────────────────────────────────────────
-    if (isRevision === true) {
-      if (!isTerminal) {
-        // 回退状态
-        await pool
-          .request()
-          .input("batchId", batchId)
-          .input("newStatus", "In_Repair")
-          .query(`
-            UPDATE Repair_Tickets
-            SET ${DB_FIELDS.STATUS} = @newStatus
-            WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-          `)
-        console.log(`🔄 [Revision] 批次 ${batchId} 状态回退至 In_Repair`)
-      }
-
-      // 构建变更摘要（金额变动优先记录）
-      const changeSummaryLines: string[] = []
-      for (const device of devices) {
-        const old = oldDeviceMap.get(Number(device.id))
-        if (!old) continue
-        const oldCost = Number(old.RepairCost ?? 0)
-        const newCost = Number(device.repairCost ?? 0)
-        if (Math.abs(oldCost - newCost) > 0.001) {
-          changeSummaryLines.push(
-            `设备 ${device.deviceSerialNumber || device.id}：维修费用 ¥${oldCost.toFixed(2)} → ¥${newCost.toFixed(2)}`
-          )
-        }
-      }
-      const changeSummary = changeSummaryLines.length > 0
-        ? `变更明细：\n${changeSummaryLines.join("\n")}`
-        : "内容已修改（无金额变动）"
-
-      try {
-        await pool
-          .request()
-          .input("batchId", batchId)
-          .input("actionType", TicketActionType.REPAIR_REPORT_REVISED)
-          .input("operatorId", Number(authResult.userId))
-          .input("operatorName", authResult.realName || "维修人员")
-          .input("oldStatus", currentStatus)
-          .input("newStatus", isTerminal ? currentStatus : "In_Repair")
-          .input("description",
-            `维修人员修改了已发送的维修报告，流程已回退至"维修检查中"，需重新发送。\n${changeSummary}`)
-          .input("createdAt", new Date())
-          .query(`
-            INSERT INTO Repair_Ticket_History (
-              BatchId, ActionType, OperatorId, OperatorName,
-              OldStatus, NewStatus, Description, CreatedAt
-            ) VALUES (
-              @batchId, @actionType, @operatorId, @operatorName,
-              @oldStatus, @newStatus, @description, @createdAt
-            )
-          `)
-        console.log(`✅ [Revision] 修改记录已写入 Repair_Ticket_History`)
-      } catch (histErr: unknown) {
-        console.error(`❌ [Revision] 写入修改记录失败（非致命）:`, histErr)
-      }
-
-      return NextResponse.json({
-        success: true,
-        message: "报告修改已保存并记录，流程已回退至维修检查中，请重新发送流程",
-        sentToReporter: false,
-      })
-    }
-
-    // ────────────────────────────────────────────────────────────
-    // 分支 B：发送流程（sendToReporter === true）
-    //   → 状态流转至 Pending_Reporter_Confirm
-    // ────────────────────────────────────────────────────────────
-    if (allFilled && sendToReporter === true) {
-      if (isTerminal) {
-        console.log(`⛔ [终态封印] 批次 ${batchId} 当前状态为终止态（${currentStatus}），跳过 Status 更新，仅保存内容。`)
-      } else {
-        await pool
-          .request()
-          .input("batchId", batchId)
-          .input("newStatus", "Pending_Reporter_Confirm")
-          .query(`
-            UPDATE Repair_Tickets
-            SET ${DB_FIELDS.STATUS} = @newStatus
-            WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-          `)
-        console.log(`✅ 发送流程：批次 ${batchId} 状态更新为 Pending_Reporter_Confirm`)
-
-        try {
-          await pool
-            .request()
-            .input("batchId", batchId)
-            .input("actionType", TicketActionType.REPAIR_REPORT_SUBMITTED)
-            .input("operatorId", Number(authResult.userId))
-            .input("operatorName", authResult.realName || "维修人员")
-            .input("description", `提交维修报告并发送流程，现场人员可签字确认（共 ${totalQuantity} 台设备）`)
-            .input("createdAt", new Date())
-            .query(`
-              INSERT INTO Repair_Ticket_History (
-                BatchId, ActionType, OperatorId, OperatorName, Description, CreatedAt
-              ) VALUES (
-                @batchId, @actionType, @operatorId, @operatorName, @description, @createdAt
-              )
-            `)
-          console.log(`✅ [Send Flow] 操作记录已写入 Repair_Ticket_History`)
-        } catch (historyErr: unknown) {
-          console.error(`❌ [Send Flow] 写入操作记录失败（非致命）:`, historyErr)
-        }
-      }
-    }
-
-    console.log(`✅ 批次维修报告更新成功`)
+    await transaction.commit()
+    transaction = null
 
     return NextResponse.json({
       success: true,
-      message: sendToReporter === true && allFilled
-        ? "维修报告已保存并发送流程！现场人员现在可以签字确认"
-        : sendToReporter === true && !allFilled
-        ? "请完成所有设备的维修内容后再发送流程"
-        : "维修报告已保存，可继续编辑或点击\"发送流程\"按钮",
-      sentToReporter: sendToReporter === true && allFilled,
+      message: "维修报告信息已保存，流程状态未改变",
+      sentToReporter: false,
     })
-  } catch (error: any) {
+  } catch (error: unknown) {
+    if (transaction) {
+      try {
+        await transaction.rollback()
+      } catch (rollbackError: unknown) {
+        console.error("回滚维修报告保存事务失败:", rollbackError)
+      } finally {
+        transaction = null
+      }
+    }
     console.error("更新批次维修报告失败:", error)
+    const status = error instanceof Error && error.message === "REPORT_SAVE_CONFLICT" ? 409 : 500
     return NextResponse.json(
-      { success: false, message: error.message || "更新失败" },
-      { status: 500 }
+      { success: false, message: status === 409 ? "设备数据已经变化，请刷新后重试" : "更新维修报告失败" },
+      { status }
     )
   }
 }

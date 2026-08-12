@@ -12,8 +12,8 @@ export enum TicketStatus {
   // === 新的标准工作流程 ===
   CREATED = "Created",                    // 1. 待处理（现场人员已创建）
   WAREHOUSE_CONFIRMING = "Warehouse_Confirming",  // 2. 仓库确认中（待确认设备信息并填写出厂日期）
-  WAREHOUSE_CONFIRMED = "Warehouse_Confirmed",    // 3. 仓库已确认（出厂日期已填写，待维修人员检查）
-  IN_REPAIR = "In_Repair",               // 4. 维修检查中（维修人员检查并完成报告）
+  WAREHOUSE_CONFIRMED = "Warehouse_Confirmed",    // 仅兼容历史数据；新流程不再写入
+  IN_REPAIR = "In_Repair",               // 3. 维修检查中（维修人员检查并完成报告）
   PENDING_REPORTER_CONFIRM = "Pending_Reporter_Confirm", // 5. 待现场确认（等待现场签字）
   TECHNICIAN_REPAIRING = "Technician_Repairing",  // 6. 维修作业中（收到签字，维修人员实际动手维修）
   BUSINESS_REVIEW = "Business_Review",    // 7. 商务审核（确认收款和开票）
@@ -42,7 +42,7 @@ export enum TicketStatus {
   
   // 返厂流程状态
   PENDING_FACTORY = "Pending_Factory",    // 待返厂/返厂中
-  FACTORY_FINISHED = "Factory_Finished",  // 原厂修回/待复检
+  FACTORY_FINISHED = "Factory_Finished",  // 仅兼容历史原厂修回数据；新流程移交后写入维修作业中
   
   // 其他商务状态
   PENDING_PAYMENT = "Pending_Payment",    // 待收款
@@ -55,7 +55,7 @@ export enum TicketStatus {
   CANCELLED = "Cancelled",                // 已取消
   
   // === 其他状态 ===
-  DELAYED = "Delayed",                    // 已延期
+  DELAYED = "Delayed",                    // 仅兼容历史数据；延期功能已下线
   DELETED = "Deleted",                    // 已删除（回收站）
 }
 
@@ -64,9 +64,9 @@ export enum TicketStatus {
  */
 export const TICKET_STATUS_LABELS: Record<TicketStatus, string> = {
   // 新标准流程
-  [TicketStatus.CREATED]: "待处理",
+  [TicketStatus.CREATED]: "待仓库确认",
   [TicketStatus.WAREHOUSE_CONFIRMING]: "待仓库确认",
-  [TicketStatus.WAREHOUSE_CONFIRMED]: "仓库已确认",
+  [TicketStatus.WAREHOUSE_CONFIRMED]: "维修检查中",
   [TicketStatus.IN_REPAIR]: "维修检查中",
   [TicketStatus.PENDING_REPORTER_CONFIRM]: "待现场确认",
   [TicketStatus.TECHNICIAN_REPAIRING]: "维修作业中",
@@ -89,7 +89,8 @@ export const TICKET_STATUS_LABELS: Record<TicketStatus, string> = {
   [TicketStatus.CUSTOMER_CONFIRM]: "待客户确认",
   [TicketStatus.OUT_WARRANTY_REPAIR]: "过保维修中",
   [TicketStatus.PENDING_FACTORY]: "待返厂",
-  [TicketStatus.FACTORY_FINISHED]: "待复检",
+  // 历史兼容状态：新流程不再写入，界面统一归入“维修作业中”。
+  [TicketStatus.FACTORY_FINISHED]: "维修作业中",
   [TicketStatus.PENDING_PAYMENT]: "待收款",
   
   // 终止状态
@@ -98,7 +99,7 @@ export const TICKET_STATUS_LABELS: Record<TicketStatus, string> = {
   [TicketStatus.RETURN_UNREPAIRED]: "拒修退回",
   [TicketStatus.REJECTED_NO_RETURN]: "拒修不回寄",
   [TicketStatus.CANCELLED]: "已取消",
-  [TicketStatus.DELAYED]: "已延期",
+  [TicketStatus.DELAYED]: "维修检查中",
   [TicketStatus.DELETED]: "已删除",
 };
 
@@ -107,9 +108,11 @@ export const TICKET_STATUS_LABELS: Record<TicketStatus, string> = {
  */
 export const TICKET_STATUS_MAP: Record<string, TicketStatus> = {
   // 新标准流程状态
-  "created": TicketStatus.CREATED,
+  // 旧库中的 Created 与 Pending 不再作为独立公开状态，统一并入待仓库确认。
+  "created": TicketStatus.WAREHOUSE_CONFIRMING,
   "warehouse_confirming": TicketStatus.WAREHOUSE_CONFIRMING,
-  "warehouse_confirmed": TicketStatus.WAREHOUSE_CONFIRMED,
+  // Legacy persisted state. New flows skip it and the UI treats it as repair inspection.
+  "warehouse_confirmed": TicketStatus.IN_REPAIR,
   "in_repair": TicketStatus.IN_REPAIR,
   "pending_reporter_confirm": TicketStatus.PENDING_REPORTER_CONFIRM,
   "technician_repairing": TicketStatus.TECHNICIAN_REPAIRING,
@@ -118,7 +121,7 @@ export const TICKET_STATUS_MAP: Record<string, TicketStatus> = {
   "completed": TicketStatus.COMPLETED,
   
   // 兼容旧状态
-  "pending": TicketStatus.CREATED,
+  "pending": TicketStatus.WAREHOUSE_CONFIRMING,
   "processing": TicketStatus.IN_REPAIR,
   "warehouse_received": TicketStatus.WAREHOUSE_CONFIRMING,
   "admin_review": TicketStatus.BUSINESS_REVIEW,
@@ -142,7 +145,8 @@ export const TICKET_STATUS_MAP: Record<string, TicketStatus> = {
   "rejected_no_return": TicketStatus.REJECTED_NO_RETURN,
   "cancelled": TicketStatus.CANCELLED,
   "deleted": TicketStatus.DELETED,
-  "delayed": TicketStatus.DELAYED,
+  // The delay feature is retired. Historical rows remain readable as active repair work.
+  "delayed": TicketStatus.IN_REPAIR,
 };
 
 /**
@@ -274,8 +278,10 @@ export enum TicketActionType {
   STATUS_CHANGE = "StatusChange",                     // 状态变更（通用，保留兼容）
   // 工作流各节点专属动作类型（精确映射到 OperationLogType）
   WAREHOUSE_CONFIRMED = "WarehouseConfirmed",         // 仓库确认
+  REPAIR_REPORT_SAVED = "RepairReportSaved",          // 维修报告内容保存（不流转状态）
   REPAIR_REPORT_SUBMITTED = "RepairReportSubmitted",  // 维修报告提交（发送流程，现场可签字）
   REPAIR_REPORT_REVISED = "RepairReportRevised",      // 维修报告修订（已发送后再次修改，含金额变动记录）
+  REPORTER_CONFIRMATION_SAVED = "ReporterConfirmationSaved", // 现场确认资料保存（不流转）
   REPORTER_CONFIRMED = "ReporterConfirmed",           // 现场人员签字确认回传
   TECHNICIAN_COMPLETED = "TechnicianCompleted",       // 维修人员完成维修
   BUSINESS_REVIEWED = "BusinessReviewed",             // 商务审核完成
@@ -291,7 +297,7 @@ export enum TicketActionType {
   REWIND_UPDATE = "Rewind_Update",                    // 状态自动回溯更新（编辑导致状态回退）
   MANUFACTURE_DATE_OVERRIDE = "ManufactureDateOverride", // 仓库人员在后期流程中特权修改出厂日期（不改变工单状态）
   RMA_REQUEST = "RMA_Request",                        // 返厂维修申请（填写返厂快递单号）
-  FACTORY_RETURN_CONFIRMED = "FactoryReturnConfirmed", // 确认整批原厂返修设备已寄回
+  FACTORY_RETURN_CONFIRMED = "FactoryReturnConfirmed", // 仓库确认单台原厂返修设备已寄回并移交
 }
 
 // ==================== 路由路径常量 ====================
@@ -343,6 +349,7 @@ export const API_ROUTES = {
  */
 export enum OperationLogType {
   CREATED = "created",                          // 工单创建
+  UPDATED = "updated",                          // 设备/批次信息更新
   SUBMITTED = "submitted",                      // 工单提交（现场人员完成填写）
   WAREHOUSE_CONFIRMED = "warehouse_confirmed",   // 仓库确认
   REPAIR_REPORT_GENERATED = "repair_report_generated", // 维修报告生成（维修人员填写完成）
@@ -358,6 +365,7 @@ export enum OperationLogType {
  */
 export const OPERATION_LOG_TYPE_LABELS: Record<OperationLogType, string> = {
   [OperationLogType.CREATED]: "创建了批次工单",
+  [OperationLogType.UPDATED]: "更新了设备信息",
   [OperationLogType.SUBMITTED]: "提交了工单至仓库",
   [OperationLogType.WAREHOUSE_CONFIRMED]: "确认了设备信息并填写出厂日期",
   [OperationLogType.REPAIR_REPORT_GENERATED]: "生成了维修报告并发送现场签字",

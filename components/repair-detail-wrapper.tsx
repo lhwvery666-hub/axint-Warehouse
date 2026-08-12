@@ -3,10 +3,11 @@
 import { useState, useEffect } from "react"
 import RepairDetail from "@/components/repair-detail"
 import BatchWorkOrderDetail from "@/components/batch-work-order-detail"
+import { isSequentialBatchId } from "@/lib/batch-number-format"
 
 interface RepairDetailWrapperProps {
   taskId: string
-  onBack: () => void
+  onBack: () => void | Promise<void>
 }
 
 /**
@@ -23,11 +24,8 @@ export default function RepairDetailWrapper({ taskId, onBack }: RepairDetailWrap
       try {
         setLoading(true)
         
-        // 判断是否为批次ID格式（WO + 日期 + 序号）
-        // 例如：WO260204001, WO2602040022
-        const batchIdPattern = /^WO\d{6,}/i
-        
-        if (batchIdPattern.test(taskId)) {
+        // 同时兼容当前 YYYYMMDDxxx 格式和历史 WO 开头的批次号。
+        if (isSequentialBatchId(taskId)) {
           // 是批次ID格式，先验证该批次是否存在
           const response = await fetch(`/api/tickets/batch-devices/${taskId}`)
           const result = await response.json()

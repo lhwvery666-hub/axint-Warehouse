@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { TicketStatus, TICKET_STATUS_LABELS } from "@/lib/enums";
+import { TicketStatus } from "@/lib/enums";
 
 interface TimelineStep {
   key: TicketStatus;
@@ -19,22 +19,12 @@ interface RepairStatusTimelineProps {
  * 类似大学申请流程的可视化展示
  */
 export function RepairStatusTimeline({ currentStatus, className }: RepairStatusTimelineProps) {
-  // 定义维修工单的主要流程步骤（完整的9步流程）
+  // 定义维修工单的主要流程步骤。仓库保存信息后由“发送流程”直接进入维修检查。
   const steps: TimelineStep[] = [
     {
-      key: TicketStatus.CREATED,
-      label: "工单创建",
-      description: "现场人员提交"
-    },
-    {
       key: TicketStatus.WAREHOUSE_CONFIRMING,
-      label: "仓库确认",
-      description: "确认设备信息"
-    },
-    {
-      key: TicketStatus.WAREHOUSE_CONFIRMED,
-      label: "待维修检查",
-      description: "出厂日期已填"
+      label: "待仓库确认",
+      description: "完善设备信息并发送"
     },
     {
       key: TicketStatus.IN_REPAIR,
@@ -73,11 +63,11 @@ export function RepairStatusTimeline({ currentStatus, className }: RepairStatusT
     const normalized = status.toLowerCase().replace(/-/g, '_');
     const statusMap: Record<string, TicketStatus> = {
       // 正常流程状态
-      'created': TicketStatus.CREATED,
-      'pending': TicketStatus.CREATED,
+      'created': TicketStatus.WAREHOUSE_CONFIRMING,
+      'pending': TicketStatus.WAREHOUSE_CONFIRMING,
       'warehouse_confirming': TicketStatus.WAREHOUSE_CONFIRMING,
       'warehouse_received': TicketStatus.WAREHOUSE_CONFIRMING,
-      'warehouse_confirmed': TicketStatus.WAREHOUSE_CONFIRMED,
+      'warehouse_confirmed': TicketStatus.IN_REPAIR,
       'in_repair': TicketStatus.IN_REPAIR,
       'in_warranty_repair': TicketStatus.IN_REPAIR,
       'out_warranty_repair': TicketStatus.IN_REPAIR,
@@ -104,11 +94,11 @@ export function RepairStatusTimeline({ currentStatus, className }: RepairStatusT
       'rejected_no_return': TicketStatus.COMPLETED,
       'rejectednoreturn': TicketStatus.COMPLETED,
       // 异常/取消状态：流程中止，保留在当前节点（用Created作为fallback会误导，用CREATED但实际上不显示高亮）
-      'cancelled': TicketStatus.CREATED,
-      'deleted': TicketStatus.CREATED,
-      'delayed': TicketStatus.TECHNICIAN_REPAIRING,
+      'cancelled': TicketStatus.WAREHOUSE_CONFIRMING,
+      'deleted': TicketStatus.WAREHOUSE_CONFIRMING,
+      'delayed': TicketStatus.IN_REPAIR,
     };
-    return statusMap[normalized] || TicketStatus.CREATED;
+    return statusMap[normalized] || TicketStatus.WAREHOUSE_CONFIRMING;
   };
 
   const current = normalizeStatus(currentStatus);

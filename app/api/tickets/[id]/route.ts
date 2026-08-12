@@ -2,9 +2,15 @@ import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
 import { z } from "zod"
-import { TicketStatus, TicketActionType, normalizeTicketStatus, UserRole } from "@/lib/enums"
+import { RepairAction, TicketStatus, TicketActionType, UserRole } from "@/lib/enums"
 import { TICKET_QUERY_MESSAGES } from "@/lib/api-messages"
 import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import {
+  canViewFactoryDetails,
+  getVisibleRepairAction,
+  getVisibleTicketStatus,
+  isFactoryHistoryAction,
+} from "@/lib/ticket-visibility"
 
 // 禁用该路由的缓存，确保详情页每次请求都命中数据库
 export const dynamic = "force-dynamic"
@@ -68,8 +74,6 @@ interface HistoryRecord {
   actionType: string
   oldStatus?: string | null
   newStatus?: string | null
-  delayTo?: string | null
-  delayReason?: string | null
   createdAt: string
 }
 
@@ -177,8 +181,6 @@ export async function GET(
     }
 
     // 查询历史记录
-    let expectedCompletionDate: string | null = null
-    let delayReason: string | null = null
     let history: HistoryRecord[] = []
 
     try {
@@ -194,34 +196,30 @@ export async function GET(
           actionType: true,
           oldStatus: true,
           newStatus: true,
-          delayTo: true,
-          delayReason: true,
           createdAt: true
         }
       })
 
       history = historyLogs
-        .filter((record) => record.actionType)
+        .filter((record) =>
+          record.actionType && !(
+            authResult.normalizedRole === UserRole.REPORTER &&
+            isFactoryHistoryAction(record.actionType)
+          )
+        )
         .map((record) => ({
           actionType: record.actionType || "",
-          oldStatus: record.oldStatus || null,
-          newStatus: record.newStatus || null,
-          delayTo: record.delayTo ? (record.delayTo instanceof Date ? record.delayTo.toISOString() : new Date(record.delayTo).toISOString()) : null,
-          delayReason: record.delayReason || null,
+          oldStatus: record.oldStatus
+            ? getVisibleTicketStatus(record.oldStatus, authResult.normalizedRole)
+            : null,
+          newStatus: record.newStatus
+            ? getVisibleTicketStatus(record.newStatus, authResult.normalizedRole)
+            : null,
           createdAt: record.createdAt ? (record.createdAt instanceof Date ? record.createdAt.toISOString() : new Date(record.createdAt).toISOString()) : new Date().toISOString(),
         }))
-
-      const lastDelay = history
-        .filter((h) => h.actionType === "Delay")
-        .slice(-1)[0]
-
-      if (lastDelay) {
-        expectedCompletionDate = lastDelay.delayTo || null
-        delayReason = lastDelay.delayReason || null
-      }
     } catch (historyError: unknown) {
-      const errorMessage = historyError instanceof Error ? historyError.message : "查询延期记录失败"
-      console.error("查询延期记录失败:", errorMessage)
+      const errorMessage = historyError instanceof Error ? historyError.message : "查询操作历史失败"
+      console.error("查询操作历史失败:", errorMessage)
     }
 
     // 根据 ReportByUserID 查询报告人的真实姓名和手机号
@@ -256,8 +254,8 @@ export async function GET(
 
     // 状态映射：统一状态值，复用全局状态规范化工具
     const dbStatus = (ticket.Status as string) || "Created"
-    const normalizedStatus = normalizeTicketStatus(dbStatus) || TicketStatus.CREATED
-    const mappedStatus = normalizedStatus
+    const mappedStatus = getVisibleTicketStatus(dbStatus, authResult.normalizedRole)
+    const mayViewFactoryDetails = canViewFactoryDetails(authResult.normalizedRole)
     
     // 调试：记录关键字段值
     console.log("🔍 [API] 票据字段原始值:", {
@@ -321,8 +319,9 @@ export async function GET(
       warehouse: deviceInfo.warehouse || (ticket.Warehouse as string) || "",
       deviceImages, // 修复照片字段
       damageImages, // 修复照片字段
-      expectedCompletionDate,
-      delayReason,
+      // 延期功能已下线；保留空字段兼容旧客户端。
+      expectedCompletionDate: null,
+      delayReason: null,
       history,
       // 新字段
       submitDate: getDateField("SubmitDate"),
@@ -339,16 +338,18 @@ export async function GET(
       fullSpec: (ticket.FullSpec as string) || "",
       faultPoint: (ticket.FaultPoint as string) || "",
       isChargeable: getBooleanField("IsChargeable"),
-      isOutsourced: getBooleanField("IsOutsourced"),
-      factoryRepairDate: getDateField("FactoryRepairDate"),
-      factoryTrackingNum: (ticket.FactoryTrackingNum as string) || "",
-      supplierName: (ticket.SupplierName as string) || "",
-      repairCost: (ticket.RepairCost as number) || null,
+      isOutsourced: mayViewFactoryDetails ? getBooleanField("IsOutsourced") : false,
+      factoryRepairDate: mayViewFactoryDetails ? getDateField("FactoryRepairDate") : null,
+      factoryTrackingNum: mayViewFactoryDetails ? (ticket.FactoryTrackingNum as string) || "" : "",
+      supplierName: mayViewFactoryDetails ? (ticket.SupplierName as string) || "" : "",
+      repairCost: mayViewFactoryDetails || ticket.RepairAction !== RepairAction.RMA
+        ? (ticket.RepairCost as number) || null
+        : null,
       clientName: (ticket.ClientName as string) || "",
       isInvoiced: getBooleanField("IsInvoiced"),
-      factoryReceivedDate: getDateField("FactoryReceivedDate"),
+      factoryReceivedDate: mayViewFactoryDetails ? getDateField("FactoryReceivedDate") : null,
       receivedDate: getDateField("ReceivedDate"),
-      factoryShipDate: getDateField("FactoryShipDate"),
+      factoryShipDate: mayViewFactoryDetails ? getDateField("FactoryShipDate") : null,
       returnDate: getDateField("ReturnDate"),
       returnQuantity: (ticket.ReturnQuantity as number) || 1,
       returnTrackingNum: (ticket.ReturnTrackingNum as string) || "",
@@ -364,7 +365,10 @@ export async function GET(
       warrantyStatus: (ticket.WarrantyStatus as string) || null,
       warrantyStatusOverride: (ticket.WarrantyStatusOverride as string) || null,
       faultCategory: (ticket.FaultCategory as string) || null,
-      repairAction: (ticket.RepairAction as string) || null,
+      repairAction: getVisibleRepairAction(
+        (ticket.RepairAction as string) || null,
+        authResult.normalizedRole
+      ),
       repairNotes: (ticket.RepairNotes as string) || null,
     }
 

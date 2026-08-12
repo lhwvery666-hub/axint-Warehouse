@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import React, { createContext, useCallback, useContext, useState, useEffect, ReactNode } from "react";
 import { useAuth } from "@/context/auth-context";
 
 // 维修工单类型定义
@@ -69,12 +69,13 @@ export function RepairProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   // 从 API 加载工单数据
-  const refreshRepairs = async () => {
+  const refreshRepairs = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const response = await fetch('/api/tickets', {
         method: 'GET',
+        cache: 'no-store',
         headers: {
           'Content-Type': 'application/json',
         },
@@ -208,20 +209,19 @@ export function RepairProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   // 仅在用户认证后才加载工单数据，避免未登录时触发 401 错误
   useEffect(() => {
     if (typeof window !== 'undefined' && status === 'authenticated') {
-      refreshRepairs();
+      void refreshRepairs();
     }
     // 退出登录时清空工单列表
     if (status === 'unauthenticated') {
       setRepairs([]);
       setError(null);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status]);
+  }, [status, refreshRepairs]);
 
   // 添加新工单（仅用于前端临时显示，实际数据已保存到数据库）
   const addRepair = (newRepair: Omit<RepairTicket, "id" | "reportedAt">) => {

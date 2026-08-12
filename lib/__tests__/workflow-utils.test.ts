@@ -197,12 +197,12 @@ describe('workflow-utils', () => {
       ];
 
       const result = getBatchAggregatedStatus(tickets);
-      expect(result).toBe(TicketStatus.CREATED); // 使用有效进度的状态
+      expect(result).toBe(TicketStatus.WAREHOUSE_CONFIRMING); // 旧 Created 统一并入待仓库确认
     });
 
     it('应该处理空数组', () => {
       const result = getBatchAggregatedStatus([]);
-      expect(result).toBe(TicketStatus.CREATED);
+      expect(result).toBe(TicketStatus.WAREHOUSE_CONFIRMING);
     });
 
     it('应该处理包含null的数据', () => {
@@ -213,7 +213,7 @@ describe('workflow-utils', () => {
       ];
 
       const result = getBatchAggregatedStatus(tickets as any);
-      expect(result).toBe(TicketStatus.CREATED);
+      expect(result).toBe(TicketStatus.WAREHOUSE_CONFIRMING);
     });
 
     it('应该兼容大小写字段名', () => {

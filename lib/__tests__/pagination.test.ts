@@ -6,6 +6,7 @@ import {
   DEFAULT_WORK_ORDER_PAGE_SIZE,
   getTotalPages,
   paginateItems,
+  parsePageParam,
 } from "../pagination"
 
 test("work order pagination uses twenty items per page by default", () => {
@@ -30,4 +31,12 @@ test("empty results still expose a stable first page", () => {
   assert.equal(getTotalPages(0), 1)
   assert.equal(clampPage(5, 0), 1)
   assert.deepEqual(paginateItems([], 1), [])
+})
+
+test("page query parameters restore only positive integer pages", () => {
+  assert.equal(parsePageParam("3"), 3)
+  assert.equal(parsePageParam("0"), 1)
+  assert.equal(parsePageParam("2.5"), 1)
+  assert.equal(parsePageParam("invalid"), 1)
+  assert.equal(parsePageParam(null), 1)
 })

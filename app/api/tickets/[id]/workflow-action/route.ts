@@ -21,15 +21,13 @@ import * as sql from "mssql";
 import { z } from "zod";
 import { getDbConnection } from "@/lib/db-config";
 import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils";
-import { RepairAction, TicketActionType, UserRole } from "@/lib/enums";
+import { RepairAction, TicketActionType, TicketStatus, UserRole } from "@/lib/enums";
 import {
   TicketAction,
   getTransitionsForActionAndRole,
   TICKET_ACTION_LABELS,
 } from "@/lib/ticket-workflow-actions";
 import { sumDeviceQuantity } from "@/lib/device-quantity";
-import { getStorageAdapter } from "@/lib/storage/storage-adapter";
-import { createUploadStoragePath, validateUploadedFile } from "@/lib/storage/upload-security";
 
 const workflowActionSchema = z.object({
   action: z.nativeEnum(TicketAction),
@@ -56,16 +54,40 @@ interface FactoryBatchRow {
   TicketId: string | null;
   BatchId: string;
   Status: string;
-  RepairAction: string | null;
-  SupplierName: string | null;
-  FactoryTrackingNum: string | null;
+  RepairReportContent: string | null;
+  RepairCost: number | null;
   Quantity: number | null;
 }
 
-const FACTORY_BATCH_ACTIONS = new Set<TicketAction>([
-  TicketAction.REQUEST_FACTORY_REPAIR,
-  TicketAction.CONFIRM_FACTORY_RETURN,
+interface FactoryDeviceRow {
+  Id: number;
+  TicketId: string | null;
+  BatchId: string | null;
+  Status: string;
+  RepairAction: string | null;
+  SupplierName: string | null;
+  FactoryTrackingNum: string | null;
+  SignedReportPhoto: string | null;
+  DeviceSN: string | null;
+  ModelName: string | null;
+  Quantity: number | null;
+}
+
+const BATCH_ACTIONS = new Set<TicketAction>([
+  TicketAction.SEND_REPORT_FOR_SIGN,
 ]);
+
+function hasRepairReportContent(value: string | null): boolean {
+  if (!value) return false;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || !("repairContent" in parsed)) return false;
+    const repairContent = (parsed as { repairContent?: unknown }).repairContent;
+    return typeof repairContent === "string" && repairContent.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
 
 // ==================== 主 API 处理函数 ====================
 
@@ -81,7 +103,6 @@ export async function POST(
   if (isErrorResponse(authResult)) return authResult;
 
   let transaction: sql.Transaction | null = null;
-  let newlyUploadedPath: string | null = null;
 
   try {
     let signedPhotoFile: File | null = null;
@@ -128,6 +149,16 @@ export async function POST(
     }
 
     const { action } = parsedBody.data;
+    if (action === TicketAction.UPLOAD_SIGNATURE) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "该旧入口已停用，请先保存签字附件，再通过现场确认接口发送流程",
+        },
+        { status: 410 }
+      );
+    }
+
     const transitions = getTransitionsForActionAndRole(
       action,
       authResult.normalizedRole
@@ -139,13 +170,7 @@ export async function POST(
       );
     }
 
-    if (action === TicketAction.UPLOAD_SIGNATURE && !signedPhotoFile) {
-      return NextResponse.json(
-        { success: false, message: "缺少签字凭证" },
-        { status: 400 }
-      );
-    }
-    if (action !== TicketAction.UPLOAD_SIGNATURE && signedPhotoFile) {
+    if (signedPhotoFile) {
       return NextResponse.json(
         { success: false, message: "当前动作不接受签字凭证" },
         { status: 400 }
@@ -154,14 +179,16 @@ export async function POST(
 
     const pool = await getDbConnection();
     transaction = new sql.Transaction(pool);
-    const isFactoryBatchAction = FACTORY_BATCH_ACTIONS.has(action);
+    const isBatchAction = BATCH_ACTIONS.has(action);
+    const requiresSerializable =
+      isBatchAction || action === TicketAction.REQUEST_FACTORY_REPAIR;
     await transaction.begin(
-      isFactoryBatchAction
+      requiresSerializable
         ? sql.ISOLATION_LEVEL.SERIALIZABLE
         : sql.ISOLATION_LEVEL.READ_COMMITTED
     );
 
-    if (isFactoryBatchAction) {
+    if (isBatchAction) {
       const anchorResult = await new sql.Request(transaction)
         .input("ticketId", sql.Int, ticketId)
         .query<BatchAnchorRow>(`
@@ -182,7 +209,7 @@ export async function POST(
         await transaction.rollback();
         transaction = null;
         return NextResponse.json(
-          { success: false, message: "该工单未归属批次，无法执行整批返厂流转" },
+          { success: false, message: "该工单未归属批次，无法执行整批报告流转" },
           { status: 409 }
         );
       }
@@ -190,8 +217,8 @@ export async function POST(
       const batchResult = await new sql.Request(transaction)
         .input("batchId", sql.NVarChar(100), anchor.BatchId)
         .query<FactoryBatchRow>(`
-          SELECT [Id], [TicketId], [BatchId], [Status], [RepairAction],
-                 [SupplierName], [FactoryTrackingNum], [Quantity]
+          SELECT [Id], [TicketId], [BatchId], [Status],
+                 [RepairReportContent], [RepairCost], [Quantity]
           FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
           WHERE [BatchId] = @batchId
           ORDER BY [Id];
@@ -220,12 +247,9 @@ export async function POST(
         );
       }
 
-      if (action === TicketAction.REQUEST_FACTORY_REPAIR) {
+      if (action === TicketAction.SEND_REPORT_FOR_SIGN) {
         const incompleteRow = batchRows.find(
-          (row) =>
-            row.RepairAction !== RepairAction.RMA ||
-            !row.SupplierName?.trim() ||
-            !row.FactoryTrackingNum?.trim()
+          (row) => !hasRepairReportContent(row.RepairReportContent) || row.RepairCost === null
         );
         if (incompleteRow) {
           await transaction.rollback();
@@ -233,7 +257,7 @@ export async function POST(
           return NextResponse.json(
             {
               success: false,
-              message: `请先保存整批设备的返厂方式、供应商和快递单号（设备ID：${incompleteRow.Id}）`,
+              message: `请先保存整批设备的维修报告和费用（设备ID：${incompleteRow.Id}）`,
             },
             { status: 409 }
           );
@@ -242,28 +266,26 @@ export async function POST(
 
       const expectedStatus0 = transitions[0].currentStatus;
       const expectedStatus1 = transitions[1]?.currentStatus ?? expectedStatus0;
+      const expectedStatus2 = transitions[2]?.currentStatus ?? expectedStatus0;
       const nextStatus = transitions[0].nextStatus;
-      const setFactoryFields = action === TicketAction.REQUEST_FACTORY_REPAIR
-        ? ", [IsOutsourced] = 1"
-        : ", [FactoryReceivedDate] = GETUTCDATE()";
 
       const updateResult = await new sql.Request(transaction)
         .input("batchId", sql.NVarChar(100), anchor.BatchId)
         .input("expectedStatus0", sql.NVarChar(50), expectedStatus0)
         .input("expectedStatus1", sql.NVarChar(50), expectedStatus1)
+        .input("expectedStatus2", sql.NVarChar(50), expectedStatus2)
         .input("newStatus", sql.NVarChar(50), nextStatus)
         .query<WorkflowUpdateRow>(`
           UPDATE [dbo].[Repair_Tickets]
           SET [Status] = @newStatus,
               [UpdatedAt] = GETUTCDATE()
-              ${setFactoryFields}
           OUTPUT inserted.[Id] AS [Id],
                  deleted.[Status] AS [OldStatus],
                  inserted.[Status] AS [NewStatus],
                  inserted.[TicketId] AS [TicketId],
                  inserted.[BatchId] AS [BatchId]
           WHERE [BatchId] = @batchId
-            AND [Status] IN (@expectedStatus0, @expectedStatus1);
+            AND [Status] IN (@expectedStatus0, @expectedStatus1, @expectedStatus2);
         `);
 
       if (updateResult.recordset.length !== batchRows.length) {
@@ -275,9 +297,7 @@ export async function POST(
         );
       }
 
-      const actionType = action === TicketAction.REQUEST_FACTORY_REPAIR
-        ? TicketActionType.RMA_REQUEST
-        : TicketActionType.FACTORY_RETURN_CONFIRMED;
+      const actionType = TicketActionType.REPAIR_REPORT_SUBMITTED;
       const totalQuantity = sumDeviceQuantity(
         batchRows.map((row) => ({ quantity: row.Quantity }))
       );
@@ -320,6 +340,140 @@ export async function POST(
       });
     }
 
+    if (action === TicketAction.REQUEST_FACTORY_REPAIR) {
+      const deviceResult = await new sql.Request(transaction)
+        .input("ticketId", sql.Int, ticketId)
+        .query<FactoryDeviceRow>(`
+          SELECT TOP (1)
+                 [Id], [TicketId], [BatchId], [Status], [RepairAction],
+                 [SupplierName], [FactoryTrackingNum], [SignedReportPhoto],
+                 [DeviceSN], [ModelName], [Quantity]
+          FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
+          WHERE [Id] = @ticketId;
+        `);
+      const device = deviceResult.recordset[0];
+      if (!device) {
+        await transaction.rollback();
+        transaction = null;
+        return NextResponse.json(
+          { success: false, message: "设备工单不存在" },
+          { status: 404 }
+        );
+      }
+
+      const transition = transitions.find(
+        (item) => item.currentStatus === device.Status
+      );
+      if (!transition) {
+        await transaction.rollback();
+        transaction = null;
+        return NextResponse.json(
+          { success: false, message: "当前设备状态已变化或不允许提交返厂维修" },
+          { status: 409 }
+        );
+      }
+
+      if (
+        device.Status !== TicketStatus.TECHNICIAN_REPAIRING ||
+        !device.SignedReportPhoto?.trim()
+      ) {
+        await transaction.rollback();
+        transaction = null;
+        return NextResponse.json(
+          {
+            success: false,
+            message: "现场签字凭证尚未回传，当前设备不能正式发起返厂维修",
+          },
+          { status: 409 }
+        );
+      }
+
+      if (
+        device.RepairAction !== RepairAction.RMA ||
+        !device.SupplierName?.trim() ||
+        !device.FactoryTrackingNum?.trim()
+      ) {
+        await transaction.rollback();
+        transaction = null;
+        return NextResponse.json(
+          {
+            success: false,
+            message: "请先保存当前设备的返厂方式、供应商和快递单号，再发送流程",
+          },
+          { status: 409 }
+        );
+      }
+
+      const updateResult = await new sql.Request(transaction)
+        .input("ticketId", sql.Int, ticketId)
+        .input("expectedStatus", sql.NVarChar(50), transition.currentStatus)
+        .input("newStatus", sql.NVarChar(50), transition.nextStatus)
+        .query<WorkflowUpdateRow>(`
+          UPDATE [dbo].[Repair_Tickets]
+          SET [Status] = @newStatus,
+              [IsOutsourced] = 1,
+              [UpdatedAt] = GETUTCDATE()
+          OUTPUT inserted.[Id] AS [Id],
+                 deleted.[Status] AS [OldStatus],
+                 inserted.[Status] AS [NewStatus],
+                 inserted.[TicketId] AS [TicketId],
+                 inserted.[BatchId] AS [BatchId]
+          WHERE [Id] = @ticketId
+            AND [Status] = @expectedStatus;
+        `);
+
+      if (updateResult.rowsAffected[0] !== 1 || !updateResult.recordset[0]) {
+        await transaction.rollback();
+        transaction = null;
+        return NextResponse.json(
+          { success: false, message: "当前设备状态已变化或请求重复，未执行更新" },
+          { status: 409 }
+        );
+      }
+
+      const updated = updateResult.recordset[0];
+      const deviceIdentity = device.DeviceSN?.trim() || device.ModelName?.trim() || `设备 ${device.Id}`;
+      const deviceQuantity = sumDeviceQuantity([{ quantity: device.Quantity }]);
+      await new sql.Request(transaction)
+        .input("ticketId", sql.NVarChar(50), updated.TicketId ?? String(updated.Id))
+        .input("batchId", sql.NVarChar(100), updated.BatchId)
+        .input("actionType", sql.NVarChar(50), TicketActionType.RMA_REQUEST)
+        .input("oldStatus", sql.NVarChar(50), updated.OldStatus)
+        .input("newStatus", sql.NVarChar(50), updated.NewStatus)
+        .input("operatorId", sql.Int, operatorId)
+        .input("operatorName", sql.NVarChar(100), authResult.realName || authResult.username)
+        .input(
+          "description",
+          sql.NVarChar(sql.MAX),
+          `提交当前设备返厂维修申请（${deviceIdentity}，共 ${deviceQuantity} 台）`
+        )
+        .query(`
+          INSERT INTO [dbo].[Repair_Ticket_History] (
+            [TicketID], [BatchId], [ActionType], [OldStatus], [NewStatus],
+            [OperatorId], [OperatorName], [Description], [CreatedAt]
+          )
+          VALUES (
+            @ticketId, @batchId, @actionType, @oldStatus, @newStatus,
+            @operatorId, @operatorName, @description, GETUTCDATE()
+          );
+        `);
+
+      await transaction.commit();
+      transaction = null;
+      return NextResponse.json({
+        success: true,
+        message: "当前设备已提交返厂维修",
+        data: {
+          ticketId,
+          batchId: updated.BatchId,
+          oldStatus: updated.OldStatus,
+          newStatus: updated.NewStatus,
+          deviceCount: deviceQuantity,
+          action,
+        },
+      });
+    }
+
     if (transitions.length !== 1) {
       await transaction.rollback();
       transaction = null;
@@ -334,40 +488,11 @@ export async function POST(
     }
     const transition = transitions[0];
 
-    let signedReportPhoto: string | null = null;
-    if (action === TicketAction.UPLOAD_SIGNATURE && signedPhotoFile) {
-      const validation = await validateUploadedFile(signedPhotoFile, "signature");
-      if (!validation.success) {
-        await transaction.rollback();
-        transaction = null;
-        return NextResponse.json(
-          { success: false, message: validation.message },
-          { status: 400 }
-        );
-      }
-      const storagePath = createUploadStoragePath(
-        "signature",
-        authResult.userId,
-        validation.extension
-      );
-      signedReportPhoto = await getStorageAdapter().upload(
-        storagePath,
-        signedPhotoFile,
-        validation.mimeType
-      );
-      newlyUploadedPath = signedReportPhoto;
-    }
-
     const updateRequest = new sql.Request(transaction)
       .input("ticketId", sql.Int, ticketId)
       .input("expectedStatus", sql.NVarChar(50), transition.currentStatus)
       .input("newStatus", sql.NVarChar(50), transition.nextStatus)
-      .input("operatorId", sql.Int, operatorId)
-      .input("signedReportPhoto", sql.NVarChar(sql.MAX), signedReportPhoto ?? null);
-
-    const setSignedPhoto = action === TicketAction.UPLOAD_SIGNATURE
-      ? ", [SignedReportPhoto] = @signedReportPhoto, [ReporterConfirmedAt] = GETUTCDATE()"
-      : "";
+      .input("operatorId", sql.Int, operatorId);
     const reporterOwnership = authResult.normalizedRole === UserRole.REPORTER
       ? "AND [ReportByUserID] = @operatorId"
       : "";
@@ -381,7 +506,6 @@ export async function POST(
       UPDATE [dbo].[Repair_Tickets]
       SET [Status] = @newStatus,
           [UpdatedAt] = GETUTCDATE()
-          ${setSignedPhoto}
       OUTPUT inserted.[Id] AS [Id],
              deleted.[Status] AS [OldStatus],
              inserted.[Status] AS [NewStatus],
@@ -396,10 +520,6 @@ export async function POST(
     if (updateResult.rowsAffected[0] !== 1 || !updateResult.recordset[0]) {
       await transaction.rollback();
       transaction = null;
-      if (newlyUploadedPath) {
-        await getStorageAdapter().delete(newlyUploadedPath);
-        newlyUploadedPath = null;
-      }
       return NextResponse.json(
         { success: false, message: "工单状态已变化、操作重复或前置条件未满足" },
         { status: 409 }
@@ -429,7 +549,6 @@ export async function POST(
 
     await transaction.commit();
     transaction = null;
-    newlyUploadedPath = null;
 
     return NextResponse.json({
       success: true,
@@ -452,16 +571,6 @@ export async function POST(
         transaction = null;
       }
     }
-    if (newlyUploadedPath) {
-      try {
-        await getStorageAdapter().delete(newlyUploadedPath);
-      } catch (cleanupError) {
-        console.error("[Workflow Action API] 清理失败上传文件失败:", cleanupError);
-      } finally {
-        newlyUploadedPath = null;
-      }
-    }
-
     return NextResponse.json(
       { success: false, message: "操作失败，请稍后重试" },
       { status: 500 }

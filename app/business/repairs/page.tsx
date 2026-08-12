@@ -27,6 +27,7 @@ import { WorkOrderPagination } from "@/components/work-order-pagination";
 import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
 import { clampPage, paginateItems } from "@/lib/pagination";
+import { toast } from "sonner";
 
 interface BatchTicket {
   batchId: string;
@@ -59,21 +60,34 @@ export default function BusinessRepairsPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
 
-  const loadBatches = useCallback(async () => {
+  const loadBatches = useCallback(async (): Promise<boolean> => {
     setLoadingBatches(true);
     try {
-      const response = await fetch("/api/tickets/all-batches");
+      const response = await fetch("/api/tickets/all-batches", { cache: "no-store" });
       const result = await response.json();
 
-      if (result.success) {
-        setBatches(result.data || []);
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "加载工单列表失败");
       }
+      setBatches(result.data || []);
+      return true;
     } catch (error) {
       console.error("加载批次工单失败:", error);
+      return false;
     } finally {
       setLoadingBatches(false);
     }
   }, []);
+
+  const closeReviewAfterRefresh = useCallback(async (workflowSaved: boolean) => {
+    const refreshed = await loadBatches();
+    setSelectedBatchId(null);
+    if (!refreshed) {
+      toast.error(workflowSaved
+        ? "流程已保存，但工单列表刷新失败，请重新进入页面"
+        : "工单列表刷新失败，请重新进入页面");
+    }
+  }, [loadBatches]);
 
   useEffect(() => {
     if (authStatus === "loading") return;
@@ -131,7 +145,7 @@ export default function BusinessRepairsPage() {
         return (
           <Badge variant="outline" className="bg-emerald-50 border-emerald-300 text-emerald-800">
             <CheckCircle className="w-3 h-3 mr-1" />
-            仓库已确认
+            维修检查中
           </Badge>
         );
       case TicketStatus.IN_REPAIR:
@@ -204,14 +218,8 @@ export default function BusinessRepairsPage() {
         <div className="container mx-auto py-8 px-6">
           <BusinessBatchReview
             batchId={selectedBatchId}
-            onBack={() => {
-              setSelectedBatchId(null);
-              loadBatches();
-            }}
-            onCompleted={() => {
-              setSelectedBatchId(null);
-              loadBatches();
-            }}
+            onBack={() => closeReviewAfterRefresh(false)}
+            onCompleted={() => closeReviewAfterRefresh(true)}
           />
         </div>
       </div>

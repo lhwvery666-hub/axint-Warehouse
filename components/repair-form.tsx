@@ -762,7 +762,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       // 弹窗列出所有未完成项（最多显示 6 条，防止 toast 过长）
       const errorMessages = Object.values(validationErrors).filter(Boolean)
       toast({
-        title: "⚠️ 请完成以下必填项",
+        title: "请完成以下必填项",
         description: errorMessages.slice(0, 6).join("；"),
         variant: "destructive",
       })
@@ -862,7 +862,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
         setIsSubmitted(true)
         
         toast({
-          title: "✅ 工单更新成功",
+          title: "工单更新成功",
           description: `已更新 ${totalDeviceQuantity} 台设备`,
         })
 
@@ -888,11 +888,6 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       }
       
       const userId = user.id
-
-      // 为本次报修生成统一工单号（同一次提交中的所有设备共享）
-      const workOrderNumber = `WO-${Date.now()}-${Math.floor(Math.random() * 10000)
-        .toString()
-        .padStart(4, "0")}`
 
       // 使用多设备输入数组创建工单
       // 优先使用 deviceInputs，如果没有则回退到旧的单个设备逻辑
@@ -1093,7 +1088,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       if (totalDeviceQuantity === 1) {
         alert("工单创建成功！")
       } else {
-        alert(`✅ 批次工单创建成功！\n\n批次号：${batchId}\n设备数量：${successCount}台\n\n这些设备已关联到同一个批次工单中，可以统一管理。`)
+        alert(`批次工单创建成功！\n\n批次号：${batchId}\n设备数量：${successCount}台\n\n这些设备已关联到同一个批次工单中，可以统一管理。`)
       }
       
       // 用户确认后跳转（使用 setTimeout 确保状态更新后再跳转）

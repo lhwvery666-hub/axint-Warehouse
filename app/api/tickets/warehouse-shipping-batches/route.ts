@@ -22,9 +22,10 @@ export async function GET() {
 
     // 查询需要仓库安排发货的批次工单（使用 EXISTS 子查询）：
     // 只要批次中【任意一台设备】的状态属于以下之一，该批次就出现在待发货列表：
+    //   - Pending_Factory    : 返厂维修，待仓库优先寄往维修厂家
     //   - Warehouse_Shipping : 维修完成，待仓库发回客户现场
     //   - Pending_Shipment   : 待发货（通用）
-    //   - Pending_Factory    : 维修工程师已提交返厂申请，仓库需安排寄送原厂（RMA）
+    // “待移交”用于返厂后的进度跟进；“待发货”同时承担返厂寄出的优先操作入口。
     const result = await pool
       .request()
       .query(`
@@ -42,6 +43,14 @@ export async function GET() {
           STRING_AGG(CAST(COALESCE(t1.${DB_FIELDS.MODEL_NAME}, di.ModelName, '') AS NVARCHAR(MAX)), '|') as deviceModels,
           STRING_AGG(CAST(COALESCE(t1.${DB_FIELDS.STATUS}, '') AS NVARCHAR(MAX)), '|') as statuses,
           SUM(COALESCE(t1.Quantity, 1)) as deviceCount,
+          SUM(
+            CASE
+              WHEN t1.${DB_FIELDS.STATUS} = '${TicketStatus.PENDING_FACTORY}'
+                   AND NULLIF(LTRIM(RTRIM(t1.${DB_FIELDS.SIGNED_REPORT_PHOTO})), '') IS NOT NULL
+                THEN COALESCE(t1.Quantity, 1)
+              ELSE 0
+            END
+          ) as pendingFactoryDeviceCount,
           MIN(t1.${DB_FIELDS.CREATED_AT}) as createdAt,
           MAX(t1.${DB_FIELDS.STATUS}) as status
         FROM Repair_Tickets t1
@@ -54,13 +63,25 @@ export async function GET() {
             SELECT 1 FROM Repair_Tickets t2
             WHERE t2.${DB_FIELDS.BATCH_ID} = t1.${DB_FIELDS.BATCH_ID}
               AND (
-                t2.${DB_FIELDS.STATUS} = '${TicketStatus.WAREHOUSE_SHIPPING}'
+                (t2.${DB_FIELDS.STATUS} = '${TicketStatus.PENDING_FACTORY}'
+                 AND NULLIF(LTRIM(RTRIM(t2.${DB_FIELDS.SIGNED_REPORT_PHOTO})), '') IS NOT NULL)
+                OR t2.${DB_FIELDS.STATUS} = '${TicketStatus.WAREHOUSE_SHIPPING}'
                 OR t2.${DB_FIELDS.STATUS} = '${TicketStatus.PENDING_SHIPMENT}'
-                OR t2.${DB_FIELDS.STATUS} = '${TicketStatus.PENDING_FACTORY}'
               )
           )
         GROUP BY t1.${DB_FIELDS.BATCH_ID}
-        ORDER BY MIN(t1.${DB_FIELDS.CREATED_AT}) ASC
+        ORDER BY
+          CASE
+            WHEN MAX(
+              CASE
+                WHEN t1.${DB_FIELDS.STATUS} = '${TicketStatus.PENDING_FACTORY}'
+                     AND NULLIF(LTRIM(RTRIM(t1.${DB_FIELDS.SIGNED_REPORT_PHOTO})), '') IS NOT NULL THEN 1
+                ELSE 0
+              END
+            ) = 1 THEN 0
+            ELSE 1
+          END,
+          MIN(t1.${DB_FIELDS.CREATED_AT}) ASC
       `)
 
     return NextResponse.json({
@@ -69,12 +90,11 @@ export async function GET() {
     })
 
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : "查询失败"
-    console.error("查询待发货批次失败:", errorMessage)
+    console.error("查询待发货批次失败:", error)
     return NextResponse.json(
       { 
         success: false, 
-        message: errorMessage
+        message: "查询待发货批次失败，请稍后重试"
       },
       { status: 500 }
     )

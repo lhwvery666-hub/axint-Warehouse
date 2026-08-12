@@ -6,7 +6,10 @@ import {
   ALL_REPAIR_STATUS_FILTER,
   matchesFinancialFollowupFilters,
   matchesRepairListFilters,
+  matchesRepairSummaryFilter,
   matchesRepairTimeRange,
+  parseRepairSummaryFilter,
+  REPAIR_SUMMARY_FILTER,
   type RepairListFilterRecord,
   type RepairListFilters,
 } from "../repair-list-filters"
@@ -133,6 +136,118 @@ test("status search matches any status aggregated inside a batch", () => {
     ),
     true,
   )
+})
+
+test("summary cards normalize pending and active workflow statuses", () => {
+  assert.equal(
+    matchesRepairSummaryFilter(
+      { status: "created" },
+      REPAIR_SUMMARY_FILTER.PENDING,
+    ),
+    true,
+  )
+  assert.equal(
+    matchesRepairSummaryFilter(
+      { status: TicketStatus.WAREHOUSE_CONFIRMED },
+      REPAIR_SUMMARY_FILTER.ACTIVE,
+    ),
+    true,
+  )
+  assert.equal(
+    matchesRepairSummaryFilter(
+      { status: "technician_repairing" },
+      REPAIR_SUMMARY_FILTER.ACTIVE,
+    ),
+    true,
+  )
+  assert.equal(
+    matchesRepairSummaryFilter(
+      { status: TicketStatus.DELAYED },
+      REPAIR_SUMMARY_FILTER.ACTIVE,
+    ),
+    true,
+  )
+})
+
+test("retired warehouse-confirmed and delayed values are never shown as standalone workflow groups", () => {
+  assert.equal(
+    matchesRepairSummaryFilter(
+      { status: TicketStatus.WAREHOUSE_CONFIRMED },
+      REPAIR_SUMMARY_FILTER.PENDING,
+    ),
+    false,
+  )
+  assert.equal(
+    matchesRepairSummaryFilter(
+      { status: TicketStatus.DELAYED },
+      REPAIR_SUMMARY_FILTER.ACTIVE,
+    ),
+    true,
+  )
+})
+
+test("summary cards use nested status only when a batch lacks a top-level status", () => {
+  const batch: RepairListFilterRecord = {
+    batchId: "WO-SUMMARY",
+    devices: [
+      { status: TicketStatus.COMPLETED },
+    ],
+  }
+
+  assert.equal(
+    matchesRepairSummaryFilter(batch, REPAIR_SUMMARY_FILTER.COMPLETED),
+    true,
+  )
+  assert.equal(
+    matchesRepairSummaryFilter(batch, REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING),
+    false,
+  )
+
+  const mixedBatch: RepairListFilterRecord = {
+    ...batch,
+    status: TicketStatus.CREATED,
+  }
+  assert.equal(
+    matchesRepairSummaryFilter(mixedBatch, REPAIR_SUMMARY_FILTER.PENDING),
+    true,
+  )
+  assert.equal(
+    matchesRepairSummaryFilter(mixedBatch, REPAIR_SUMMARY_FILTER.COMPLETED),
+    false,
+  )
+})
+
+test("business review and warehouse shipping share one follow-up summary card", () => {
+  assert.equal(
+    matchesRepairSummaryFilter(
+      { status: TicketStatus.BUSINESS_REVIEW },
+      REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING,
+    ),
+    true,
+  )
+  assert.equal(
+    matchesRepairSummaryFilter(
+      { status: TicketStatus.WAREHOUSE_SHIPPING },
+      REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING,
+    ),
+    true,
+  )
+  assert.equal(
+    matchesRepairSummaryFilter(
+      { status: TicketStatus.BUSINESS_REVIEW },
+      REPAIR_SUMMARY_FILTER.ACTIVE,
+    ),
+    false,
+  )
+})
+
+test("summary filter query parameters reject unknown values", () => {
+  assert.equal(
+    parseRepairSummaryFilter(REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING),
+    REPAIR_SUMMARY_FILTER.BUSINESS_AND_SHIPPING,
+  )
+  assert.equal(parseRepairSummaryFilter("unknown"), REPAIR_SUMMARY_FILTER.ALL)
+  assert.equal(parseRepairSummaryFilter(null), REPAIR_SUMMARY_FILTER.ALL)
 })
 
 test("all non-empty filters use AND semantics", () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,6 +34,7 @@ import { WorkOrderPagination } from "@/components/work-order-pagination";
 import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
 import { ALL_REPAIR_STATUS_FILTER, matchesFinancialFollowupFilters, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
 import { clampPage, paginateItems } from "@/lib/pagination";
+import { toast } from "sonner";
 
 interface BatchTicket {
   batchId: string;
@@ -66,7 +67,7 @@ interface FollowupBatchTicket extends BatchTicket {
 export default function BusinessDashboard() {
   const { user, status } = useAuth();
   const router = useRouter();
-  const { repairs } = useRepairContext();
+  const { repairs, refreshRepairs } = useRepairContext();
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
 
@@ -114,70 +115,108 @@ export default function BusinessDashboard() {
   }, [isAuthorized, repairs]);
 
   // 加载全部工单（数据总览 Tab）
-  const loadAllBatches = async () => {
+  const loadAllBatches = useCallback(async (): Promise<boolean> => {
     setLoadingBatches(true);
     try {
-      const res = await fetch("/api/tickets/all-batches");
+      const res = await fetch("/api/tickets/all-batches", { cache: "no-store" });
       const result = await res.json();
-      if (result.success) setAllBatches(result.data || []);
+      if (!res.ok || !result.success) {
+        throw new Error(result.message || "加载全部工单失败");
+      }
+      setAllBatches(result.data || []);
+      return true;
     } catch (e) {
       console.error("加载批次工单失败:", e);
+      return false;
     } finally {
       setLoadingBatches(false);
     }
-  };
+  }, []);
 
   // 加载待审核批次（待审核批次 Tab）
-  const loadPendingBatches = async () => {
+  const loadPendingBatches = useCallback(async (): Promise<boolean> => {
     setLoadingPending(true);
     try {
-      const res = await fetch("/api/tickets/business-pending-batches");
+      const res = await fetch("/api/tickets/business-pending-batches", { cache: "no-store" });
       const result = await res.json();
-      if (result.success) {
-        const batches = result.data || [];
-        setPendingBatches(batches);
-        // 待审批数量直接用 API 返回的实际数据
-        setStats((prev) => ({ ...prev, adminReviewTickets: batches.length }));
+      if (!res.ok || !result.success) {
+        throw new Error(result.message || "加载待审核批次失败");
       }
+      const batches = result.data || [];
+      setPendingBatches(batches);
+      // 待审批数量直接用 API 返回的实际数据
+      setStats((prev) => ({ ...prev, adminReviewTickets: batches.length }));
+      return true;
     } catch (e) {
       console.error("加载待审核批次失败:", e);
+      return false;
     } finally {
       setLoadingPending(false);
     }
-  };
+  }, []);
 
   // 加载财务跟进批次（财务跟进 Tab）
-  const loadFollowupBatches = async () => {
+  const loadFollowupBatches = useCallback(async (): Promise<boolean> => {
     setLoadingFollowup(true);
     try {
-      const res = await fetch("/api/tickets/business-financial-followup");
+      const res = await fetch("/api/tickets/business-financial-followup", { cache: "no-store" });
       const result = await res.json();
-      if (result.success) {
-        const batches = result.data || [];
-        setFollowupBatches(batches);
-        setStats((prev) => ({ ...prev, followupTickets: batches.length }));
+      if (!res.ok || !result.success) {
+        throw new Error(result.message || "加载财务跟进批次失败");
       }
+      const batches = result.data || [];
+      setFollowupBatches(batches);
+      setStats((prev) => ({ ...prev, followupTickets: batches.length }));
+      return true;
     } catch (e) {
       console.error("加载财务跟进批次失败:", e);
+      return false;
     } finally {
       setLoadingFollowup(false);
     }
-  };
+  }, []);
+
+  const refreshBusinessData = useCallback(async (): Promise<boolean> => {
+    const results = await Promise.all([
+      loadAllBatches(),
+      loadPendingBatches(),
+      loadFollowupBatches(),
+    ]);
+    await refreshRepairs();
+    return results.every(Boolean);
+  }, [loadAllBatches, loadFollowupBatches, loadPendingBatches, refreshRepairs]);
+
+  const closeReviewAfterRefresh = useCallback(async (workflowSaved: boolean) => {
+    const refreshed = await refreshBusinessData();
+    setSelectedBatchId(null);
+    if (!refreshed) {
+      toast.error(workflowSaved
+        ? "流程已保存，但商务列表刷新失败，请点击刷新数据重试"
+        : "商务列表刷新失败，请点击刷新数据重试");
+    }
+  }, [refreshBusinessData]);
+
+  const handleManualRefresh = useCallback(async () => {
+    const refreshed = await refreshBusinessData();
+    if (!refreshed) {
+      toast.error("部分商务数据刷新失败，请稍后重试");
+    }
+  }, [refreshBusinessData]);
 
   // 授权后立即加载待审批/待跟进数量（统计卡片、Tab 徽标）
   useEffect(() => {
     if (!isAuthorized) return;
-    loadPendingBatches();
-    loadFollowupBatches();
-  }, [isAuthorized]);
+    void loadPendingBatches();
+    void loadFollowupBatches();
+  }, [isAuthorized, loadFollowupBatches, loadPendingBatches]);
 
   // Tab 切换时懒加载（数据总览）
   useEffect(() => {
     if (!isAuthorized) return;
-    if (activeTab === "overview") loadAllBatches();
-    if (activeTab === "pending") loadPendingBatches();
-    if (activeTab === "followup") loadFollowupBatches();
-  }, [activeTab]);
+    if (activeTab === "overview") void loadAllBatches();
+    if (activeTab === "pending") void loadPendingBatches();
+    if (activeTab === "followup") void loadFollowupBatches();
+  }, [activeTab, isAuthorized, loadAllBatches, loadFollowupBatches, loadPendingBatches]);
 
   // ── 工单状态徽章 ──────────────────────────────────────────────────────────────
   // ⚠️ 曾经的 bug：直接用原始字符串 s 与 TicketStatus 枚举做 switch 比较，一旦后端返回的大小写/格式
@@ -191,7 +230,7 @@ export default function BusinessDashboard() {
       case TicketStatus.WAREHOUSE_CONFIRMING:
         return <Badge variant="outline" className="bg-blue-50 border-blue-300 text-blue-800"><Package className="w-3 h-3 mr-1" />待仓库确认</Badge>;
       case TicketStatus.WAREHOUSE_CONFIRMED:
-        return <Badge variant="outline" className="bg-emerald-50 border-emerald-300 text-emerald-800"><CheckCircle className="w-3 h-3 mr-1" />仓库已确认</Badge>;
+        return <Badge variant="outline" className="bg-emerald-50 border-emerald-300 text-emerald-800"><CheckCircle className="w-3 h-3 mr-1" />维修检查中</Badge>;
       case TicketStatus.IN_REPAIR:
         return <Badge variant="outline" className="bg-cyan-50 border-cyan-300 text-cyan-800"><TrendingUp className="w-3 h-3 mr-1" />维修检查中</Badge>;
       case TicketStatus.TECHNICIAN_REPAIRING:
@@ -256,18 +295,8 @@ export default function BusinessDashboard() {
         <div className="container mx-auto py-8 px-6">
           <BusinessBatchReview
             batchId={selectedBatchId}
-            onBack={() => {
-              setSelectedBatchId(null);
-              loadAllBatches();
-              loadPendingBatches();
-              loadFollowupBatches();
-            }}
-            onCompleted={() => {
-              setSelectedBatchId(null);
-              loadAllBatches();
-              loadPendingBatches();
-              loadFollowupBatches();
-            }}
+            onBack={() => closeReviewAfterRefresh(false)}
+            onCompleted={() => closeReviewAfterRefresh(true)}
           />
         </div>
       </div>
@@ -288,7 +317,7 @@ export default function BusinessDashboard() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => { loadAllBatches(); loadPendingBatches(); loadFollowupBatches(); }}
+            onClick={() => void handleManualRefresh()}
             className="flex items-center gap-2"
           >
             <RefreshCw className="h-4 w-4" />

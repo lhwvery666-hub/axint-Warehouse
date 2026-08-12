@@ -83,7 +83,7 @@ interface ValidationResult {
 export interface TicketActionBarProps {
   ticket: TicketData;
   currentUser: CurrentUser;
-  onActionSuccess?: () => void; // 操作成功后的回调（用于刷新数据）
+  onActionSuccess?: () => void | Promise<void>; // 操作成功后的回调（用于刷新数据）
   excludedActions?: readonly TicketAction[];
   className?: string;
 }
@@ -203,14 +203,57 @@ export default function TicketActionBar({
   const handleExecuteAction = async (action: TicketAction) => {
     setValidationError(null);
 
-    // 特殊处理：上传签字凭证需要弹出文件上传对话框
+    // 现场签字严格拆分为“保存附件”和“发送流程”两个动作。
     if (action === TicketAction.UPLOAD_SIGNATURE) {
-      setShowUploadDialog(true);
+      if (!ticket.batchId) {
+        setValidationError("缺少批次编号，无法保存或发送签字凭证");
+        return;
+      }
+
+      if (!ticket.signedReportPhoto) {
+        setShowUploadDialog(true);
+        return;
+      }
+
+      await sendReporterConfirmation();
       return;
     }
 
     // 其他动作直接调用 API
     await executeAction(action);
+  };
+
+  const sendReporterConfirmation = async () => {
+    if (!ticket.batchId) {
+      setValidationError("缺少批次编号，无法发送现场确认流程");
+      return;
+    }
+
+    setExecutingAction(TicketAction.UPLOAD_SIGNATURE);
+
+    try {
+      const formData = new FormData();
+      formData.append("advanceFlow", "true");
+      formData.append("reuseExistingPhoto", "true");
+
+      const response = await fetch(`/api/tickets/reporter-confirm/${ticket.batchId}`, {
+        method: "POST",
+        body: formData,
+      });
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        setValidationError(result.message || "发送流程失败");
+        return;
+      }
+
+      await onActionSuccess?.();
+    } catch (error: unknown) {
+      console.error("[TicketActionBar] 发送现场确认流程失败:", error);
+      setValidationError(error instanceof Error ? error.message : "网络错误，请稍后重试");
+    } finally {
+      setExecutingAction(null);
+    }
   };
 
   /**
@@ -234,14 +277,14 @@ export default function TicketActionBar({
 
       const result = await response.json();
 
-      if (!result.success) {
+      if (!response.ok || !result.success) {
         setValidationError(result.message || "操作失败");
         return;
       }
 
       // 操作成功，触发回调
       if (onActionSuccess) {
-        onActionSuccess();
+        await onActionSuccess();
       }
     } catch (error: unknown) {
       console.error("[TicketActionBar] 执行动作失败:", error);
@@ -263,11 +306,15 @@ export default function TicketActionBar({
     setExecutingAction(TicketAction.UPLOAD_SIGNATURE);
 
     try {
+      if (!ticket.batchId) {
+        setValidationError("缺少批次编号，无法保存签字凭证");
+        return;
+      }
+
       const formData = new FormData();
-      formData.append("action", TicketAction.UPLOAD_SIGNATURE);
       formData.append("signedPhoto", uploadFile);
 
-      const actionResponse = await fetch(`/api/tickets/${ticket.id}/workflow-action`, {
+      const actionResponse = await fetch(`/api/tickets/reporter-confirm/${ticket.batchId}`, {
         method: "POST",
         body: formData,
       });
@@ -279,10 +326,12 @@ export default function TicketActionBar({
         return;
       }
 
-      // 操作成功
+      // 这里只保存附件；刷新后由用户再次点击“发送流程”。
       setShowUploadDialog(false);
+      setUploadFile(null);
+      setUploadPreview(null);
       if (onActionSuccess) {
-        onActionSuccess();
+        await onActionSuccess();
       }
     } catch (error: unknown) {
       console.error("[TicketActionBar] 文件上传失败:", error);
@@ -345,7 +394,7 @@ export default function TicketActionBar({
             return (
               <div key={transition.action} className="space-y-2 rounded-lg border p-3">
                 <div className="text-sm text-muted-foreground">
-                  执行后进入：{nextStatusLabel}
+                  {TICKET_ACTION_LABELS[transition.action]}；发送后进入：{nextStatusLabel}
                 </div>
                 {!validationResult.valid && validationResult.message && (
                   <Alert variant="destructive">
@@ -362,7 +411,7 @@ export default function TicketActionBar({
                   {executingAction === transition.action && (
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   )}
-                  {TICKET_ACTION_LABELS[transition.action]}
+                  发送流程
                 </Button>
               </div>
             );
@@ -425,7 +474,7 @@ export default function TicketActionBar({
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               )}
               <Upload className="mr-2 h-4 w-4" />
-              上传并提交
+              保存信息
             </Button>
           </DialogFooter>
         </DialogContent>

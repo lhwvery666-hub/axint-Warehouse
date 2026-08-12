@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { useAuth } from '@/context/auth-context';
+import { useRepairContext } from '@/context/RepairContext';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { UserRole } from '@/lib/enums';
@@ -90,6 +91,7 @@ export default function RepairReportPrintPage() {
   const params = useParams();
   const router = useRouter();
   const { user } = useAuth();
+  const { refreshRepairs } = useRepairContext();
   const { toast } = useToast();
   const [loading, setLoading] = useState(true);
   const [reportData, setReportData] = useState<BatchReportData | null>(null);
@@ -314,25 +316,14 @@ export default function RepairReportPrintPage() {
   // 处理签字照片上传
   const handlePhotoUpload = async () => {
     if (!reportData) return;
-    
-    // 收费情况下，必须上传签字照片
-    if (user?.role === UserRole.REPORTER) {
-      if (isChargeable && !signedPhotoFile) {
-        toast({
-          title: '请上传签字照片',
-          description: '本次维修需要收费（¥' + totalCost.toFixed(2) + '），必须上传客户签字的报告照片',
-          variant: 'destructive',
-        });
-        return;
-      }
-      
-      // 非收费情况：如果没有上传签字照片，给予友好提示（但不阻止提交）
-      if (!isChargeable && !signedPhotoFile) {
-        const confirmed = window.confirm('您还没有上传签字照片，确定要继续提交吗？\n\n建议：打印报告后签字并拍照上传。');
-        if (!confirmed) {
-          return;
-        }
-      }
+
+    if (!signedPhotoFile) {
+      toast({
+        title: '请选择签字照片',
+        description: '“保存信息”只负责保存已选择的签字凭证，不会改变流程状态',
+        variant: 'destructive',
+      });
+      return;
     }
 
     try {
@@ -376,11 +367,64 @@ export default function RepairReportPrintPage() {
       } else {
         throw new Error(result.message || '提交失败');
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('提交确认失败:', err);
       toast({
         title: '提交失败',
-        description: err.message || '请稍后重试',
+        description: err instanceof Error ? err.message : '请稍后重试',
+        variant: 'destructive',
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSendReporterFlow = async () => {
+    if (!reportData) return;
+    if (hasChanges) {
+      toast({
+        title: '请先保存信息',
+        description: '当前签字照片尚未保存，保存成功后才能发送流程',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (isChargeable && !batchInfo.signedReportPhoto) {
+      toast({
+        title: '请先保存签字照片',
+        description: `本次维修需要收费（¥${totalCost.toFixed(2)}），发送流程前必须保存客户签字凭证`,
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      setSubmitting(true);
+      const formData = new FormData();
+      formData.append('advanceFlow', 'true');
+      if (batchInfo.signedReportPhoto) {
+        formData.append('reuseExistingPhoto', 'true');
+      }
+      const response = await fetch(`/api/tickets/reporter-confirm/${params.id}`, {
+        method: 'PUT',
+        body: formData,
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || '发送流程失败');
+
+      toast({ title: '发送成功', description: result.message || '工单已进入维修作业阶段' });
+      const fetchResponse = await fetch(`/api/tickets/batch-repair-report/${params.id}`);
+      const fetchResult = await fetchResponse.json();
+      if (fetchResult.success && fetchResult.data) setReportData(fetchResult.data);
+      await refreshRepairs();
+      if (isEmbedMode) {
+        window.parent.postMessage({ type: 'REPAIR_REPORT_CONFIRMED' }, window.location.origin);
+      }
+    } catch (error: unknown) {
+      console.error('发送现场确认流程失败:', error);
+      toast({
+        title: '发送失败',
+        description: error instanceof Error ? error.message : '请稍后重试',
         variant: 'destructive',
       });
     } finally {
@@ -486,7 +530,7 @@ export default function RepairReportPrintPage() {
                   <div className="flex-1">
                     <p className="font-semibold text-red-900">当前工单状态不允许上传签字</p>
                     <p className="text-sm text-red-700 mt-1">
-                      只有维修人员保存并发送维修报告后（状态为"待现场确认"），您才能上传签字照片。请等待维修人员发送报告。
+                      只有维修人员保存并发送维修报告后（状态为“待现场确认”），您才能上传签字照片。请等待维修人员发送报告。
                     </p>
                   </div>
                 </div>
@@ -530,7 +574,7 @@ export default function RepairReportPrintPage() {
               {batchInfo.signedPhotoViewedBy && (
                 <div className="mb-2 px-3 py-2 bg-orange-100 border border-orange-200 rounded-md">
                   <p className="text-xs text-orange-900">
-                    <strong>🔒 已锁定</strong> - 维修人员已查看，如需修改请申请
+                    <strong>已锁定</strong> - 维修人员已查看，如需修改请申请
                   </p>
                 </div>
               )}
@@ -538,7 +582,7 @@ export default function RepairReportPrintPage() {
               {!batchInfo.signedReportPhoto && signedPhoto && (
                 <div className="mb-2 px-3 py-2 bg-blue-100 border border-blue-200 rounded-md">
                   <p className="text-xs text-blue-900">
-                    照片已选择，点击下方"确认提交"按钮保存
+                    照片已选择，点击下方“保存信息”按钮保存；保存不会改变流程状态
                   </p>
                 </div>
               )}
@@ -672,10 +716,23 @@ export default function RepairReportPrintPage() {
                     <>上传中...</>
                   ) : (
                     <>
-                      上传照片
+                      保存信息
                       {hasChanges && <Badge className="ml-2 bg-white text-orange-600">!</Badge>}
                     </>
                   )}
+                </Button>
+              </div>
+            )}
+
+            {isPendingReporterConfirm && !hasChanges && (batchInfo.signedReportPhoto || !isChargeable) && (
+              <div className="mt-4 flex justify-center">
+                <Button
+                  onClick={handleSendReporterFlow}
+                  disabled={submitting}
+                  size="lg"
+                  className="bg-primary hover:bg-primary/90 min-w-[200px]"
+                >
+                  {submitting ? '发送中...' : '发送流程'}
                 </Button>
               </div>
             )}
@@ -683,7 +740,7 @@ export default function RepairReportPrintPage() {
         </div>
       )}
 
-      <div className="print-content">
+      <div className={`print-content${devices.length <= 5 ? ' print-content-compact' : ''}`}>
         {/* 公司抬头 */}
         <div className="report-header">
           <div className="company-name">{getCompanyName()}</div>

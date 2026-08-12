@@ -10,6 +10,7 @@ import AppSidebar from "@/components/app-sidebar";
 import RecycleBinPage from "@/app/recycle-bin/page";
 import { useAuth } from "@/context/auth-context";
 import { UserRole, ROUTES } from "@/lib/enums";
+import { useRepairContext } from "@/context/RepairContext";
 
 // 有效的顶级标签列表，用于校验 URL 中的 tab 参数
 const VALID_TABS = ["home", "repair", "profile", "recycle"] as const;
@@ -17,6 +18,7 @@ type TabType = typeof VALID_TABS[number];
 
 function HomeContent() {
   const { user } = useAuth();
+  const { refreshRepairs } = useRepairContext();
   const router = useRouter();
   const searchParams = useSearchParams();
   // 优先使用 URL 中的 tab 参数（例如从工单详情页"返回"时会带上 ?tab=repair），
@@ -67,7 +69,9 @@ function HomeContent() {
     if (tab === "repair") {
       setSelectedTaskId(null);
     }
-    router.replace(`/?tab=${tab}`, { scroll: false });
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("tab", tab);
+    router.replace(`/?${params.toString()}`, { scroll: false });
   };
 
   const handleStartRepair = (taskId: string, batchCtx?: { batchId: string; devices: any[] }) => {
@@ -83,7 +87,8 @@ function HomeContent() {
     handleTabChange("repair");
   }
 
-  const handleBackToDashboard = () => {
+  const handleBackToDashboard = async () => {
+    await refreshRepairs();
     // 如果有批次上下文，返回到批次选择（停留在维修工单页面但清除taskId）
     // 如果没有批次上下文，返回到首页
     if (batchContext) {

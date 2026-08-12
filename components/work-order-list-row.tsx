@@ -28,7 +28,6 @@ export interface WorkOrderListRowProps {
   priorityIndicator?: ReactNode
   statusNode?: ReactNode
   reportedAt?: string
-  delayedText?: string
   pendingSnText?: string
   actions?: ReactNode
   belowContent?: ReactNode
@@ -68,7 +67,6 @@ export function WorkOrderListRow({
   priorityIndicator,
   statusNode,
   reportedAt,
-  delayedText,
   pendingSnText,
   actions,
   belowContent,
@@ -172,7 +170,6 @@ export function WorkOrderListRow({
           <div className="flex items-center justify-between gap-2 xl:justify-end">
             <div className="space-y-0.5 text-right">
               {reportedAt && <p className="whitespace-nowrap text-[11px] text-muted-foreground">{reportedAt}</p>}
-              {delayedText && <p className="whitespace-nowrap text-[11px] text-amber-500">{delayedText}</p>}
               {pendingSnText && <p className="whitespace-nowrap text-[11px] text-warning">{pendingSnText}</p>}
             </div>
             {actions && (

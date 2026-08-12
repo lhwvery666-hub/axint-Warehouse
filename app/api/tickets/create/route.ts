@@ -41,9 +41,6 @@ export async function POST(request: Request) {
     const quantity = quantityRaw && !Number.isNaN(Number(quantityRaw)) ? Number(quantityRaw) : 1
     const rawProductSn = (formData.get("productSn") || "").toString().trim() || deviceSn
 
-    // 统一工单号：同一次报修中多台设备共享的业务工单号
-    const workOrderNumber = (formData.get("workOrderNumber") || "").toString().trim() || null
-
     // --- 3. 提取产品信息类 (三级联动) ---
     const subCategory = (formData.get("subCategory") || "").toString().trim() || null
     const fullSpec = (formData.get("fullSpec") || "").toString().trim() || null
@@ -191,9 +188,14 @@ export async function POST(request: Request) {
 
     // ⚠️ 统一编号体系：本路由是遗留的单设备报修入口（与主流程 /api/tickets/batch 并存），
     // 曾经完全没有 BatchId 概念。现在统一改为"单设备也是一个只有1台设备的批次"，
-    // 用同一套并发安全的顺序批次号生成器（WO+YYMMDD+0001），
+    // 用同一套并发安全的每日顺序工单号生成器（YYYYMMDD001，超过 999 后使用 a00-z99），
     // 避免系统里同时存在两套工单编号规则。
-    const batchId = hasBatchId ? await generateSequentialBatchId(pool) : null
+    // 工单号只能由服务端生成，不能采用客户端传入值。
+    const generatedWorkOrderNumber = (hasBatchId || hasWorkOrderNumber)
+      ? await generateSequentialBatchId(pool)
+      : null
+    const batchId = hasBatchId ? generatedWorkOrderNumber : null
+    const workOrderNumber = hasWorkOrderNumber ? generatedWorkOrderNumber : null
 
     // ==========================================
     // 分支 1：暂缓验证流程 (PENDING)
@@ -204,7 +206,7 @@ export async function POST(request: Request) {
         .input("deviceSn", "PENDING")
         .input("modelName", selectedModelName)
         .input("faultDesc", faultDesc)
-        .input("status", TicketStatus.CREATED)
+          .input("status", TicketStatus.WAREHOUSE_CONFIRMING)
 
       // 动态构建 PENDING 流程的 SQL
       let insertPending = `INSERT INTO Repair_Tickets (DeviceSN, ModelName, FaultDescription, Status`
@@ -335,7 +337,7 @@ export async function POST(request: Request) {
       .input("deviceSn", deviceSn)
       .input("modelName", finalModelName)
       .input("faultDesc", faultDesc)
-      .input("status", TicketStatus.CREATED)
+        .input("status", TicketStatus.WAREHOUSE_CONFIRMING)
 
     // 动态构建基础字段
     let insertQuery = `INSERT INTO Repair_Tickets (DeviceSN, ModelName, FaultDescription, Status`

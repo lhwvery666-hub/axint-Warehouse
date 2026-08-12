@@ -40,44 +40,6 @@ const batchUpdateSchema = z.object({
   devices: z.array(batchDeviceSchema).min(1).max(500),
 }).strict()
 
-// ─── 状态机回退规则集合（模块级常量，避免在事务内重复构造）────────────────────────
-
-/**
- * Rule 1 守卫集合：
- * 在这些状态下，若设备 SN 或型号发生变更，必须将状态回退至「待仓库确认」
- * 注意：Created 不在此列（批次初建未曾仓库确认过，SN变更后保持 Created，仍在待确认列表中可见）
- */
-const STATUSES_NEED_WAREHOUSE_RECONFIRM = new Set<string>([
-  TicketStatus.WAREHOUSE_CONFIRMING,  // 已在等待确认中，SN再次变更时保持该状态（幂等）
-  TicketStatus.WAREHOUSE_CONFIRMED,
-  TicketStatus.IN_REPAIR,
-  TicketStatus.TECHNICIAN_REPAIRING,
-  TicketStatus.PENDING_REPORTER_CONFIRM,
-  TicketStatus.BUSINESS_REVIEW,
-  TicketStatus.WAREHOUSE_SHIPPING,
-  TicketStatus.WAREHOUSE_RECEIVED,
-  TicketStatus.PROCESSING,
-  TicketStatus.ADMIN_REVIEW,
-  TicketStatus.PENDING_SHIPMENT,
-  // 返厂流程中也需重新确认（设备身份发生变更）
-  TicketStatus.PENDING_FACTORY,
-  TicketStatus.FACTORY_FINISHED,
-])
-
-/**
- * Rule 2 守卫集合：
- * 在这些状态下，若 TECHNICIAN 修改了 RepairCost，必须将状态回退至「待现场确认」
- * 并清空 SignedReportPhoto
- */
-const STATUSES_NEED_REPORTER_RECONFIRM_ON_COST = new Set<string>([
-  TicketStatus.TECHNICIAN_REPAIRING,
-  TicketStatus.PENDING_REPORTER_CONFIRM,
-  TicketStatus.BUSINESS_REVIEW,
-  TicketStatus.WAREHOUSE_SHIPPING,
-  TicketStatus.ADMIN_REVIEW,
-  TicketStatus.PENDING_SHIPMENT,
-])
-
 // ─── 类型定义 ────────────────────────────────────────────────────────────────────
 
 /**
@@ -119,7 +81,6 @@ interface ExistingDevice {
 
 interface DeviceUpdateResult {
   updateFields: string[]
-  statusRollback: { newStatus: string; reason: string } | null
   changedLabels: string[]
 }
 
@@ -158,14 +119,7 @@ function parseImageField(value: unknown): string | null | undefined {
  * 根据新提交的设备数据与数据库现有值做**字段级真正对比（Diff）**，
  * 只有字段值发生实际变化时才记录到 changedLabels，消除全量提交引起的假日志。
  *
- * ■ Rule 1（任何角色）：
- *   SN 或型号变更 + 当前状态已过仓库确认 → 回退至 WAREHOUSE_CONFIRMING
- *
- * ■ Rule 2（仅 TECHNICIAN 角色）：
- *   RepairCost 变更 + 当前状态已到维修进行中或更后 → 回退至 PENDING_REPORTER_CONFIRM + 清签字
- *
- * ■ Rule 3（BUSINESS / WAREHOUSE 角色专属字段）：
- *   静默写入，不触发任何回退。
+ * This is a save-only path. Field changes never change workflow status.
  */
 function buildDeviceUpdateFields(
   device: Record<string, unknown>,
@@ -174,7 +128,6 @@ function buildDeviceUpdateFields(
   body: Record<string, unknown>
 ): DeviceUpdateResult {
   const changedLabels: string[] = []
-  let statusRollback: { newStatus: string; reason: string } | null = null
 
   const newSn    = (device.serialNumber as string) || SPECIAL_VALUES.PENDING_VERIFY
   const newModel = (device.modelName    as string) || DEFAULT_VALUES.GENERIC_MODEL
@@ -207,17 +160,7 @@ function buildDeviceUpdateFields(
   if (norm(device.deviceName)          !== norm(existing.deviceName))      changedLabels.push("设备名称")
   if (newQuantity                      !== existing.quantity)              changedLabels.push(`数量: ${existing.quantity} → ${newQuantity}`)
 
-  // ── Rule 1：设备身份变更 → 回退至「待仓库确认」────────────────────────────────
-  // 归一化后再比较，避免历史脏数据/大小写差异导致该守卫规则误判或漏判
-  const normalizedExistingStatus = normalizeTicketStatus(existing.status)
-  const identityChanged = snActuallyChanged || norm(newModel) !== norm(existing.modelName)
-  if (identityChanged && normalizedExistingStatus && STATUSES_NEED_WAREHOUSE_RECONFIRM.has(normalizedExistingStatus)) {
-    updateFields.push(`${DB_FIELDS.STATUS} = N'${TicketStatus.WAREHOUSE_CONFIRMING}'`)
-    statusRollback = { newStatus: TicketStatus.WAREHOUSE_CONFIRMING, reason: "设备身份（SN/型号）变更" }
-    console.log(`🔄 [Rule1 回退] SN: ${existing.sn}→${newSn}，型号: ${existing.modelName}→${newModel}，状态回退至 Warehouse_Confirming`)
-  }
-
-  // ── Rule 2：维修费用变更（仅 TECHNICIAN）→ 回退至「待现场确认」+ 清签字────────
+  // 维修费用属于普通信息保存；修改后不会自动回退或清空签字。
   if (userRole === UserRole.TECHNICIAN && device.repairCost !== undefined) {
     const newCostRaw = device.repairCost
     const newCostStr = newCostRaw !== null ? String(newCostRaw) : null
@@ -225,13 +168,7 @@ function buildDeviceUpdateFields(
     const newCostNormalized = newCostStr           !== null ? String(parseFloat(newCostStr))          : null
     const costChanged = newCostNormalized !== oldCostNormalized
 
-    if (costChanged && normalizedExistingStatus && STATUSES_NEED_REPORTER_RECONFIRM_ON_COST.has(normalizedExistingStatus)) {
-      statusRollback = { newStatus: TicketStatus.PENDING_REPORTER_CONFIRM, reason: "维修费用变更" }
-      updateFields.push(`${DB_FIELDS.STATUS} = N'${TicketStatus.PENDING_REPORTER_CONFIRM}'`)
-      updateFields.push(`${DB_FIELDS.SIGNED_REPORT_PHOTO} = NULL`)
-      changedLabels.push(`维修费用: ${existing.repairCost ?? "未设置"} → ${newCostRaw}（已回退至待现场确认，签字凭证已清空）`)
-      console.log(`🔄 [Rule2 回退] 费用 ${existing.repairCost} → ${newCostRaw}，状态回退至 Pending_Reporter_Confirm，签字已清空`)
-    } else if (costChanged) {
+    if (costChanged) {
       changedLabels.push(`维修费用: ${existing.repairCost ?? "未设置"} → ${newCostRaw}`)
     }
 
@@ -286,7 +223,7 @@ function buildDeviceUpdateFields(
     if (norm(damageImagesValue) !== norm(existing.damageImages)) changedLabels.push("损坏照片")
   }
 
-  return { updateFields, statusRollback, changedLabels }
+  return { updateFields, changedLabels }
 }
 
 // ─── API 处理函数 ────────────────────────────────────────────────────────────────
@@ -296,9 +233,7 @@ function buildDeviceUpdateFields(
  *
  * 字段级智能更新接口：
  *  - 所有变更记录均基于真实 Diff（新旧值对比），消除全量提交引起的假日志
- *  - Rule 1: SN/型号身份变更 → 回退至「待仓库确认」（任何角色）
- *  - Rule 2: 维修费用变更    → 回退至「待现场确认」+ 清签字（仅 TECHNICIAN）
- *  - Rule 3: 商务/仓库专属字段修改 → 静默写入，不触发任何回退
+ *  - 保存字段但不改变状态；状态只允许由专用“发送流程”接口推进
  */
 export async function PUT(
   request: Request,
@@ -562,21 +497,17 @@ export async function PUT(
       const existingCount = existingDeviceIds.length
 
       const allDeviceChangeSummaries: string[] = []
-      const rollbackEvents: { deviceId: number; quantity: number; rollback: { newStatus: string; reason: string } }[] = []
 
       /** 执行单台已有设备的 UPDATE（复用于三个分支） */
       const processExistingDevice = async (device: Record<string, unknown>, deviceId: number) => {
         const existing = existingDeviceMap.get(deviceId)
         if (!existing) return
 
-        const { updateFields, statusRollback, changedLabels } =
+        const { updateFields, changedLabels } =
           buildDeviceUpdateFields(device, existing, user.role, body)
 
         if (changedLabels.length > 0) {
           allDeviceChangeSummaries.push(`设备${deviceId}：${changedLabels.join("、")}`)
-        }
-        if (statusRollback) {
-          rollbackEvents.push({ deviceId, quantity: Number(device.quantity) || 1, rollback: statusRollback })
         }
 
         await tx.$executeRaw(Prisma.sql`
@@ -662,12 +593,6 @@ export async function PUT(
       if (allDeviceChangeSummaries.length > 0) {
         descParts.push(`[设备信息] ${allDeviceChangeSummaries.join("；")}`)
       }
-      if (rollbackEvents.length > 0) {
-        const rollbackDesc = rollbackEvents
-          .map(e => `设备${e.deviceId} 因「${e.rollback.reason}」回退至「${e.rollback.newStatus}」`)
-          .join("；")
-        descParts.push(`[状态回退] ${rollbackDesc}`)
-      }
 
       const description = descParts.length > 0
         ? descParts.join(" | ")
@@ -684,36 +609,22 @@ export async function PUT(
         }
       })
 
-      for (const { deviceId, rollback } of rollbackEvents) {
-        await tx.repair_Ticket_History.create({
-          data: {
-            batchId,
-            actionType:   TicketActionType.REWIND_UPDATE,
-            operatorId:   user.id,
-            operatorName: user.realName || user.username || user.id.toString(),
-            newStatus:    rollback.newStatus,
-            description:  `设备 ${deviceId}：因「${rollback.reason}」自动回退至「${rollback.newStatus}」`,
-          }
-        })
-      }
-
-      const rollbackCount = rollbackEvents.reduce((sum, event) => sum + event.quantity, 0)
-      return { currentStatus, deviceCount, rollbackCount, description }
+      return { currentStatus, deviceCount, description }
     })
 
     console.log(
-      `✅ [批次更新] batchId=${batchId} 设备数=${result.deviceCount} 回退数=${result.rollbackCount}`,
+      `✅ [批次更新] batchId=${batchId} 设备数=${result.deviceCount}`,
       result.description
     )
 
     return NextResponse.json({
       success: true,
-      message: `工单信息已更新，共 ${result.deviceCount} 台设备${result.rollbackCount > 0 ? `，${result.rollbackCount} 台触发状态回退` : ""}`,
+      message: `工单信息已保存，共 ${result.deviceCount} 台设备，状态未改变`,
       data: {
         batchId,
         deviceCount:   result.deviceCount,
         status:        result.currentStatus,
-        rollbackCount: result.rollbackCount,
+        rollbackCount: 0,
       }
     })
 

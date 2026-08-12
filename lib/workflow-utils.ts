@@ -80,7 +80,8 @@ export const STATUS_TO_AGGREGATED_MAP: Record<TicketStatus, AggregatedStatus> = 
   [TicketStatus.OUT_WARRANTY_REPAIR]: AggregatedStatus.IN_REPAIR,
   [TicketStatus.PENDING_FACTORY]: AggregatedStatus.IN_REPAIR,
   [TicketStatus.FACTORY_FINISHED]: AggregatedStatus.IN_REPAIR,
-  [TicketStatus.DELAYED]: AggregatedStatus.ABNORMAL,
+  // 历史延期记录按维修检查中展示；新流程不再产生延期状态。
+  [TicketStatus.DELAYED]: AggregatedStatus.INSPECTING,
 };
 
 /**
@@ -326,7 +327,7 @@ export function getPendingStatusesForRole(role: string): TicketStatus[] {
   const roleMap: Record<UserRole, TicketStatus[]> = {
     // ⚠️ 必须包含 WAREHOUSE_CONFIRMING，否则仪表盘"待处理"卡片计数（Created + Warehouse_Confirming）
     // 与点击卡片后联动过滤出的列表会不一致（部分工单被误过滤掉）
-    [UserRole.TECHNICIAN]: [TicketStatus.CREATED, TicketStatus.WAREHOUSE_CONFIRMING, TicketStatus.IN_REPAIR, TicketStatus.PROCESSING, TicketStatus.DELAYED],
+    [UserRole.TECHNICIAN]: [TicketStatus.CREATED, TicketStatus.WAREHOUSE_CONFIRMING, TicketStatus.IN_REPAIR, TicketStatus.PROCESSING],
     [UserRole.REPORTER]: [TicketStatus.PENDING_REPORTER_CONFIRM],
     [UserRole.ADMIN]: [TicketStatus.ADMIN_REVIEW],
     [UserRole.BUSINESS]: [TicketStatus.ADMIN_REVIEW],
@@ -445,10 +446,10 @@ export const STATUS_PRIORITY: Record<TicketStatus, number> = {
  */
 export function getBatchAggregatedStatus(tickets: TicketLike[]): TicketStatus {
   if (!tickets || tickets.length === 0) {
-    return TicketStatus.CREATED;
+    return TicketStatus.WAREHOUSE_CONFIRMING;
   }
   
-  let highestStatus = TicketStatus.CREATED;
+  let highestStatus = TicketStatus.WAREHOUSE_CONFIRMING;
   let highestPriority = 0;
   
   tickets.forEach(ticket => {

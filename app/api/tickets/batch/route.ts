@@ -114,10 +114,8 @@ export async function POST(request: Request) {
 
     const pool = await getDbConnection();
 
-    // ⚠️ 曾经的实现：用当前时间戳后4位拼接批次号（WO+YYMMDD+时间戳后4位），
-    // 后缀每10秒循环一次，同一天内并发创建极易撞号，且无数据库层唯一约束兜底。
-    // 修复：改用并发安全的顺序批次号生成器（sp_getapplock + 独立序列表原子自增），
-    // 格式不变为 WO+YYMMDD+0001，保证同一天内绝对不重复、按创建顺序递增。
+    // 使用并发安全的每日顺序工单号生成器（sp_getapplock + 独立序列表原子自增）。
+    // 格式为 YYYYMMDD001-YYYYMMDD999，超过后使用 a00-z99。
     const batchId = await generateSequentialBatchId(pool);
 
     // 动态检查表结构（读取操作，事务外执行）
@@ -134,6 +132,7 @@ export async function POST(request: Request) {
       columnNames.some((c) => c.toLowerCase() === fieldName.toLowerCase());
 
     const hasBatchId         = fieldExists(DB_FIELDS.BATCH_ID);
+    const hasWorkOrderNumber = fieldExists(DB_FIELDS.WORK_ORDER_NUMBER);
     const hasProjectName     = fieldExists(DB_FIELDS.PROJECT_NAME);
     const hasContactInfo     = fieldExists(DB_FIELDS.CONTACT_INFO);
     const hasSenderAddress   = fieldExists(DB_FIELDS.SENDER_ADDRESS);
@@ -187,6 +186,10 @@ export async function POST(request: Request) {
         if (hasBatchId) {
           insertFields.push("BatchId"); insertValues.push("@batchId");
           insertRequest.input("batchId", batchId);
+        }
+        if (hasWorkOrderNumber) {
+          insertFields.push("WorkOrderNumber"); insertValues.push("@workOrderNumber");
+          insertRequest.input("workOrderNumber", batchId);
         }
         if (hasProjectName) {
           insertFields.push("ProjectName"); insertValues.push("@projectName");

@@ -18,7 +18,7 @@ import { WorkOrderCardColumns } from "@/components/work-order-card-columns";
 import { ALL_REPAIR_STATUS_FILTER, matchesRepairListFilters, REPAIR_STATUS_FILTER_OPTIONS } from "@/lib/repair-list-filters";
 
 export default function RepairsPage() {
-  const { repairs, updateRepair, deleteRepair } = useRepairContext();
+  const { repairs, updateRepair, deleteRepair, refreshRepairs } = useRepairContext();
   const { user } = useAuth();
   const router = useRouter();
   const [workOrderQuery, setWorkOrderQuery] = useState("");
@@ -27,6 +27,11 @@ export default function RepairsPage() {
   const [filterStatus, setFilterStatus] = useState(ALL_REPAIR_STATUS_FILTER);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [selectedRepairId, setSelectedRepairId] = useState<string | null>(null);
+
+  const closeRepairDetail = async () => {
+    await refreshRepairs();
+    setSelectedRepairId(null);
+  };
 
   const filteredRepairs = repairs.filter((repair) => matchesRepairListFilters(repair, {
     workOrderQuery,
@@ -65,8 +70,6 @@ export default function RepairsPage() {
         return <Badge className="bg-green-100 text-green-800 border-green-300 text-xs">{label}</Badge>;
       case "unrepairable":
         return <Badge className="bg-red-100 text-red-800 border-red-300 text-xs">{label}</Badge>;
-      case "delayed":
-        return <Badge className="bg-amber-100 text-amber-800 border-amber-300 text-xs">{label}</Badge>;
       default:
         return <Badge className="text-xs">{label}</Badge>;
     }
@@ -260,7 +263,7 @@ export default function RepairsPage() {
 
       {/* 工单详情对话框 */}
       {selectedRepairId && (
-        <Dialog open={!!selectedRepairId} onOpenChange={(open) => !open && setSelectedRepairId(null)}>
+        <Dialog open={!!selectedRepairId} onOpenChange={(open) => { if (!open) void closeRepairDetail(); }}>
           <DialogContent className="max-w-7xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>工单详情</DialogTitle>
@@ -268,7 +271,7 @@ export default function RepairsPage() {
             <div className="py-2">
               <RepairDetailWrapper 
                 taskId={selectedRepairId} 
-                onBack={() => setSelectedRepairId(null)} 
+                onBack={closeRepairDetail}
               />
             </div>
           </DialogContent>

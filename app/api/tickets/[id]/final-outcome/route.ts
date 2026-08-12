@@ -1,13 +1,37 @@
 import { NextResponse } from "next/server"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
 import {
   DB_FIELDS,
   FINAL_OUTCOME_LABELS,
   FinalOutcome,
   TicketActionType,
+  TicketStatus,
   UserRole,
 } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+
+const deviceIdSchema = z.coerce.number().int().positive()
+const finalOutcomeSchema = z.object({
+  finalOutcome: z.nativeEnum(FinalOutcome).nullable(),
+}).strict()
+
+interface FinalOutcomeRow {
+  RepairReportContent: string | null
+  Status: string
+  DeviceSN: string | null
+}
+
+async function rollback(transaction: sql.Transaction | null): Promise<null> {
+  if (!transaction) return null
+  try {
+    await transaction.rollback()
+  } catch (rollbackError: unknown) {
+    console.error("[Final Outcome API] 事务回滚失败:", rollbackError)
+  }
+  return null
+}
 
 /**
  * GET /api/tickets/[id]/final-outcome
@@ -15,22 +39,21 @@ import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
  */
 export async function GET(
   _request: Request,
-  context: { params: Promise<{ id: string }> } | { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   const authResult = await checkUserRole([UserRole.TECHNICIAN, UserRole.ADMIN])
   if (isErrorResponse(authResult)) return authResult
 
   try {
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ id: string }> }).params
-        : (context as { params: { id: string } }).params
-    const deviceId = resolvedParams.id
+    const parsedId = deviceIdSchema.safeParse((await context.params).id)
+    if (!parsedId.success) {
+      return NextResponse.json({ success: false, message: "设备编号无效" }, { status: 400 })
+    }
 
     const pool = await getDbConnection()
     const result = await pool
       .request()
-      .input("deviceId", deviceId)
+      .input("deviceId", sql.Int, parsedId.data)
       .query(`
         SELECT TOP 1 RepairReportContent
         FROM Repair_Tickets
@@ -69,106 +92,130 @@ export async function GET(
  */
 export async function PATCH(
   request: Request,
-  context: { params: Promise<{ id: string }> } | { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   const authResult = await checkUserRole([UserRole.TECHNICIAN, UserRole.ADMIN])
   if (isErrorResponse(authResult)) return authResult
 
+  let transaction: sql.Transaction | null = null
   try {
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ id: string }> }).params
-        : (context as { params: { id: string } }).params
-    const deviceId = resolvedParams.id
-
-    const body = (await request.json()) as { finalOutcome?: unknown }
-    const finalOutcome = body.finalOutcome
-    const validOutcomes = Object.values(FinalOutcome)
-
-    if (
-      finalOutcome !== null &&
-      (typeof finalOutcome !== "string" || !validOutcomes.includes(finalOutcome as FinalOutcome))
-    ) {
-      return NextResponse.json({ success: false, message: "无效的处理结果值" }, { status: 400 })
+    const parsedId = deviceIdSchema.safeParse((await context.params).id)
+    const parsedBody = finalOutcomeSchema.safeParse(await request.json().catch(() => null))
+    if (!parsedId.success || !parsedBody.success) {
+      return NextResponse.json({ success: false, message: "请求参数无效" }, { status: 400 })
     }
 
+    const operatorId = Number(authResult.userId)
+    if (!Number.isSafeInteger(operatorId)) {
+      return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 })
+    }
+    const deviceId = parsedId.data
+    const finalOutcome = parsedBody.data.finalOutcome
     const pool = await getDbConnection()
+    transaction = new sql.Transaction(pool)
+    await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE)
 
-    // 读取当前 RepairReportContent
-    const currentResult = await pool
-      .request()
-      .input("deviceId", deviceId)
-      .query(`
-        SELECT TOP 1 RepairReportContent, ${DB_FIELDS.STATUS}, ${DB_FIELDS.DEVICE_SN}
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.ID} = @deviceId
+    const currentResult = await new sql.Request(transaction)
+      .input("deviceId", sql.Int, deviceId)
+      .query<FinalOutcomeRow>(`
+        SELECT TOP (1)
+               [RepairReportContent], [${DB_FIELDS.STATUS}] AS [Status],
+               [${DB_FIELDS.DEVICE_SN}] AS [DeviceSN]
+        FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [${DB_FIELDS.ID}] = @deviceId;
       `)
 
     if (currentResult.recordset.length === 0) {
+      transaction = await rollback(transaction)
       return NextResponse.json({ success: false, message: "设备不存在" }, { status: 404 })
     }
 
-    const currentRaw = currentResult.recordset[0].RepairReportContent as string | null
-    const currentStatus = currentResult.recordset[0][DB_FIELDS.STATUS] as string | null
-    const deviceSN = currentResult.recordset[0][DB_FIELDS.DEVICE_SN] as string | null
+    const current = currentResult.recordset[0]
+    const allowedStatuses = new Set<string>([
+      TicketStatus.TECHNICIAN_REPAIRING,
+      TicketStatus.FACTORY_FINISHED,
+    ])
+    if (!allowedStatuses.has(current.Status)) {
+      transaction = await rollback(transaction)
+      return NextResponse.json(
+        { success: false, message: "当前设备不在维修作业中，不能确认最终处理结果" },
+        { status: 409 }
+      )
+    }
 
-    // 合并 finalOutcome 到现有 JSON，不覆盖其他字段
     let existing: Record<string, unknown> = {}
     try {
-      if (currentRaw) existing = JSON.parse(currentRaw) as Record<string, unknown>
+      if (current.RepairReportContent) {
+        existing = JSON.parse(current.RepairReportContent) as Record<string, unknown>
+      }
     } catch { /* ignore */ }
+
+    const previousOutcome = existing.finalOutcome ?? null
+    if (previousOutcome === finalOutcome) {
+      transaction = await rollback(transaction)
+      return NextResponse.json({
+        success: true,
+        message: "处理结果未发生变化，无需重复保存",
+        data: { changed: false },
+      })
+    }
 
     const updated = { ...existing, finalOutcome }
     const updatedJson = JSON.stringify(updated)
 
-    // 更新 RepairReportContent，不改变 Status
-    await pool
-      .request()
-      .input("deviceId", deviceId)
-      .input("reportContent", updatedJson)
+    const updateResult = await new sql.Request(transaction)
+      .input("deviceId", sql.Int, deviceId)
+      .input("expectedStatus", sql.NVarChar(50), current.Status)
+      .input("reportContent", sql.NVarChar(sql.MAX), updatedJson)
       .query(`
-        UPDATE Repair_Tickets
-        SET RepairReportContent = @reportContent
-        WHERE ${DB_FIELDS.ID} = @deviceId
+        UPDATE [dbo].[Repair_Tickets]
+        SET [RepairReportContent] = @reportContent,
+            [UpdatedAt] = GETUTCDATE()
+        WHERE [${DB_FIELDS.ID}] = @deviceId
+          AND [${DB_FIELDS.STATUS}] = @expectedStatus;
       `)
-
-    // 写入操作日志
-    try {
-      const operatorName =
-        authResult.realName ||
-        authResult.username ||
-        "维修人员"
-
-      const outcomeLabel = finalOutcome
-        ? FINAL_OUTCOME_LABELS[finalOutcome as FinalOutcome]
-        : "清除"
-
-      await pool
-        .request()
-        .input("ticketId", deviceId)
-        .input("actionType", TicketActionType.STATUS_CHANGE)
-        .input("oldStatus", currentStatus)
-        .input("newStatus", currentStatus) // 状态不变
-        .input("operatorId", Number(authResult.userId))
-        .input("operatorName", operatorName)
-        .input(
-          "description",
-          `维修人员为设备 ${deviceSN || deviceId} 选择了最终处理结果：${outcomeLabel}（工单状态保持不变，等待整批提交）`
-        )
-        .query(`
-          INSERT INTO Repair_Ticket_History (
-            TicketId, ActionType, OldStatus, NewStatus, OperatorId, OperatorName, Description, CreatedAt
-          ) VALUES (
-            @ticketId, @actionType, @oldStatus, @newStatus, @operatorId, @operatorName, @description, GETUTCDATE()
-          )
-        `)
-    } catch (histErr: unknown) {
-      console.error("写入操作记录失败（非致命）:", histErr)
+    if (updateResult.rowsAffected[0] !== 1) {
+      transaction = await rollback(transaction)
+      return NextResponse.json(
+        { success: false, message: "设备状态已变化，请刷新后重试" },
+        { status: 409 }
+      )
     }
 
-    return NextResponse.json({ success: true, message: "处理结果已保存" })
+    const operatorName = authResult.realName || authResult.username || "维修人员"
+    const outcomeLabel = finalOutcome ? FINAL_OUTCOME_LABELS[finalOutcome] : "清除"
+    await new sql.Request(transaction)
+      .input("ticketId", sql.NVarChar(50), String(deviceId))
+      .input("actionType", sql.NVarChar(50), TicketActionType.STATUS_CHANGE)
+      .input("oldStatus", sql.NVarChar(50), current.Status)
+      .input("newStatus", sql.NVarChar(50), current.Status)
+      .input("operatorId", sql.Int, operatorId)
+      .input("operatorName", sql.NVarChar(100), operatorName)
+      .input(
+        "description",
+        sql.NVarChar(sql.MAX),
+        `维修人员为设备 ${current.DeviceSN || deviceId} 选择了最终处理结果：${outcomeLabel}（工单状态保持不变，等待整批提交）`
+      )
+      .query(`
+        INSERT INTO [dbo].[Repair_Ticket_History] (
+          [TicketId], [ActionType], [OldStatus], [NewStatus],
+          [OperatorId], [OperatorName], [Description], [CreatedAt]
+        ) VALUES (
+          @ticketId, @actionType, @oldStatus, @newStatus,
+          @operatorId, @operatorName, @description, GETUTCDATE()
+        );
+      `)
+
+    await transaction.commit()
+    transaction = null
+    return NextResponse.json({
+      success: true,
+      message: "处理结果已保存",
+      data: { changed: true },
+    })
   } catch (error: unknown) {
     console.error("保存最终处理结果失败:", error)
+    transaction = await rollback(transaction)
     return NextResponse.json({ success: false, message: "保存失败" }, { status: 500 })
   }
 }

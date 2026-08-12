@@ -65,6 +65,7 @@ export async function PUT(
     const devicesRaw = formData.get("devices")
     const signedPhotoRaw = formData.get("signedPhoto")
     const reuseExistingPhotoRaw = formData.get("reuseExistingPhoto")
+    const advanceFlowRaw = formData.get("advanceFlow")
 
     let devices: z.infer<typeof devicesSchema> = []
     if (devicesRaw !== null) {
@@ -99,8 +100,27 @@ export async function PUT(
       return NextResponse.json({ success: false, message: "复用签字凭证参数无效" }, { status: 400 })
     }
     const reuseExistingPhoto = reuseExistingPhotoRaw === "true"
+    if (
+      advanceFlowRaw !== null &&
+      (typeof advanceFlowRaw !== "string" || advanceFlowRaw !== "true")
+    ) {
+      return NextResponse.json({ success: false, message: "发送流程参数无效" }, { status: 400 })
+    }
+    const advanceFlow = advanceFlowRaw === "true"
     if (reuseExistingPhoto && signedPhotoRaw instanceof File) {
       return NextResponse.json({ success: false, message: "不能同时上传并复用签字凭证" }, { status: 400 })
+    }
+    if (advanceFlow && signedPhotoRaw instanceof File) {
+      return NextResponse.json(
+        { success: false, message: "请先保存签字凭证，再单独点击“发送流程”" },
+        { status: 400 }
+      )
+    }
+    if (!advanceFlow && !(signedPhotoRaw instanceof File) && devices.length === 0) {
+      return NextResponse.json(
+        { success: false, message: "没有需要保存的现场确认信息" },
+        { status: 400 }
+      )
     }
 
     const pool = await getDbConnection()
@@ -170,14 +190,10 @@ export async function PUT(
       newlyUploadedPath = signedPhotoPath
     }
 
-    const totalRepairCost = precheck.recordset.reduce(
-      (sum, row) => sum + (Number(row.RepairCost) || 0),
-      0
-    )
-    const confirmWithoutPhoto = !signedPhotoPath && devices.length === 0
-    if (confirmWithoutPhoto && totalRepairCost > 0) {
+    const hasPersistedPhoto = precheck.recordset.every((row) => Boolean(row.SignedReportPhoto))
+    if (advanceFlow && !signedPhotoPath && !hasPersistedPhoto) {
       return NextResponse.json(
-        { success: false, message: "收费维修必须上传签字凭证" },
+        { success: false, message: "发送流程前必须先保存现场签字凭证" },
         { status: 400 }
       )
     }
@@ -246,7 +262,24 @@ export async function PUT(
       }
     }
 
-    const shouldAdvance = Boolean(signedPhotoPath) || confirmWithoutPhoto
+    if (signedPhotoPath) {
+      const photoUpdate = await new sql.Request(transaction)
+        .input("batchId", sql.NVarChar(100), batchId)
+        .input("expectedStatus", sql.NVarChar(50), TicketStatus.PENDING_REPORTER_CONFIRM)
+        .input("signedPhoto", sql.NVarChar(sql.MAX), signedPhotoPath)
+        .query(`
+          UPDATE [dbo].[Repair_Tickets]
+          SET [SignedReportPhoto] = @signedPhoto,
+              [UpdatedAt] = GETUTCDATE()
+          WHERE [BatchId] = @batchId
+            AND [Status] = @expectedStatus;
+        `)
+      if (photoUpdate.rowsAffected[0] !== lockedRows.length) {
+        throw new Error("BATCH_CONFLICT")
+      }
+    }
+
+    const shouldAdvance = advanceFlow
     if (shouldAdvance) {
       const statusUpdate = await new sql.Request(transaction)
         .input("batchId", sql.NVarChar(100), batchId)
@@ -268,13 +301,17 @@ export async function PUT(
     }
 
     const description = shouldAdvance
-      ? signedPhotoPath
-        ? "现场人员上传签字凭证并确认维修方案"
-        : "免费维修批次由现场人员确认维修方案（无签字附件）"
-      : "现场人员保存设备确认信息"
+      ? "现场人员上传签字凭证并确认维修方案"
+      : signedPhotoPath
+        ? "现场人员保存签字凭证；流程状态保持不变"
+        : "现场人员保存设备确认信息；流程状态保持不变"
     await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
-      .input("actionType", sql.NVarChar(50), TicketActionType.REPORTER_CONFIRMED)
+      .input(
+        "actionType",
+        sql.NVarChar(50),
+        shouldAdvance ? TicketActionType.REPORTER_CONFIRMED : TicketActionType.REPORTER_CONFIRMATION_SAVED
+      )
       .input("oldStatus", sql.NVarChar(50), TicketStatus.PENDING_REPORTER_CONFIRM)
       .input("newStatus", sql.NVarChar(50), shouldAdvance ? TicketStatus.TECHNICIAN_REPAIRING : TicketStatus.PENDING_REPORTER_CONFIRM)
       .input("operatorId", sql.Int, operatorId)
@@ -299,7 +336,7 @@ export async function PUT(
       success: true,
       message: shouldAdvance
         ? "现场确认成功，工单已进入维修作业阶段"
-        : "确认信息已保存",
+        : "现场确认信息已保存，流程状态未改变",
     })
   } catch (error: unknown) {
     console.error("[Reporter Confirm API] 更新失败:", error)

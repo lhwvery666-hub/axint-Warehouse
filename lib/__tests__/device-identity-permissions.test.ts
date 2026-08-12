@@ -10,7 +10,7 @@ import { TicketStatus, UserRole } from "@/lib/enums"
 test("仓库只能在收货确认阶段修改产品名称和型号", () => {
   assert.equal(canEditDeviceIdentity(UserRole.WAREHOUSE, TicketStatus.CREATED), true)
   assert.equal(canEditDeviceIdentity(UserRole.WAREHOUSE, TicketStatus.WAREHOUSE_CONFIRMING), true)
-  assert.equal(canEditDeviceIdentity(UserRole.WAREHOUSE, TicketStatus.WAREHOUSE_CONFIRMED), true)
+  assert.equal(canEditDeviceIdentity(UserRole.WAREHOUSE, TicketStatus.WAREHOUSE_CONFIRMED), false)
   assert.equal(canEditDeviceIdentity(UserRole.WAREHOUSE, TicketStatus.IN_REPAIR), false)
 })
 
@@ -31,11 +31,13 @@ test("兼容数据库中的小写状态值", () => {
   assert.equal(canEditDeviceIdentity(UserRole.TECHNICIAN, "technician_repairing"), true)
 })
 
-test("只有仓库能在收货确认阶段完善三级分类", () => {
+test("仓库和维修工程师只能在各自业务阶段完善设备分类", () => {
   assert.equal(canEditDeviceClassification(UserRole.WAREHOUSE, TicketStatus.CREATED), true)
   assert.equal(canEditDeviceClassification(UserRole.WAREHOUSE, TicketStatus.WAREHOUSE_CONFIRMING), true)
-  assert.equal(canEditDeviceClassification(UserRole.WAREHOUSE, TicketStatus.WAREHOUSE_CONFIRMED), true)
+  assert.equal(canEditDeviceClassification(UserRole.WAREHOUSE, TicketStatus.WAREHOUSE_CONFIRMED), false)
   assert.equal(canEditDeviceClassification(UserRole.WAREHOUSE, TicketStatus.IN_REPAIR), false)
-  assert.equal(canEditDeviceClassification(UserRole.TECHNICIAN, TicketStatus.IN_REPAIR), false)
+  assert.equal(canEditDeviceClassification(UserRole.TECHNICIAN, TicketStatus.IN_REPAIR), true)
+  assert.equal(canEditDeviceClassification(UserRole.TECHNICIAN, TicketStatus.TECHNICIAN_REPAIRING), true)
+  assert.equal(canEditDeviceClassification(UserRole.TECHNICIAN, TicketStatus.BUSINESS_REVIEW), false)
   assert.equal(canEditDeviceClassification(UserRole.REPORTER, TicketStatus.CREATED), false)
 })
