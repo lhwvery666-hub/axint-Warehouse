@@ -2,8 +2,7 @@
 
 import { Home, Wrench, User, LogOut } from "lucide-react"
 import { useAuth } from "@/context/auth-context"
-import { useState, useEffect } from "react"
-import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar"
+import { RoleAvatar } from "@/components/role-avatar"
 import { UserRole } from "@/lib/enums"
 
 interface BottomNavProps {
@@ -14,15 +13,6 @@ interface BottomNavProps {
 
 export default function BottomNav({ activeTab, onTabChange, userType }: BottomNavProps) {
   const { user, logout } = useAuth()
-  const [userAvatar, setUserAvatar] = useState<string>("/placeholder-user.jpg")
-  const [userRealName, setUserRealName] = useState<string>("")
-  
-  useEffect(() => {
-    if (user) {
-      setUserAvatar(user.avatar || "/placeholder-user.jpg")
-      setUserRealName(user.realName || "")
-    }
-  }, [user])
   
   // 根据传入的用户类型或者认证上下文中的角色显示不同的导航项
   const effectiveUserType = userType || user?.role || "technician"
@@ -66,16 +56,13 @@ export default function BottomNav({ activeTab, onTabChange, userType }: BottomNa
             >
               <span className={`absolute inset-x-5 top-0 h-0.5 origin-center rounded-full bg-primary transition-transform duration-200 ${isActive ? "scale-x-100" : "scale-x-0 group-hover:scale-x-50"}`} />
               {tab.id === "profile" ? (
-                <Avatar className="h-5 w-5 transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none">
-                  <AvatarImage src={userAvatar} alt="用户头像" />
-                  <AvatarFallback>
-                    <Icon className={`w-3 h-3 ${isActive ? "stroke-[2.5px]" : ""}`} />
-                  </AvatarFallback>
-                </Avatar>
+                <RoleAvatar role={effectiveUserType} size="sm" />
               ) : (
                 <Icon className={`h-5 w-5 transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none ${isActive ? "stroke-[2.5px]" : ""}`} />
               )}
-              <span className={`text-xs ${isActive ? "font-medium" : ""}`}>{tab.id === "profile" && userRealName ? userRealName.substring(0, 2) : tab.label}</span>
+              <span className={`text-xs ${isActive ? "font-medium" : ""}`}>
+                {tab.id === "profile" && user?.realName ? user.realName.substring(0, 2) : tab.label}
+              </span>
             </button>
           )
         })}

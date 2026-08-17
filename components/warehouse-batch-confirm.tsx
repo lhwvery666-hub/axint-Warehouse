@@ -37,15 +37,16 @@ import { TicketChat } from "@/components/TicketChat"
 import { useAuth } from "@/context/auth-context"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
 import { canEditDeviceClassification } from "@/lib/device-identity-permissions"
+import { normalizeDeviceText } from "@/lib/device-update-diff"
 
 interface Device {
   id: string
-  deviceSerialNumber: string
-  modelName: string
-  deviceName: string
-  category: string
-  subCategory: string
-  faultDescription: string
+  deviceSerialNumber: string | null
+  modelName: string | null
+  deviceName: string | null
+  category: string | null
+  subCategory: string | null
+  faultDescription: string | null
   manufactureDate?: string | null
   arrivalDate?: string | null
   warrantyStatus?: string | null
@@ -176,10 +177,10 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
   const openClassificationEditor = (device: Device) => {
     setEditingClassificationDevice(device)
     setClassificationForm({
-      category: device.category || "",
-      subCategory: device.subCategory || "",
-      modelName: device.modelName || "",
-      deviceName: device.deviceName || "",
+      category: normalizeDeviceText(device.category),
+      subCategory: normalizeDeviceText(device.subCategory),
+      modelName: normalizeDeviceText(device.modelName),
+      deviceName: normalizeDeviceText(device.deviceName),
     })
   }
 
@@ -196,10 +197,10 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
     }
 
     const hasChanges =
-      category !== (editingClassificationDevice.category || "").trim()
-      || subCategory !== (editingClassificationDevice.subCategory || "").trim()
-      || modelName !== (editingClassificationDevice.modelName || "").trim()
-      || (deviceName.length > 0 && deviceName !== (editingClassificationDevice.deviceName || "").trim())
+      category !== normalizeDeviceText(editingClassificationDevice.category)
+      || subCategory !== normalizeDeviceText(editingClassificationDevice.subCategory)
+      || modelName !== normalizeDeviceText(editingClassificationDevice.modelName)
+      || (deviceName.length > 0 && deviceName !== normalizeDeviceText(editingClassificationDevice.deviceName))
     if (!hasChanges) {
       toast.info("信息未发生变化，无需保存")
       setEditingClassificationDevice(null)
@@ -232,16 +233,25 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
     setIsSavingInformation(true)
     try {
       const responses = await Promise.all(devicesToSave.map(async (device) => {
+        const category = normalizeDeviceText(device.category)
+        const subCategory = normalizeDeviceText(device.subCategory)
+        const modelName = normalizeDeviceText(device.modelName)
+        const deviceName = normalizeDeviceText(device.deviceName)
+
+        if (!category || !subCategory || !modelName) {
+          throw new Error(`设备 ${device.id} 的分类或型号未填写完整，请先完善设备信息`)
+        }
+
         const response = await fetch(`/api/tickets/batch-devices/${batchId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             deviceId: Number(device.id),
             updates: {
-              category: device.category.trim(),
-              subCategory: device.subCategory.trim(),
-              modelName: device.modelName.trim(),
-              ...(device.deviceName.trim() ? { deviceName: device.deviceName.trim() } : {}),
+              category,
+              subCategory,
+              modelName,
+              ...(deviceName ? { deviceName } : {}),
               manufactureDate: manufactureDates[device.id]?.toISOString() ?? null,
               arrivalDate: arrivalDates[device.id]?.toISOString() ?? null,
             },
@@ -477,7 +487,7 @@ export default function WarehouseBatchConfirm({ batchId, onBack, onConfirmed, al
                       <TableCell>{device.modelName || "-"}</TableCell>
                       <TableCell>{device.deviceName || "-"}</TableCell>
                       <TableCell>{device.quantity || 1} 台</TableCell>
-                      <TableCell className="max-w-xs truncate" title={device.faultDescription}>
+                      <TableCell className="max-w-xs truncate" title={device.faultDescription ?? undefined}>
                         {device.faultDescription || "-"}
                       </TableCell>
                       <TableCell>

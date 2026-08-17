@@ -42,8 +42,6 @@ interface Device {
   deviceName: string
   status: string
   quantity?: number
-  cancelRequestStatus?: string | null
-  cancelRequestReason?: string | null
 }
 
 interface BatchInfo {
@@ -101,10 +99,6 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
   const [isEditMode, setIsEditMode] = useState(false)
   const [hasBusinessInfo, setHasBusinessInfo] = useState(false) // 追踪是否已有商务信息
   
-  // 取消申请相关状态
-  const [hasCancelRequest, setHasCancelRequest] = useState(false)
-  const [cancelRequestReason, setCancelRequestReason] = useState("")
-  const [isHandlingCancelRequest, setIsHandlingCancelRequest] = useState(false)
   const totalDeviceQuantity = batchInfo?.deviceCount ?? sumDeviceQuantity(devices)
 
 
@@ -139,15 +133,6 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
 
       setBatchInfo(result.data.batchInfo)
       setDevices(result.data.devices)
-      
-      // 检查是否有取消申请（Pending 状态）
-      const pendingCancelRequest = result.data.devices.find((d: Device) => 
-        d.cancelRequestStatus === "Pending"
-      )
-      if (pendingCancelRequest) {
-        setHasCancelRequest(true)
-        setCancelRequestReason(pendingCancelRequest.cancelRequestReason || "")
-      }
     } catch (err: any) {
       console.error("获取批次数据失败:", err)
       setError(err.message || "加载失败")
@@ -196,57 +181,6 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
     }
   }
   
-  // 处理取消申请（批准或拒绝）
-  const handleCancelRequest = async (approve: boolean) => {
-    console.log("🔍 [取消申请处理] 开始处理", { approve, batchId, userId: user?.id })
-    setIsHandlingCancelRequest(true)
-    try {
-      console.log("📤 [取消申请处理] 发送请求到API...")
-      const response = await fetch(`/api/tickets/batch-cancel-approve/${batchId}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          approve,
-          userId: user?.id
-        }),
-      })
-
-      console.log("📥 [取消申请处理] 收到响应", { status: response.status, ok: response.ok })
-      
-      // 先检查响应状态
-      if (!response.ok) {
-        const errorText = await response.text()
-        console.error("❌ [取消申请处理] HTTP错误", { status: response.status, body: errorText })
-        throw new Error(`请求失败 (${response.status})`)
-      }
-      
-      const result = await response.json()
-      console.log("📄 [取消申请处理] 响应内容", result)
-      
-      if (response.ok && result.success) {
-        toast.success(approve ? "取消申请已批准，工单已取消" : "取消申请已拒绝")
-        console.log("✅ [取消申请处理] 操作成功，重新加载数据...")
-        // 重新加载数据
-        await fetchBatchData()
-        await fetchOperationLogs()
-        console.log("✅ [取消申请处理] 数据已重新加载")
-      } else {
-        console.error("❌ [取消申请处理] 操作失败", result.message)
-        toast.error(result.message || "操作失败")
-      }
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : "未知错误"
-      console.error("❌ [取消申请处理] 异常", error)
-      toast.error(`操作失败：${errorMessage}`)
-    } finally {
-      setIsHandlingCancelRequest(false)
-      console.log("🏁 [取消申请处理] 处理完成")
-    }
-  }
-
-
   const handleConfirmBusiness = async () => {
     // ⚠️ 任务3：发货授权与收款/开票解耦——不再硬性阻断未收款/未开票的批次。
     // 商务可以先授权发货让货物走起来，未结清的收款/开票留给"财务跟进"视图持续处理。
@@ -308,8 +242,10 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
       if (result.success) {
         toast.success("商务信息已更新")
         setHasUnsavedBusinessChanges(false)
-        setIsEditMode(false)
-        fetchBusinessInfo()
+        // 待商务审核阶段保存后仍需继续发送流程，不能切回只读模式；
+        // 已审核后的财务跟进保存则维持原有的只读行为。
+        setIsEditMode(normalizeTicketStatus(batchInfo?.status) === TicketStatus.BUSINESS_REVIEW)
+        await fetchBusinessInfo()
       } else {
         toast.error(result.message || "更新失败")
       }
@@ -398,47 +334,8 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
         </AlertDescription>
       </Alert>
 
-      {/* 取消申请提示 */}
-      {hasCancelRequest && (
-        <Alert className="border-red-300 bg-red-50">
-          <AlertCircle className="h-5 w-5 text-red-600" />
-          <AlertDescription>
-            <div className="flex items-start justify-between">
-              <div className="flex-1">
-                <p className="font-semibold text-red-900 mb-2">现场人员申请取消此批次工单</p>
-                <p className="text-sm text-red-800 mb-2">
-                  <strong>申请原因：</strong>{cancelRequestReason || "无"}
-                </p>
-                <p className="text-xs text-red-700">
-                  请及时处理此取消申请。批准后，该批次工单将被取消并结束流程。
-                </p>
-              </div>
-              <div className="flex gap-2 ml-4">
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  onClick={() => handleCancelRequest(true)}
-                  disabled={isHandlingCancelRequest}
-                >
-                  批准取消
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => handleCancelRequest(false)}
-                  disabled={isHandlingCancelRequest}
-                >
-                  拒绝申请
-                </Button>
-              </div>
-            </div>
-          </AlertDescription>
-        </Alert>
-      )}
-
       {/* 等待前置流程完成的提示 */}
-      {!hasCancelRequest && 
-       batchInfo.status !== TicketStatus.BUSINESS_REVIEW && 
+      {batchInfo.status !== TicketStatus.BUSINESS_REVIEW &&
        batchInfo.status !== TicketStatus.WAREHOUSE_SHIPPING && 
        batchInfo.status !== TicketStatus.COMPLETED && (
         <Alert className="border-yellow-300 bg-yellow-50">

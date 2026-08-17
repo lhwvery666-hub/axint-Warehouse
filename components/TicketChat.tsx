@@ -5,17 +5,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { RoleAvatar } from "@/components/role-avatar";
 import { Send, MessageCircle, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { UserRole, USER_ROLE_LABELS } from "@/lib/enums";
+import { normalizeUserRole, UserRole, USER_ROLE_LABELS } from "@/lib/enums";
 
 interface Message {
   id: number;
   ticketId: string;
   senderName: string;
-  senderRole: string;
+  senderRole: string | null;
   content: string;
   createdAt: string;
 }
@@ -28,6 +28,10 @@ interface TicketChatProps {
   };
 }
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
 export function TicketChat({ ticketId, currentUser }: TicketChatProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState("");
@@ -36,53 +40,55 @@ export function TicketChat({ ticketId, currentUser }: TicketChatProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
-  // 加载历史消息
+  // 加载历史消息。请求与当前 ticketId 绑定，切换工单时丢弃旧请求结果。
   useEffect(() => {
-    loadMessages();
-  }, [ticketId]);
+    let cancelled = false;
 
-  // 自动滚动到底部
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    const loadMessages = async () => {
+      try {
+        setLoading(true);
+        const response = await fetch(`/api/messages?ticketId=${encodeURIComponent(ticketId)}`);
+        const result = await response.json();
 
-  const loadMessages = async () => {
-    try {
-      setLoading(true);
-      const response = await fetch(`/api/messages?ticketId=${encodeURIComponent(ticketId)}`);
-      const result = await response.json();
+        if (!result.success) {
+          throw new Error(result.message);
+        }
 
-      if (result.success) {
+        if (cancelled) return;
+
         const loadedMessages = result.data || [];
         setMessages(loadedMessages);
         console.log(`✅ 加载了 ${result.count} 条聊天记录`);
-        // 将当前消息数记录到 localStorage，表示用户已阅读至此
-        if (typeof window !== 'undefined' && ticketId) {
-          localStorage.setItem(`chat_seen_${ticketId}`, String(loadedMessages.length));
-        }
-      } else {
-        throw new Error(result.message);
+        localStorage.setItem(`chat_seen_${ticketId}`, String(loadedMessages.length));
+      } catch (error: unknown) {
+        if (cancelled) return;
+        console.error("加载聊天记录失败:", error);
+        toast({
+          title: "加载失败",
+          description: getErrorMessage(error, "无法加载聊天记录"),
+          variant: "destructive",
+        });
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-    } catch (error: any) {
-      console.error("加载聊天记录失败:", error);
-      toast({
-        title: "加载失败",
-        description: error.message || "无法加载聊天记录",
-        variant: "destructive",
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
 
-  const scrollToBottom = () => {
-    if (scrollAreaRef.current) {
-      const scrollContainer = scrollAreaRef.current.querySelector("[data-radix-scroll-area-viewport]");
-      if (scrollContainer) {
-        scrollContainer.scrollTop = scrollContainer.scrollHeight;
-      }
+    void loadMessages();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ticketId, toast]);
+
+  // 自动滚动到底部
+  useEffect(() => {
+    const scrollContainer = scrollAreaRef.current?.querySelector(
+      "[data-radix-scroll-area-viewport]"
+    );
+    if (scrollContainer) {
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
     }
-  };
+  }, [messages]);
 
   const handleSendMessage = async () => {
     if (!newMessage.trim()) {
@@ -102,8 +108,6 @@ export function TicketChat({ ticketId, currentUser }: TicketChatProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ticketId,
-          senderName: currentUser.name,
-          senderRole: currentUser.role,
           content: newMessage.trim(),
         }),
       });
@@ -122,11 +126,11 @@ export function TicketChat({ ticketId, currentUser }: TicketChatProps) {
       } else {
         throw new Error(result.message);
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("发送消息失败:", error);
       toast({
         title: "发送失败",
-        description: error.message || "请稍后重试",
+        description: getErrorMessage(error, "请稍后重试"),
         variant: "destructive",
       });
     } finally {
@@ -143,12 +147,8 @@ export function TicketChat({ ticketId, currentUser }: TicketChatProps) {
 
   // 判断消息是否是当前用户发送的
   const isMyMessage = (message: Message) => {
-    return message.senderRole === currentUser.role && message.senderName === currentUser.name;
-  };
-
-  // 获取发送者名称的首字母（用于头像）
-  const getInitials = (name: string) => {
-    return name.charAt(0).toUpperCase();
+    return normalizeUserRole(message.senderRole) === currentUser.role
+      && message.senderName === currentUser.name;
   };
 
   // 格式化时间
@@ -214,14 +214,7 @@ export function TicketChat({ ticketId, currentUser }: TicketChatProps) {
                     )}
                   >
                     {/* 头像 */}
-                    <Avatar className={cn(
-                      "w-8 h-8 flex-shrink-0",
-                      isMine ? "bg-blue-500" : "bg-gray-500"
-                    )}>
-                      <AvatarFallback className="text-white text-xs">
-                        {getInitials(message.senderName)}
-                      </AvatarFallback>
-                    </Avatar>
+                    <RoleAvatar role={message.senderRole} size="sm" />
 
                     {/* 消息内容 */}
                     <div

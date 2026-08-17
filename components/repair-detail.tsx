@@ -9,7 +9,6 @@ import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar"
 import { 
   Dialog, 
   DialogContent, 
@@ -37,6 +36,7 @@ import TicketActionBar from "@/components/ticket-action-bar"
 import { TicketAction } from "@/lib/ticket-workflow-actions"
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import TicketCorrectionEntry from "@/components/ticket-correction-entry"
 
 
 
@@ -52,7 +52,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
   const { refreshRepairs } = useRepairContext();
   
   // 获取报告人头像
-  const [reporterAvatar, setReporterAvatar] = useState<string>("/placeholder-user.jpg");
   const [reporterPhone, setReporterPhone] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
   
@@ -536,16 +535,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId, reloadCounter]);
   
-  // 从 user context 获取报告人的头像（电话现在来自工单的报告人信息）
-  useEffect(() => {
-    if (user) {
-      setReporterAvatar(user.avatar || "/placeholder-user.jpg");
-    } else {
-      // 如果不是当前登录用户，使用默认头像
-      setReporterAvatar("/placeholder-user.jpg");
-    }
-  }, [user]);
-
   // 加载当前设备已保存的 finalOutcome。Factory_Finished 仅兼容历史数据，
   // 新流程在仓库移交后会直接回到 TECHNICIAN_REPAIRING。
   useEffect(() => {
@@ -1152,105 +1141,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
     }
   }
 
-  // 现场人员申请取消工单
-  const handleRequestCancel = async () => {
-    if (!cancelRequestReason.trim()) {
-      alert("请填写取消原因")
-      return
-    }
-
-    setIsSubmittingCancelRequest(true)
-    try {
-      const response = await fetch(`/api/tickets/${taskId}/update`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          action: 'request_cancel',
-          id: taskId,
-          cancelRequestReason: cancelRequestReason.trim()
-        }),
-      })
-
-      const result = await response.json()
-      if (result.success) {
-        setIsCancelRequestDialogOpen(false)
-        setCancelRequestReason("")
-        setRepairData({
-          ...repairData, 
-          cancelRequestStatus: "Pending",
-          cancelRequestReason: cancelRequestReason.trim(),
-          cancelRequestDate: new Date()
-        })
-        addNotification({
-          type: "system",
-          title: "取消申请已提交",
-          message: `您的取消申请已提交，等待商务人员审批`,
-          repairId: taskId,
-          recipient: user?.realName || "系统",
-        })
-        window.location.reload()
-      } else {
-        alert(result.message || "提交取消申请失败")
-      }
-    } catch (error) {
-      console.error("提交取消申请失败:", error)
-      alert("提交取消申请失败，请重试")
-    } finally {
-      setIsSubmittingCancelRequest(false)
-    }
-  }
-
-  // 商务/管理员审批取消申请
-  const handleApproveCancelRequest = async (approve: boolean) => {
-    try {
-      const response = await fetch(`/api/tickets/${taskId}/update`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          action: approve ? 'approve_cancel' : 'reject_cancel',
-          id: taskId
-        }),
-      })
-
-      const result = await response.json()
-      if (result.success) {
-        if (approve) {
-          setRepairData({
-            ...repairData, 
-            status: "Cancelled",
-            cancelRequestStatus: "Approved",
-            cancelApprovedBy: user?.realName || "",
-            cancelApprovedDate: new Date()
-          })
-          addNotification({
-          type: "system",
-          title: "取消申请已通过",
-          message: `工单 ${taskId} 的取消申请已通过审批，工单已取消`,
-          repairId: taskId,
-          recipient: user?.realName || "系统",
-        })
-        } else {
-          setRepairData({
-            ...repairData, 
-            cancelRequestStatus: "Rejected",
-            cancelApprovedBy: user?.realName || "",
-            cancelApprovedDate: new Date()
-          })
-        }
-        window.location.reload()
-      } else {
-        alert(result.message || "审批失败")
-      }
-    } catch (error) {
-      console.error("审批失败:", error)
-      alert("审批失败，请重试")
-    }
-  }
-
   // 取消工单（管理员直接取消）
   const handleCancel = async () => {
     if (!cancelReason.trim() && !window.confirm("未填写取消原因，确定要取消工单吗？")) {
@@ -1304,10 +1194,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
   const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false)
   const [cancelReason, setCancelReason] = useState("")
   
-  // 现场人员申请取消相关状态
-  const [isCancelRequestDialogOpen, setIsCancelRequestDialogOpen] = useState(false)
-  const [cancelRequestReason, setCancelRequestReason] = useState("")
-  const [isSubmittingCancelRequest, setIsSubmittingCancelRequest] = useState(false)
   // 获取状态标签
   const getStatusBadge = (status: string) => {
     // 处理新状态
@@ -1437,6 +1323,21 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
             ]}
           />
         )}
+
+        {!inBatchMode && repairData.batchId && user?.role && [
+          UserRole.REPORTER,
+          UserRole.WAREHOUSE,
+          UserRole.ADMIN,
+        ].includes(user.role as UserRole) && (
+          <TicketCorrectionEntry
+            batchId={repairData.batchId}
+            role={user.role as UserRole}
+            onChanged={async () => {
+              loadTicketData()
+              await refreshRepairs()
+            }}
+          />
+        )}
         
         <Tabs defaultValue="workbench" className="w-full">
           <TabsList className="grid w-full max-w-3xl grid-cols-2">
@@ -1546,83 +1447,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                         </div>
                       </div>
                       
-                      {/* 现场人员操作按钮 */}
-                      {user?.role === UserRole.REPORTER && !inBatchMode && (
-                        <div className="mt-6 pt-4 border-t space-y-3">
-                          {/* 申请取消按钮 - 仅在非批次模式下显示 */}
-                          {repairData.status !== "Cancelled" && repairData.status !== "cancelled" && 
-                           repairData.cancelRequestStatus !== "Approved" && repairData.cancelRequestStatus !== "Pending" && (
-                            <Button 
-                              variant="outline" 
-                              className="border-destructive text-destructive hover:bg-destructive/10 w-full"
-                              onClick={() => setIsCancelRequestDialogOpen(true)}
-                            >
-                              申请取消维修订单
-                            </Button>
-                          )}
-                        </div>
-                      )}
-                      {/* 批次模式提示 */}
-                      {user?.role === UserRole.REPORTER && inBatchMode && (
-                        <div className="mt-6 pt-4 border-t">
-                          <Alert className="border-blue-200 bg-blue-50">
-                            <AlertCircle className="h-4 w-4 text-blue-600" />
-                            <AlertDescription className="text-blue-800 text-sm">
-                              此设备属于批次工单，如需取消请在批次工单主页面点击"申请取消批次工单"按钮。
-                            </AlertDescription>
-                          </Alert>
-                        </div>
-                      )}
-                      
-                      {/* 显示取消申请状态 */}
-                      {repairData.cancelRequestStatus === "Pending" && (
-                        <div className="mt-6 pt-4 border-t">
-                          <Alert className="border-orange-200 bg-orange-50">
-                            <AlertCircle className="h-4 w-4 text-orange-600" />
-                            <AlertDescription className="text-orange-800">
-                              <p className="font-medium mb-2">取消申请待审批</p>
-                              <p className="text-sm mb-1">申请原因：{repairData.cancelRequestReason || "未填写"}</p>
-                              {repairData.cancelRequestDate && (
-                                <p className="text-sm">申请时间：{format(repairData.cancelRequestDate, "yyyy-MM-dd HH:mm", { locale: zhCN })}</p>
-                              )}
-                            </AlertDescription>
-                          </Alert>
-                        </div>
-                      )}
-                      
-                      {repairData.cancelRequestStatus === "Approved" && (
-                        <div className="mt-6 pt-4 border-t">
-                          <Alert className="border-green-200 bg-green-50">
-                            <AlertCircle className="h-4 w-4 text-green-600" />
-                            <AlertDescription className="text-green-800">
-                              <p className="font-medium mb-2">取消申请已通过</p>
-                              {repairData.cancelApprovedBy && (
-                                <p className="text-sm">审批人：{repairData.cancelApprovedBy}</p>
-                              )}
-                              {repairData.cancelApprovedDate && (
-                                <p className="text-sm">审批时间：{format(repairData.cancelApprovedDate, "yyyy-MM-dd HH:mm", { locale: zhCN })}</p>
-                              )}
-                            </AlertDescription>
-                          </Alert>
-                        </div>
-                      )}
-                      
-                      {repairData.cancelRequestStatus === "Rejected" && (
-                        <div className="mt-6 pt-4 border-t">
-                          <Alert className="border-red-200 bg-red-50">
-                            <AlertCircle className="h-4 w-4 text-red-600" />
-                            <AlertDescription className="text-red-800">
-                              <p className="font-medium mb-2">取消申请已拒绝</p>
-                              {repairData.cancelApprovedBy && (
-                                <p className="text-sm">审批人：{repairData.cancelApprovedBy}</p>
-                              )}
-                              {repairData.cancelApprovedDate && (
-                                <p className="text-sm">审批时间：{format(repairData.cancelApprovedDate, "yyyy-MM-dd HH:mm", { locale: zhCN })}</p>
-                              )}
-                            </AlertDescription>
-                          </Alert>
-                        </div>
-                      )}
                     </CardContent>
                   </Card>
                 </AccordionContent>
@@ -1653,7 +1477,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                       <CardContent className={cn(
                         "pt-6 space-y-4", 
                         (user?.role === UserRole.ADMIN || 
-                         repairData.cancelRequestStatus === "Pending" ||
                          repairData.status === TicketStatus.COMPLETED ||
                         // 维修报告已提交（Pending_Reporter_Confirm）且未进入二次编辑模式时，工作台只读
                         (user?.role === UserRole.TECHNICIAN &&
@@ -1730,24 +1553,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                           </Alert>
                         )}
 
-                        {/* 取消申请中的提示 */}
-                        {repairData.cancelRequestStatus === "Pending" && (
-                          <Alert className="mb-4 border-orange-300 bg-orange-50 pointer-events-auto">
-                            <AlertCircle className="h-4 w-4 text-orange-600" />
-                            <AlertDescription className="text-orange-800">
-                              <p className="font-semibold mb-1">此工单正在申请取消中</p>
-                              <p className="text-sm">
-                                现场人员已提交取消申请，等待商务审批。在商务人员处理之前，维修工作台暂时锁定。
-                              </p>
-                              {repairData.cancelRequestReason && (
-                                <p className="text-sm mt-2">
-                                  <strong>申请原因：</strong>{repairData.cancelRequestReason}
-                                </p>
-                              )}
-                            </AlertDescription>
-                          </Alert>
-                        )}
-                        
                         {/* 管理员只读提示 */}
                         {user?.role === UserRole.ADMIN && (
                           <div className="mb-4 p-3 bg-muted/50 rounded-md border border-border pointer-events-auto">
@@ -2130,38 +1935,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                               此工作台仅管理员和商务人员可编辑，维修人员仅可查看
                             </p>
                           </div>
-                        )}
-                        
-                        {/* 显示待审批的取消申请 */}
-                        {repairData.cancelRequestStatus === "Pending" && (user?.role === UserRole.ADMIN || user?.role === UserRole.BUSINESS) && (
-                          <Alert className="mb-4 border-orange-200 bg-orange-50">
-                            <AlertCircle className="h-4 w-4 text-orange-600" />
-                            <AlertDescription className="text-orange-800">
-                              <p className="font-medium mb-2">待审批：现场人员申请取消工单</p>
-                              <p className="text-sm mb-1">申请原因：{repairData.cancelRequestReason || "未填写"}</p>
-                              {repairData.cancelRequestDate && (
-                                <p className="text-sm mb-3">申请时间：{format(repairData.cancelRequestDate, "yyyy-MM-dd HH:mm", { locale: zhCN })}</p>
-                              )}
-                              <div className="flex gap-2 mt-3">
-                                <Button 
-                                  size="sm" 
-                                  variant="default"
-                                  className="bg-green-600 hover:bg-green-700"
-                                  onClick={() => handleApproveCancelRequest(true)}
-                                >
-                                  通过申请
-                                </Button>
-                                <Button 
-                                  size="sm" 
-                                  variant="outline"
-                                  className="border-red-500 text-red-600 hover:bg-red-50"
-                                  onClick={() => handleApproveCancelRequest(false)}
-                                >
-                                  拒绝申请
-                                </Button>
-                              </div>
-                            </AlertDescription>
-                          </Alert>
                         )}
                         
                         {/* 返厂物流管理区域（仅在 Pending_Factory 或 Factory_Finished 状态时显示） */}
@@ -2671,51 +2444,6 @@ export default function RepairDetail({ taskId, onBack, inBatchMode = false }: Re
                   </span>
                 ) : (
                   "确认补录"
-                )}
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-
-        {/* 现场人员申请取消对话框 */}
-        <Dialog open={isCancelRequestDialogOpen} onOpenChange={setIsCancelRequestDialogOpen}>
-          <DialogContent className="sm:max-w-[425px]">
-            <DialogHeader>
-              <DialogTitle>申请取消维修订单</DialogTitle>
-              <DialogDescription>
-                请填写取消原因，提交后需要商务人员审批通过才能取消工单。
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-4 py-4">
-              <div className="space-y-2">
-                <Label htmlFor="cancelRequestReason">取消原因 *</Label>
-                <Textarea
-                  id="cancelRequestReason"
-                  value={cancelRequestReason}
-                  onChange={(e) => setCancelRequestReason(e.target.value)}
-                  placeholder="请详细说明取消原因，例如：误操作、客户撤销、设备已自行修复等"
-                  className="min-h-[100px]"
-                />
-              </div>
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => {
-                setIsCancelRequestDialogOpen(false)
-                setCancelRequestReason("")
-              }}>
-                取消
-              </Button>
-              <Button
-                onClick={handleRequestCancel}
-                disabled={!cancelRequestReason.trim() || isSubmittingCancelRequest}
-              >
-                {isSubmittingCancelRequest ? (
-                  <span className="flex items-center gap-2">
-                    <span className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
-                    提交中...
-                  </span>
-                ) : (
-                  "提交申请"
                 )}
               </Button>
             </DialogFooter>

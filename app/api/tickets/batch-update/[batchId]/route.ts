@@ -5,6 +5,10 @@ import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
 import { z } from "zod"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
+import {
+  BatchDeviceReconciliationError,
+  planBatchDeviceReconciliation,
+} from "@/lib/batch-device-reconciliation"
 
 const imageFieldSchema = z.union([
   z.array(z.string().trim().min(1).max(2048)).max(20),
@@ -13,12 +17,19 @@ const imageFieldSchema = z.union([
 ])
 
 const batchDeviceSchema = z.object({
+  deviceId: z.number().int().positive().optional(),
   serialNumber: z.string().trim().max(100).optional(),
   modelName: z.string().trim().max(200).optional(),
   deviceName: z.string().trim().max(200).optional(),
   faultDescription: z.string().trim().max(10000).optional(),
   materialCode: z.string().trim().max(100).optional(),
-  repairCost: z.union([z.number().finite().nonnegative(), z.string().trim().max(50), z.null()]).optional(),
+  category: z.string().trim().max(200).optional(),
+  subCategory: z.string().trim().max(200).optional(),
+  repairCost: z.union([
+    z.number().finite().nonnegative(),
+    z.string().trim().regex(/^\d+(?:\.\d{1,2})?$/).max(50),
+    z.null(),
+  ]).optional(),
   quantity: z.number().int().min(1).max(100000).optional(),
   deviceImages: imageFieldSchema.optional(),
   damageImages: imageFieldSchema.optional(),
@@ -67,6 +78,8 @@ interface ExistingDevice {
   deviceName: string | null
   faultDescription: string | null
   materialCode: string | null
+  category: string | null
+  subCategory: string | null
   repairCost: string | null
   quantity: number
   // 3W1H 工作台字段
@@ -80,7 +93,7 @@ interface ExistingDevice {
 }
 
 interface DeviceUpdateResult {
-  updateFields: string[]
+  data: Prisma.Repair_TicketsUncheckedUpdateInput
   changedLabels: string[]
 }
 
@@ -133,15 +146,19 @@ function buildDeviceUpdateFields(
   const newModel = (device.modelName    as string) || DEFAULT_VALUES.GENERIC_MODEL
   const newQuantity = Number(device.quantity) > 0 ? Number(device.quantity) : 1
 
-  // ── 基础设备字段（始终覆盖写入）──────────────────────────────────────────────
-  const updateFields: string[] = [
-    `${DB_FIELDS.DEVICE_SN}     = N'${newSn.replace(/'/g, "''")}'`,
-    `${DB_FIELDS.MODEL_NAME}    = N'${newModel.replace(/'/g, "''")}'`,
-    `${DB_FIELDS.DEVICE_NAME}   = ${device.deviceName   ? `N'${(device.deviceName   as string).replace(/'/g, "''")}'` : "NULL"}`,
-    `${DB_FIELDS.PROBLEM}       = N'${((device.faultDescription as string) || "").replace(/'/g, "''")}'`,
-    `${DB_FIELDS.MATERIAL_CODE} = ${device.materialCode ? `N'${(device.materialCode as string).replace(/'/g, "''")}'` : "NULL"}`,
-    `${DB_FIELDS.QUANTITY}      = ${newQuantity}`,
-  ]
+  // Prisma parameterizes every value, so user-entered text is never assembled
+  // into a raw SQL fragment.
+  const data: Prisma.Repair_TicketsUncheckedUpdateInput = {
+    deviceSn: newSn,
+    modelName: newModel,
+    deviceName: norm(device.deviceName) || null,
+    problem: norm(device.faultDescription),
+    materialCode: norm(device.materialCode) || null,
+    Quantity: newQuantity,
+  }
+
+  if (device.category !== undefined) data.Category = norm(device.category) || null
+  if (device.subCategory !== undefined) data.SubCategory = norm(device.subCategory) || null
 
   // ⚠️ 曾经的 bug：不同代码路径写入的"无序列号"占位值不统一（"PENDING"/"PENDING_VERIFY"/"待验证"/空），
   // 如果只做精确字符串比较，占位值 A → 占位值 B 会被误判为"设备身份变更"，
@@ -158,6 +175,8 @@ function buildDeviceUpdateFields(
   if (norm(device.faultDescription)    !== norm(existing.faultDescription)) changedLabels.push("故障描述")
   if (norm(device.materialCode)        !== norm(existing.materialCode))    changedLabels.push("物料编码")
   if (norm(device.deviceName)          !== norm(existing.deviceName))      changedLabels.push("设备名称")
+  if (device.category !== undefined && norm(device.category) !== norm(existing.category)) changedLabels.push("一级分类")
+  if (device.subCategory !== undefined && norm(device.subCategory) !== norm(existing.subCategory)) changedLabels.push("二级分类")
   if (newQuantity                      !== existing.quantity)              changedLabels.push(`数量: ${existing.quantity} → ${newQuantity}`)
 
   // 维修费用属于普通信息保存；修改后不会自动回退或清空签字。
@@ -173,35 +192,31 @@ function buildDeviceUpdateFields(
     }
 
     if (newCostRaw !== null && newCostRaw !== undefined) {
-      updateFields.push(`RepairCost = ${parseFloat(String(newCostRaw))}`)
+      data.RepairCost = new Prisma.Decimal(String(newCostRaw))
     } else {
-      updateFields.push(`RepairCost = NULL`)
+      data.RepairCost = null
     }
   }
 
   // ── 3W1H 字段（Rule 3 范畴：静默写入，只有真正变化才记日志）─────────────────
   if (body.warrantyStatusOverride !== undefined) {
     const newVal = body.warrantyStatusOverride
-    if (!newVal) updateFields.push("WarrantyStatusOverride = NULL")
-    else updateFields.push(`WarrantyStatusOverride = N'${String(newVal).replace(/'/g, "''")}'`)
+    data.WarrantyStatusOverride = newVal ? String(newVal) : null
     if (norm(newVal) !== norm(existing.warrantyStatusOverride)) changedLabels.push("保修状态覆盖")
   }
   if (body.faultCategory !== undefined) {
     const newVal = body.faultCategory
-    if (!newVal) updateFields.push("FaultCategory = NULL")
-    else updateFields.push(`FaultCategory = N'${String(newVal).replace(/'/g, "''")}'`)
+    data.FaultCategory = newVal ? String(newVal) : null
     if (norm(newVal) !== norm(existing.faultCategory)) changedLabels.push("故障分类")
   }
   if (body.repairAction !== undefined) {
     const newVal = body.repairAction
-    if (!newVal) updateFields.push("RepairAction = NULL")
-    else updateFields.push(`RepairAction = N'${String(newVal).replace(/'/g, "''")}'`)
+    data.RepairAction = newVal ? String(newVal) : null
     if (norm(newVal) !== norm(existing.repairAction)) changedLabels.push("维修动作")
   }
   if (body.repairNotes !== undefined) {
     const newVal = body.repairNotes
-    if (!newVal) updateFields.push("RepairNotes = NULL")
-    else updateFields.push(`RepairNotes = N'${String(newVal).replace(/'/g, "''")}'`)
+    data.RepairNotes = newVal ? String(newVal) : null
     if (norm(newVal) !== norm(existing.repairNotes)) changedLabels.push("处理说明")
   }
 
@@ -210,20 +225,16 @@ function buildDeviceUpdateFields(
   const damageImagesValue = parseImageField(device.damageImages)
 
   if (deviceImagesValue !== undefined) {
-    updateFields.push(deviceImagesValue === null
-      ? "DevicePhotos = NULL"
-      : `DevicePhotos = N'${deviceImagesValue.replace(/'/g, "''")}'`)
+    data.devicePhotos = deviceImagesValue
     // 只有序列化结果与 DB 存量不同时才记为变更
     if (norm(deviceImagesValue) !== norm(existing.devicePhotos)) changedLabels.push("设备照片")
   }
   if (damageImagesValue !== undefined) {
-    updateFields.push(damageImagesValue === null
-      ? "DamageImages = NULL"
-      : `DamageImages = N'${damageImagesValue.replace(/'/g, "''")}'`)
+    data.DamageImages = damageImagesValue
     if (norm(damageImagesValue) !== norm(existing.damageImages)) changedLabels.push("损坏照片")
   }
 
-  return { updateFields, changedLabels }
+  return { data, changedLabels }
 }
 
 // ─── API 处理函数 ────────────────────────────────────────────────────────────────
@@ -346,12 +357,6 @@ export async function PUT(
         [UserRole.REPORTER]: new Set([
           TicketStatus.CREATED,
           TicketStatus.WAREHOUSE_CONFIRMING,
-          TicketStatus.WAREHOUSE_CONFIRMED,
-          TicketStatus.IN_REPAIR,
-          TicketStatus.PENDING_REPORTER_CONFIRM,
-          TicketStatus.TECHNICIAN_REPAIRING,
-          TicketStatus.BUSINESS_REVIEW,
-          TicketStatus.WAREHOUSE_SHIPPING,
         ]),
         [UserRole.WAREHOUSE]: new Set([
           TicketStatus.CREATED,
@@ -420,6 +425,8 @@ export async function PUT(
           ${Prisma.raw(DB_FIELDS.PROBLEM)},
           ${Prisma.raw(DB_FIELDS.MATERIAL_CODE)},
           ${Prisma.raw(DB_FIELDS.QUANTITY)},
+          ${Prisma.raw(DB_FIELDS.CATEGORY)},
+          ${Prisma.raw(DB_FIELDS.SUB_CATEGORY)},
           WarrantyStatusOverride,
           FaultCategory,
           RepairAction,
@@ -429,6 +436,7 @@ export async function PUT(
           ${Prisma.raw(repairCostSelect)}
         FROM Repair_Tickets
         WHERE ${Prisma.raw(DB_FIELDS.BATCH_ID)} = ${batchId}
+        ORDER BY ${Prisma.raw(DB_FIELDS.ID)} ASC
       `) as Record<string, unknown>[]
 
       const existingDeviceIds = existingDevicesResult
@@ -447,6 +455,8 @@ export async function PUT(
             faultDescription: (row.Problem      as string | null) ?? null,
             materialCode:     (row.MaterialCode as string | null) ?? null,
             quantity:         Number(row.Quantity ?? row[DB_FIELDS.QUANTITY]) || 1,
+            category:         (row.Category    as string | null) ?? null,
+            subCategory:      (row.SubCategory as string | null) ?? null,
             repairCost: hasRepairCost
               ? (row.RepairCost != null ? String(row.RepairCost) : null)
               : null,
@@ -469,8 +479,15 @@ export async function PUT(
       if (projectLocation !== undefined && norm(projectLocation) !== norm(existingBatch.projectLocation)) batchChangedLabels.push("项目地址")
       if (trackingNumber  !== undefined && norm(trackingNumber)  !== norm(existingBatch.trackingNumberIn)) batchChangedLabels.push("物流单号")
       if (expressCompany  !== undefined && norm(expressCompany)  !== norm(existingBatch.courierCompany))  batchChangedLabels.push("快递公司")
-      if (category        !== undefined && norm(category)        !== norm(existingBatch.category))        batchChangedLabels.push("设备类别")
-      if (subCategory     !== undefined && norm(subCategory)     !== norm(existingBatch.subCategory))     batchChangedLabels.push("设备子类别")
+      const hasPerDeviceClassification = devices.some(
+        (device) => device.category !== undefined || device.subCategory !== undefined,
+      )
+      if (!hasPerDeviceClassification && category !== undefined && norm(category) !== norm(existingBatch.category)) {
+        batchChangedLabels.push("设备类别")
+      }
+      if (!hasPerDeviceClassification && subCategory !== undefined && norm(subCategory) !== norm(existingBatch.subCategory)) {
+        batchChangedLabels.push("设备子类别")
+      }
 
       for (const deviceId of existingDeviceIds) {
         await tx.$executeRaw(Prisma.sql`
@@ -482,106 +499,82 @@ export async function PUT(
             ${Prisma.raw(DB_FIELDS.PROJECT_LOCATION)}   = ${projectLocation  || null},
             ${Prisma.raw(DB_FIELDS.TRACKING_NUMBER_IN)} = ${trackingNumber   || null},
             ${Prisma.raw(DB_FIELDS.COURIER_COMPANY)}    = ${expressCompany   || null},
-            ${Prisma.raw(DB_FIELDS.CATEGORY)}           = ${category         || null},
-            ${Prisma.raw(DB_FIELDS.SUB_CATEGORY)}       = ${subCategory      || null},
+            ${Prisma.raw(DB_FIELDS.CATEGORY)}           = ${hasPerDeviceClassification ? Prisma.raw(DB_FIELDS.CATEGORY) : (category || null)},
+            ${Prisma.raw(DB_FIELDS.SUB_CATEGORY)}       = ${hasPerDeviceClassification ? Prisma.raw(DB_FIELDS.SUB_CATEGORY) : (subCategory || null)},
             ${Prisma.raw(DB_FIELDS.UPDATED_AT)}         = GETUTCDATE()
           WHERE ${Prisma.raw(DB_FIELDS.ID)} = ${deviceId}
         `)
       }
 
-      // 4. 处理设备信息（三分支：数量相同 / 减少 / 增加）
-      const deviceRowCount = devices.length
+      // 4. 按稳定设备 ID 处理修改/新增/删除；刚创建后的照片同步保留顺序兼容。
       const deviceCount = sumDeviceQuantity(
         devices.map((device) => ({ quantity: Number(device.quantity) || 1 }))
       )
-      const existingCount = existingDeviceIds.length
-
       const allDeviceChangeSummaries: string[] = []
+      const reconciliationPlan = planBatchDeviceReconciliation(
+        existingDeviceIds,
+        devices.map((device) => ({
+          deviceId: typeof device.deviceId === "number" ? device.deviceId : undefined,
+        })),
+      )
 
-      /** 执行单台已有设备的 UPDATE（复用于三个分支） */
+      /** 执行单台已有设备的参数化 UPDATE。 */
       const processExistingDevice = async (device: Record<string, unknown>, deviceId: number) => {
         const existing = existingDeviceMap.get(deviceId)
-        if (!existing) return
+        if (!existing) throw new Error("DEVICE_NOT_IN_BATCH")
 
-        const { updateFields, changedLabels } =
+        const { data, changedLabels } =
           buildDeviceUpdateFields(device, existing, user.role, body)
 
         if (changedLabels.length > 0) {
           allDeviceChangeSummaries.push(`设备${deviceId}：${changedLabels.join("、")}`)
         }
 
-        await tx.$executeRaw(Prisma.sql`
-          UPDATE Repair_Tickets
-          SET ${Prisma.raw(updateFields.join(", "))}
-          WHERE ${Prisma.raw(DB_FIELDS.ID)} = ${deviceId}
-        `)
+        await tx.repair_Tickets.update({ where: { id: deviceId }, data })
       }
 
-      if (deviceRowCount === existingCount) {
-        for (let i = 0; i < deviceRowCount; i++) {
-          await processExistingDevice(devices[i], existingDeviceIds[i])
-        }
-      } else if (deviceRowCount < existingCount) {
-        for (let i = 0; i < deviceRowCount; i++) {
-          await processExistingDevice(devices[i], existingDeviceIds[i])
-        }
-        for (let i = deviceRowCount; i < existingCount; i++) {
-          await tx.$executeRaw(Prisma.sql`
-            DELETE FROM Repair_Tickets
-            WHERE ${Prisma.raw(DB_FIELDS.ID)} = ${existingDeviceIds[i]}
-          `)
-          allDeviceChangeSummaries.push(`设备${existingDeviceIds[i]}：已删除`)
-        }
-      } else {
-        for (let i = 0; i < existingCount; i++) {
-          await processExistingDevice(devices[i], existingDeviceIds[i])
-        }
-        for (let i = existingCount; i < deviceRowCount; i++) {
-          const device = devices[i]
-          await tx.$executeRaw(Prisma.sql`
-            INSERT INTO Repair_Tickets (
-              ${Prisma.raw(DB_FIELDS.BATCH_ID)},
-              ${Prisma.raw(DB_FIELDS.DEVICE_SN)},
-              ${Prisma.raw(DB_FIELDS.STATUS)},
-              ${Prisma.raw(DB_FIELDS.MODEL_NAME)},
-              ${Prisma.raw(DB_FIELDS.DEVICE_NAME)},
-              ${Prisma.raw(DB_FIELDS.PROBLEM)},
-              ${Prisma.raw(DB_FIELDS.CATEGORY)},
-              ${Prisma.raw(DB_FIELDS.SUB_CATEGORY)},
-              ${Prisma.raw(DB_FIELDS.MATERIAL_CODE)},
-              ${Prisma.raw(DB_FIELDS.QUANTITY)},
-              ${Prisma.raw(DB_FIELDS.PROJECT_NAME)},
-              ${Prisma.raw(DB_FIELDS.CONTACT_INFO)},
-              ${Prisma.raw(DB_FIELDS.PROJECT_LOCATION)},
-              ${Prisma.raw(DB_FIELDS.SENDER_ADDRESS)},
-              ${Prisma.raw(DB_FIELDS.TRACKING_NUMBER_IN)},
-              ${Prisma.raw(DB_FIELDS.COURIER_COMPANY)},
-              ${Prisma.raw(DB_FIELDS.REPORT_BY_USER_ID)},
-              ${Prisma.raw(DB_FIELDS.REPORT_TIME)}
-            )
-            VALUES (
-              ${batchId},
-              ${(device.serialNumber    as string) || SPECIAL_VALUES.PENDING_VERIFY},
-              ${TicketStatus.WAREHOUSE_CONFIRMING},
-              ${(device.modelName       as string) || DEFAULT_VALUES.GENERIC_MODEL},
-              ${(device.deviceName      as string) || null},
-              ${(device.faultDescription as string) || ""},
-              ${category     || null},
-              ${subCategory  || null},
-              ${(device.materialCode as string) || null},
-              ${Number(device.quantity) || 1},
-              ${projectName     || null},
-              ${contactInfo     || null},
-              ${projectLocation || null},
-              ${senderAddress   || null},
-              ${trackingNumber  || null},
-              ${expressCompany  || null},
-              ${Number.isSafeInteger(batchOwnerId) ? batchOwnerId : null},
-              GETUTCDATE()
-            )
-          `)
-          allDeviceChangeSummaries.push(`新增设备：${(device.serialNumber as string) || "待核"}`)
-        }
+      for (const update of reconciliationPlan.updates) {
+        await processExistingDevice(devices[update.submittedIndex], update.deviceId)
+      }
+
+      for (const deviceId of reconciliationPlan.deletes) {
+        const deleteResult = await tx.repair_Tickets.deleteMany({
+          where: { id: deviceId, batchId },
+        })
+        if (deleteResult.count !== 1) throw new Error("DEVICE_NOT_IN_BATCH")
+        allDeviceChangeSummaries.push(`设备${deviceId}：已删除`)
+      }
+
+      for (const submittedIndex of reconciliationPlan.inserts) {
+        const device = devices[submittedIndex]
+        const createdDevice = await tx.repair_Tickets.create({
+          data: {
+            batchId,
+            deviceSn: norm(device.serialNumber) || SPECIAL_VALUES.PENDING_VERIFY,
+            status: currentStatus,
+            modelName: norm(device.modelName) || DEFAULT_VALUES.GENERIC_MODEL,
+            deviceName: norm(device.deviceName) || null,
+            problem: norm(device.faultDescription),
+            Category: norm(device.category) || norm(category) || null,
+            SubCategory: norm(device.subCategory) || norm(subCategory) || null,
+            materialCode: norm(device.materialCode) || null,
+            Quantity: Number(device.quantity) || 1,
+            ProjectName: projectName ?? existingBatch.projectName,
+            contactInfo: contactInfo ?? existingBatch.contactInfo,
+            projectLocation: projectLocation ?? existingBatch.projectLocation,
+            senderAddress: senderAddress ?? existingBatch.senderAddress,
+            trackingNumberIn: trackingNumber ?? existingBatch.trackingNumberIn,
+            CourierCompany: expressCompany ?? existingBatch.courierCompany,
+            ReportByUserID: Number.isSafeInteger(batchOwnerId) ? batchOwnerId : null,
+            ReportTime: new Date(),
+            devicePhotos: parseImageField(device.deviceImages),
+            DamageImages: parseImageField(device.damageImages),
+          },
+          select: { id: true },
+        })
+        allDeviceChangeSummaries.push(
+          `新增设备${createdDevice.id}：${norm(device.serialNumber) || "待核"}`,
+        )
       }
 
       // 5. 写入操作日志（只在有真实变更时才有内容）
@@ -594,20 +587,20 @@ export async function PUT(
         descParts.push(`[设备信息] ${allDeviceChangeSummaries.join("；")}`)
       }
 
-      const description = descParts.length > 0
-        ? descParts.join(" | ")
-        : `提交了工单编辑（无字段变更，共 ${deviceCount} 台设备）`
+      const description = descParts.join(" | ")
 
-      await tx.repair_Ticket_History.create({
-        data: {
-          batchId,
-          actionType:   TicketActionType.BATCH_UPDATED,
-          operatorId:   user.id,
-          // 优先使用真实姓名，回退到用户名（遵守 cursorrules §5）
-          operatorName: user.realName || user.username || user.id.toString(),
-          description,
-        }
-      })
+      if (description) {
+        await tx.repair_Ticket_History.create({
+          data: {
+            batchId,
+            actionType:   TicketActionType.BATCH_UPDATED,
+            operatorId:   user.id,
+            // 优先使用真实姓名，回退到用户名（遵守 cursorrules §5）
+            operatorName: user.realName || user.username || user.id.toString(),
+            description,
+          }
+        })
+      }
 
       return { currentStatus, deviceCount, description }
     })
@@ -624,6 +617,7 @@ export async function PUT(
         batchId,
         deviceCount:   result.deviceCount,
         status:        result.currentStatus,
+        changed:       Boolean(result.description),
         rollbackCount: 0,
       }
     })
@@ -631,6 +625,13 @@ export async function PUT(
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : "更新工单失败"
     console.error("批次工单更新失败:", error)
+
+    if (error instanceof BatchDeviceReconciliationError || errorMessage === "DEVICE_NOT_IN_BATCH") {
+      return NextResponse.json(
+        { success: false, message: "设备清单已变化，请刷新后重新编辑" },
+        { status: 409 },
+      )
+    }
 
     if (errorMessage === "批次不存在") {
       return NextResponse.json({ success: false, message: errorMessage }, { status: 404 })

@@ -39,6 +39,8 @@ import { toast } from "sonner"
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
 import { canEditDeviceIdentity } from "@/lib/device-identity-permissions"
+import TicketCorrectionPanel from "@/components/ticket-correction-panel"
+import { canReporterEditDirectly } from "@/lib/ticket-correction"
 
 interface BatchWorkOrderDetailProps {
   batchId: string
@@ -49,15 +51,15 @@ interface Device {
   id: string
   deviceSerialNumber: string
   productSN?: string | null
-  modelName: string
-  deviceName: string
+  modelName: string | null
+  deviceName: string | null
   category?: string | null
   subCategory?: string | null
   status: string
-  problem: string
-  materialCode: string
+  problem: string | null
+  materialCode: string | null
   fullSpec: string
-  faultPoint: string
+  faultPoint: string | null
   createdAt: string
   manufactureDate?: string | null
   warrantyStatus?: string | null
@@ -657,7 +659,9 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
             </CardTitle>
             <div className="flex gap-2 flex-wrap items-center">
               {/* 批次信息编辑按钮（现场人员和管理员可编辑） */}
-              {(user?.role === UserRole.REPORTER || user?.role === UserRole.ADMIN) && batchInfo && (
+              {(user?.role === UserRole.ADMIN || (
+                user?.role === UserRole.REPORTER && canReporterEditDirectly(batchInfo?.status)
+              )) && batchInfo && (
                 <BatchInfoEditor
                   batchInfo={{
                     batchId: batchInfo.batchId,
@@ -739,10 +743,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                 {user?.role === UserRole.REPORTER ? "查看维修报告" : "打印维修报告"}
               </Button>
               {/* 编辑工单：仅现场人员可以编辑，且只在维修人员介入之前（仓库确认阶段及之前）才允许修改 */}
-              {user?.role === UserRole.REPORTER && (
-                batchInfo?.status === TicketStatus.CREATED ||
-                batchInfo?.status === TicketStatus.WAREHOUSE_CONFIRMING
-              ) && (
+              {user?.role === UserRole.REPORTER && canReporterEditDirectly(batchInfo?.status) && (
                 <Button
                   variant="outline"
                   onClick={() => setIsEditBatchDialogOpen(true)}
@@ -812,6 +813,24 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
       </Card>
 
       {/* 仓库确认状态提示 */}
+      {batchInfo && user?.role && (
+        <TicketCorrectionPanel
+          batchInfo={batchInfo}
+          devices={devices.map((device) => ({
+            ...device,
+            modelName: device.modelName || "",
+            deviceName: device.deviceName || "",
+            problem: device.problem || "",
+            materialCode: device.materialCode || "",
+            faultPoint: device.faultPoint || "",
+          }))}
+          role={user.role as UserRole}
+          onChanged={async () => {
+            await Promise.all([fetchBatchDevices(), fetchOperationLogs(), refreshRepairs()])
+          }}
+        />
+      )}
+
       {batchInfo && (batchInfo.status === TicketStatus.CREATED || batchInfo.status === TicketStatus.WAREHOUSE_CONFIRMING) && (
         <Alert className="border-orange-200 bg-orange-50">
           <Clock className="h-4 w-4 text-orange-600" />
@@ -1745,10 +1764,12 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                 category: batchInfo?.category || "",
                 subCategory: batchInfo?.subCategory || "",
                 devices: devices.map(device => ({
+                  id: device.id,
                   serialNumber: device.productSN || device.deviceSerialNumber || "",
                   faultDescription: device.faultPoint || device.problem || "",
                   deviceName: device.deviceName || "",
                   deviceModel: device.modelName || "",
+                  materialCode: device.materialCode || "",
                   category: device.category || batchInfo?.category || "",
                   subCategory: device.subCategory || batchInfo?.subCategory || "",
                   quantity: device.quantity,
@@ -1802,9 +1823,12 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                 category: batchInfo.category || "",
                 subCategory: batchInfo.subCategory || "",
                 devices: devices.map(d => ({
+                  id: d.id,
                   serialNumber: d.deviceSerialNumber,
-                  deviceModel: d.modelName,
-                  faultDescription: d.problem,
+                  deviceName: d.deviceName || "",
+                  deviceModel: d.modelName || "",
+                  materialCode: d.materialCode || "",
+                  faultDescription: d.problem || "",
                   category: d.category || batchInfo.category || "",
                   subCategory: d.subCategory || batchInfo.subCategory || "",
                   quantity: d.quantity,

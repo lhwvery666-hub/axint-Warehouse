@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { Button } from "@/components/ui/button";
+import { RoleAvatar } from "@/components/role-avatar";
 import {
   Database,
   LogOut,
@@ -136,9 +137,7 @@ export default function WarehouseLayout({
           {/* 用户信息 */}
           <div className="p-4 border-t border-border">
             <div className={cn("group flex items-center gap-3 rounded-lg border border-transparent p-2 transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-primary/15 hover:shadow-md motion-reduce:transform-none", !sidebarOpen && "justify-center")}>
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none">
-                <User className="h-4 w-4 text-primary" />
-              </div>
+              <RoleAvatar role={user?.role ?? UserRole.WAREHOUSE} size="sm" animated showOnline />
               {sidebarOpen && (
                 <div className="flex-1 min-w-0">
                   <div className="font-medium text-sm truncate">{user?.realName || "仓库管理员"}</div>

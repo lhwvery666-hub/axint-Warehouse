@@ -680,7 +680,9 @@ export async function DELETE(
   _request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
-  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER])
+  // Physical deletion is an administrative maintenance operation. Reporter-side
+  // removal before warehouse confirmation is handled by the guarded batch API.
+  const authResult = await checkUserRole([UserRole.ADMIN])
   if (isErrorResponse(authResult)) return authResult
 
   try {

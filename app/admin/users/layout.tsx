@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { Button } from "@/components/ui/button";
+import { RoleAvatar } from "@/components/role-avatar";
 import { Users, User, LogOut } from "lucide-react";
 import { UserRole } from "@/lib/enums";
 
@@ -67,9 +68,12 @@ export default function AdminUsersLayout({
                 返回用户管理
               </Button>
             )}
-            <span className="text-sm text-muted-foreground">
-              {user?.realName} (管理员)
-            </span>
+            <div className="flex items-center gap-2">
+              <RoleAvatar role={user?.role ?? UserRole.ADMIN} size="sm" />
+              <span className="text-sm text-muted-foreground">
+                {user?.realName} (管理员)
+              </span>
+            </div>
             <Button 
               variant="ghost" 
               size="sm"

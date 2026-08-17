@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/context/auth-context";
+import { getRolePresentation, RoleAvatar } from "@/components/role-avatar";
 import {
   DEFAULT_DEVICE_IMPORT_PURPOSE,
   DEVICE_IMPORT_PURPOSE_LABELS,
@@ -420,8 +421,9 @@ export default function DatabaseManager() {
                 </Button>
               </div>
               <div className="flex items-center gap-4 border-l border-border pl-4 ml-4">
+                <RoleAvatar role={user?.role} size="sm" />
                 <span className="text-sm text-muted-foreground">
-                  {user?.realName} (仓库管理员)
+                  {user?.realName} ({getRolePresentation(user?.role).label})
                 </span>
                 <Button 
                   variant="ghost" 

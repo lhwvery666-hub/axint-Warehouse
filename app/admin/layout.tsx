@@ -4,11 +4,11 @@ import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { Button } from "@/components/ui/button";
+import { RoleAvatar } from "@/components/role-avatar";
 import { 
   Users, 
   Database, 
   LogOut, 
-  User,
   Menu,
   X
 } from "lucide-react";
@@ -153,9 +153,7 @@ export default function AdminLayout({
           {/* 用户信息 */}
           <div className="p-4 border-t border-border">
             <div className={cn("flex items-center gap-3", !sidebarOpen && "justify-center")}>
-              <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-                <User className="h-4 w-4 text-primary" />
-              </div>
+              <RoleAvatar role={user?.role ?? UserRole.ADMIN} size="sm" animated showOnline />
               {sidebarOpen && (
                 <div className="flex-1 min-w-0">
                   <div className="font-medium text-sm truncate">{user?.realName || "管理员"}</div>

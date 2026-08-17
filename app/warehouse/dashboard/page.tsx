@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Package, CheckCircle, Clock, Loader2, ChevronRight, Database, Truck, Download, CheckCircle2, RefreshCw, ArrowRightLeft } from "lucide-react";
+import { Package, CheckCircle, Clock, Loader2, ChevronRight, Database, Truck, Download, CheckCircle2, RefreshCw, ArrowRightLeft, FilePenLine } from "lucide-react";
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { toBeijingTime } from "@/lib/utils";
@@ -13,6 +13,7 @@ import DatabaseManager from "@/components/admin/database-manager";
 import WarehouseBatchConfirm from "@/components/warehouse-batch-confirm";
 import WarehouseBatchShipping from "@/components/warehouse-batch-shipping";
 import WarehouseFactoryTransfer, { type WarehouseFactoryTransferDevice } from "@/components/warehouse-factory-transfer";
+import BatchWorkOrderDetail from "@/components/batch-work-order-detail";
 import { BatchWorkOrderCardContent } from "@/components/batch-work-order-card-content";
 import { WorkOrderCardStack } from "@/components/work-order-card-stack";
 import { TicketStatus } from "@/lib/enums";
@@ -41,17 +42,29 @@ interface PendingBatch {
   status: string;
 }
 
+interface PendingCorrectionRequest {
+  requestId: number;
+  batchId: string;
+  createdAt: string | null;
+  reason: string;
+  impact: "none" | "repair_review" | "warehouse_review";
+  changes: Array<{ label: string }>;
+  requestedByName: string;
+}
+
 export default function WarehouseDashboard() {
   const [activeTab, setActiveTab] = useState("pending");
   const [pendingBatches, setPendingBatches] = useState<PendingBatch[]>([]);
   const [shippingBatches, setShippingBatches] = useState<PendingBatch[]>([]);
   const [factoryTransferDevices, setFactoryTransferDevices] = useState<WarehouseFactoryTransferDevice[]>([]);
+  const [correctionRequests, setCorrectionRequests] = useState<PendingCorrectionRequest[]>([]);
   const [completedBatches, setCompletedBatches] = useState<PendingBatch[]>([]);
   const [allBatches, setAllBatches] = useState<PendingBatch[]>([]);
   const [loading, setLoading] = useState(true);
+  const [correctionsLoading, setCorrectionsLoading] = useState(false);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [selectedFactoryTransferDevice, setSelectedFactoryTransferDevice] = useState<WarehouseFactoryTransferDevice | null>(null);
-  const [selectedMode, setSelectedMode] = useState<"confirm" | "shipping" | "view">("confirm");
+  const [selectedMode, setSelectedMode] = useState<"confirm" | "shipping" | "view" | "correction">("confirm");
   const [workOrderQuery, setWorkOrderQuery] = useState("");
   const [customerQuery, setCustomerQuery] = useState("");
   const [deviceQuery, setDeviceQuery] = useState("");
@@ -115,6 +128,25 @@ export default function WarehouseDashboard() {
     }
   }, []);
 
+  const loadCorrectionRequests = useCallback(async (): Promise<boolean> => {
+    setCorrectionsLoading(true);
+    try {
+      const response = await fetch("/api/tickets/correction-requests", { cache: "no-store" });
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "加载修改申请失败");
+      }
+      setCorrectionRequests(result.data || []);
+      return true;
+    } catch (error: unknown) {
+      console.error("加载修改申请失败:", error);
+      return false;
+    } finally {
+      setCorrectionsLoading(false);
+    }
+  }, []);
+
   const loadCompletedBatches = useCallback(async (): Promise<boolean> => {
     setLoading(true);
     try {
@@ -157,10 +189,11 @@ export default function WarehouseDashboard() {
     if (activeTab === "pending") return loadPendingBatches();
     if (activeTab === "shipping") return loadShippingBatches();
     if (activeTab === "transfer") return loadFactoryTransferDevices();
+    if (activeTab === "corrections") return loadCorrectionRequests();
     if (activeTab === "completed") return loadCompletedBatches();
     if (activeTab === "all") return loadAllBatches();
     return true;
-  }, [activeTab, loadAllBatches, loadCompletedBatches, loadFactoryTransferDevices, loadPendingBatches, loadShippingBatches]);
+  }, [activeTab, loadAllBatches, loadCompletedBatches, loadCorrectionRequests, loadFactoryTransferDevices, loadPendingBatches, loadShippingBatches]);
 
   const closeSelectedBatchAfterRefresh = useCallback(async (workflowSaved: boolean) => {
     const refreshed = await refreshActiveTab();
@@ -174,18 +207,24 @@ export default function WarehouseDashboard() {
   }, [refreshActiveTab]);
 
   useEffect(() => {
+    void loadCorrectionRequests();
+  }, [loadCorrectionRequests]);
+
+  useEffect(() => {
     if (activeTab === "pending") {
       void loadPendingBatches();
     } else if (activeTab === "shipping") {
       void loadShippingBatches();
     } else if (activeTab === "transfer") {
       void loadFactoryTransferDevices();
+    } else if (activeTab === "corrections") {
+      void loadCorrectionRequests();
     } else if (activeTab === "completed") {
       void loadCompletedBatches();
     } else if (activeTab === "all") {
       void loadAllBatches();
     }
-  }, [activeTab, loadAllBatches, loadCompletedBatches, loadFactoryTransferDevices, loadPendingBatches, loadShippingBatches]);
+  }, [activeTab, loadAllBatches, loadCompletedBatches, loadCorrectionRequests, loadFactoryTransferDevices, loadPendingBatches, loadShippingBatches]);
 
   const filterWarehouseBatches = (batches: PendingBatch[]) => batches.filter((batch) =>
     matchesRepairListFilters(batch, {
@@ -206,6 +245,8 @@ export default function WarehouseDashboard() {
       ? filteredShippingBatches.length
       : activeTab === "transfer"
         ? filteredFactoryTransferDevices.length
+      : activeTab === "corrections"
+        ? correctionRequests.length
       : activeTab === "completed"
         ? filteredCompletedBatches.length
         : activeTab === "all"
@@ -214,6 +255,7 @@ export default function WarehouseDashboard() {
   const paginatedPendingBatches = paginateItems(filteredPendingBatches, currentPage);
   const paginatedShippingBatches = paginateItems(filteredShippingBatches, currentPage);
   const paginatedFactoryTransferDevices = paginateItems(filteredFactoryTransferDevices, currentPage);
+  const paginatedCorrectionRequests = paginateItems(correctionRequests, currentPage);
   const paginatedCompletedBatches = paginateItems(filteredCompletedBatches, currentPage);
   const paginatedAllBatches = paginateItems(filteredAllBatches, currentPage);
 
@@ -247,7 +289,12 @@ export default function WarehouseDashboard() {
   if (selectedBatchId) {
     return (
       <div className="min-h-screen bg-background p-4 md:p-6">
-        {selectedMode === "confirm" ? (
+        {selectedMode === "correction" ? (
+          <BatchWorkOrderDetail
+            batchId={selectedBatchId}
+            onBack={() => closeSelectedBatchAfterRefresh(false)}
+          />
+        ) : selectedMode === "confirm" ? (
           <WarehouseBatchConfirm
             batchId={selectedBatchId}
             onBack={() => closeSelectedBatchAfterRefresh(false)}
@@ -308,7 +355,7 @@ export default function WarehouseDashboard() {
       />
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-        <TabsList className="grid w-full grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
+        <TabsList className="grid w-full grid-cols-2 sm:grid-cols-4 lg:grid-cols-7">
           <TabsTrigger value="pending" className="flex items-center gap-2">
             <Clock className="h-4 w-4" />
             待确认批次
@@ -320,6 +367,15 @@ export default function WarehouseDashboard() {
           <TabsTrigger value="transfer" className="flex items-center gap-2">
             <ArrowRightLeft className="h-4 w-4" />
             待移交
+          </TabsTrigger>
+          <TabsTrigger value="corrections" className="flex items-center gap-2">
+            <FilePenLine className="h-4 w-4" />
+            修改申请
+            {correctionRequests.length > 0 && (
+              <Badge variant="destructive" className="ml-1 px-1.5 py-0 text-xs">
+                {correctionRequests.length}
+              </Badge>
+            )}
           </TabsTrigger>
           <TabsTrigger value="completed" className="flex items-center gap-2">
             <CheckCircle2 className="h-4 w-4" />
@@ -574,6 +630,89 @@ export default function WarehouseDashboard() {
                   <WorkOrderPagination
                     currentPage={currentPage}
                     totalItems={filteredFactoryTransferDevices.length}
+                    onPageChange={setCurrentPage}
+                  />
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* 工单修改申请 */}
+        <TabsContent value="corrections" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    <FilePenLine className="h-5 w-5 text-amber-600" />
+                    待审核的工单修改申请
+                  </CardTitle>
+                  <CardDescription className="mt-1.5">
+                    申请期间不改变工单状态；打开工单核对差异后，可批准应用或驳回。
+                  </CardDescription>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={loadCorrectionRequests}
+                  disabled={correctionsLoading}
+                  className="flex shrink-0 items-center gap-2"
+                >
+                  <RefreshCw className={`h-4 w-4 ${correctionsLoading ? "animate-spin" : ""}`} />
+                  刷新
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {correctionsLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                  <span className="ml-2 text-muted-foreground">加载中...</span>
+                </div>
+              ) : correctionRequests.length === 0 ? (
+                <div className="py-12 text-center">
+                  <CheckCircle2 className="mx-auto mb-4 h-12 w-12 text-green-500" />
+                  <p className="text-muted-foreground">暂无待审核的修改申请</p>
+                </div>
+              ) : (
+                <>
+                  <WorkOrderCardStack>
+                    {paginatedCorrectionRequests.map((request) => (
+                      <Card
+                        key={`correction-${request.requestId}`}
+                        className="cursor-pointer"
+                        onClick={() => {
+                          setSelectedBatchId(request.batchId);
+                          setSelectedMode("correction");
+                        }}
+                      >
+                        <CardContent className="grid min-h-24 items-center gap-3 px-5 py-4 md:grid-cols-[180px_1fr_180px_28px]">
+                          <div>
+                            <p className="font-semibold">{request.batchId}</p>
+                            <p className="text-xs text-muted-foreground">申请 #{request.requestId}</p>
+                          </div>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm">{request.reason}</p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {request.requestedByName} · 修改 {request.changes.length} 项
+                            </p>
+                          </div>
+                          <Badge variant="outline" className="w-fit border-amber-300 bg-amber-50 text-amber-800">
+                            {request.impact === "warehouse_review"
+                              ? "批准后回到仓库确认"
+                              : request.impact === "repair_review"
+                                ? "批准后回到维修检查"
+                                : "批准后不回退流程"}
+                          </Badge>
+                          <ChevronRight className="h-5 w-5 text-muted-foreground" />
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </WorkOrderCardStack>
+                  <WorkOrderPagination
+                    currentPage={currentPage}
+                    totalItems={correctionRequests.length}
                     onPageChange={setCurrentPage}
                   />
                 </>

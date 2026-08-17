@@ -1,11 +1,11 @@
 export interface DeviceUpdateSnapshot {
-  deviceSn: string | null
-  modelName: string | null
-  deviceName: string | null
-  faultDescription: string | null
-  category: string | null
-  subCategory: string | null
-  materialCode: string | null
+  deviceSn: unknown
+  modelName: unknown
+  deviceName: unknown
+  faultDescription: unknown
+  category: unknown
+  subCategory: unknown
+  materialCode: unknown
   quantity: number | null
   manufactureDate: Date | string | null
   arrivalDate: Date | string | null
@@ -24,8 +24,8 @@ export interface DeviceUpdateInput {
   arrivalDate?: string | null
 }
 
-function normalizeText(value: string | null | undefined): string {
-  return value?.trim() ?? ""
+export function normalizeDeviceText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : ""
 }
 
 function normalizeDate(value: Date | string | null | undefined): number | null {
@@ -44,33 +44,33 @@ export function getChangedDeviceUpdates(
 ): DeviceUpdateInput {
   const changed: DeviceUpdateInput = {}
 
-  if (updates.deviceSn !== undefined && normalizeText(updates.deviceSn) !== normalizeText(current.deviceSn)) {
+  if (updates.deviceSn !== undefined && normalizeDeviceText(updates.deviceSn) !== normalizeDeviceText(current.deviceSn)) {
     changed.deviceSn = updates.deviceSn
   }
-  if (updates.modelName !== undefined && normalizeText(updates.modelName) !== normalizeText(current.modelName)) {
+  if (updates.modelName !== undefined && normalizeDeviceText(updates.modelName) !== normalizeDeviceText(current.modelName)) {
     changed.modelName = updates.modelName
   }
-  if (updates.deviceName !== undefined && normalizeText(updates.deviceName) !== normalizeText(current.deviceName)) {
+  if (updates.deviceName !== undefined && normalizeDeviceText(updates.deviceName) !== normalizeDeviceText(current.deviceName)) {
     changed.deviceName = updates.deviceName
   }
   if (
     updates.faultDescription !== undefined
-    && normalizeText(updates.faultDescription) !== normalizeText(current.faultDescription)
+    && normalizeDeviceText(updates.faultDescription) !== normalizeDeviceText(current.faultDescription)
   ) {
     changed.faultDescription = updates.faultDescription
   }
-  if (updates.category !== undefined && normalizeText(updates.category) !== normalizeText(current.category)) {
+  if (updates.category !== undefined && normalizeDeviceText(updates.category) !== normalizeDeviceText(current.category)) {
     changed.category = updates.category
   }
   if (
     updates.subCategory !== undefined
-    && normalizeText(updates.subCategory) !== normalizeText(current.subCategory)
+    && normalizeDeviceText(updates.subCategory) !== normalizeDeviceText(current.subCategory)
   ) {
     changed.subCategory = updates.subCategory
   }
   if (
     updates.materialCode !== undefined
-    && normalizeText(updates.materialCode) !== normalizeText(current.materialCode)
+    && normalizeDeviceText(updates.materialCode) !== normalizeDeviceText(current.materialCode)
   ) {
     changed.materialCode = updates.materialCode
   }

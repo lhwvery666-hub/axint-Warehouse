@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { Button } from "@/components/ui/button";
+import { RoleAvatar } from "@/components/role-avatar";
 import { User, LogOut } from "lucide-react";
 import { UserRole } from "@/lib/enums";
 
@@ -106,9 +107,12 @@ export default function AdminDatabaseLayout({
                 返回数据库管理
               </Button>
             )}
-            <span className="text-sm text-muted-foreground">
-              {user?.realName} ({user?.role === UserRole.ADMIN ? "管理员" : "仓库管理员"})
-            </span>
+            <div className="flex items-center gap-2">
+              <RoleAvatar role={user?.role} size="sm" />
+              <span className="text-sm text-muted-foreground">
+                {user?.realName} ({user?.role === UserRole.ADMIN ? "管理员" : "仓库管理员"})
+              </span>
+            </div>
             <Button 
               variant="ghost" 
               size="sm"

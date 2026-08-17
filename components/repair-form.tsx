@@ -25,7 +25,7 @@ import { useDeviceModels } from "@/hooks/use-device-models"
 import { useDeviceCheck, DeviceCheckResult } from "@/hooks/use-device-check"
 import { useAuth } from "@/context/auth-context"
 import { FORM_LABELS, FORM_PLACEHOLDERS, FORM_ERRORS, TOAST_MESSAGES, INFO_MESSAGES, BUTTON_LABELS } from "@/lib/form-labels"
-import { UserRole, WarrantyStatus, FaultCategory, RepairAction } from "@/lib/enums"
+import { UserRole, WarrantyStatus, FaultCategory, RepairAction, isPendingSNPlaceholder } from "@/lib/enums"
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
 
@@ -48,10 +48,12 @@ interface RepairFormProps {
     category?: string
     subCategory?: string
     devices?: Array<{
+      id?: string | number
       serialNumber: string
       faultDescription: string
       deviceName?: string
       deviceModel?: string
+      materialCode?: string
       category?: string
       subCategory?: string
       quantity?: number | null
@@ -197,6 +199,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
   // 多设备数组状态（每个设备独立的三级分类和序列号）
   interface DeviceInput {
     id: string
+    existingDeviceId?: number
     category: string
     subCategory: string
     modelSelected: string
@@ -208,6 +211,8 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
     snValid: boolean | null
     snError: string | null
     snData: DeviceCheckResult | null
+    deviceName: string
+    materialCode: string
     // 每个设备独立的故障信息和照片（支持最多 5 张）
     faultDescription: string
     devicePhotos: string[]       // 预览 URL 数组（blob: 新图 或 服务器 URL 既有图）
@@ -226,6 +231,8 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       snValid: null,
       snError: null,
       snData: null,
+      deviceName: "",
+      materialCode: "",
       faultDescription: "",
       devicePhotos: [],
       devicePhotoFiles: [],
@@ -239,18 +246,26 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
   // 预填充初始数据
   useEffect(() => {
     if (initialData?.devices && initialData.devices.length > 0) {
-      const prefilledDevices = initialData.devices.map((device, index) => ({
-        id: `device-prefilled-${Date.now()}-${index}`,
+      const prefilledDevices = initialData.devices.map((device, index) => {
+        const numericDeviceId = Number(device.id)
+        const pendingSerialNumber = isPendingSNPlaceholder(device.serialNumber)
+        return {
+        id: `device-prefilled-${numericDeviceId || Date.now()}-${index}`,
+        existingDeviceId: Number.isSafeInteger(numericDeviceId) && numericDeviceId > 0
+          ? numericDeviceId
+          : undefined,
         category: device.category || initialData.category || "",
         subCategory: device.subCategory || initialData.subCategory || "",
         modelSelected: device.deviceModel || "",
-        serialNumber: device.serialNumber || "",
-        isSnPendingVerify: false,
+        serialNumber: pendingSerialNumber ? "" : (device.serialNumber || ""),
+        isSnPendingVerify: pendingSerialNumber,
         deviceQuantity: device.quantity || 1,
         checkingSn: false,
         snValid: null,
         snError: null,
         snData: null,
+        deviceName: device.deviceName || "",
+        materialCode: device.materialCode || "",
         faultDescription: device.faultDescription || "",
         devicePhotos: (() => {
           // 解析既有照片 URL，编辑时直接展示
@@ -264,7 +279,8 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
           }
         })(),
         devicePhotoFiles: [],
-      }))
+      }
+      })
       setDeviceInputs(prefilledDevices)
     }
   }, []) // 只在组件挂载时执行一次
@@ -285,6 +301,8 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
         snValid: null,
         snError: null,
         snData: null,
+        deviceName: "",
+        materialCode: "",
         faultDescription: "",
         devicePhotos: [],
         devicePhotoFiles: [],
@@ -324,6 +342,8 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       snValid: null,
       snError: null,
       snData: null,
+      deviceName: lastDevice.deviceName,
+      materialCode: lastDevice.materialCode,
       faultDescription: lastDevice.faultDescription, // 复制故障描述
       devicePhotos: [],    // 照片不复制
       devicePhotoFiles: [],
@@ -399,6 +419,8 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
               ...device, 
               snValid: true, 
               snData: deviceData, 
+              deviceName: deviceData.deviceName || device.deviceName,
+              materialCode: deviceData.materialCode || device.materialCode,
               checkingSn: false 
             }
             
@@ -413,11 +435,12 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
                 : d
             ))
           }
-        } catch (err: any) {
+        } catch (err: unknown) {
+          const errorMessage = err instanceof Error ? err.message : "设备校验失败"
           console.error(`设备 ${device.id} 序列号校验失败:`, err)
           setDeviceInputs(prev => prev.map(d => 
             d.id === device.id 
-              ? { ...d, snValid: false, snError: err?.message || "设备校验失败", snData: null, checkingSn: false }
+              ? { ...d, snValid: false, snError: errorMessage, snData: null, checkingSn: false }
               : d
           ))
         }
@@ -816,11 +839,15 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
             }
 
             return {
+              deviceId: device.existingDeviceId,
               serialNumber: device.isSnPendingVerify ? "待验证" : device.serialNumber,
               modelName: device.modelSelected || "通用型号",
-              deviceName: device.snData?.deviceName || "",
+              deviceName: device.deviceName || device.snData?.deviceName || "",
               faultDescription: device.faultDescription,
-              materialCode: device.snData?.materialCode || "",
+              materialCode: device.materialCode || device.snData?.materialCode || "",
+              category: device.category,
+              subCategory: device.subCategory,
+              quantity: device.deviceQuantity || 1,
               ...(deviceImages !== undefined && { deviceImages }), // 只在有照片时才包含此字段
             }
           })
@@ -962,12 +989,13 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
           signal: controller.signal,
         })
         clearTimeout(timeoutId)
-      } catch (fetchError: any) {
+      } catch (fetchError: unknown) {
         clearTimeout(timeoutId)
-        if (fetchError.name === 'AbortError') {
+        if (fetchError instanceof Error && fetchError.name === 'AbortError') {
           throw new Error("请求超时，请检查网络连接")
         }
-        throw new Error(`网络错误: ${fetchError.message || "无法连接到服务器"}`)
+        const fetchMessage = fetchError instanceof Error ? fetchError.message : "无法连接到服务器"
+        throw new Error(`网络错误: ${fetchMessage}`)
       }
 
       // 解析响应
@@ -1013,9 +1041,11 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
             return {
               serialNumber: device.isSnPendingVerify ? "待验证" : device.serialNumber,
               modelName: device.modelSelected || "通用型号",
-              deviceName: device.snData?.deviceName || "",
+              deviceName: device.deviceName || device.snData?.deviceName || "",
               faultDescription: device.faultDescription,
-              materialCode: device.snData?.materialCode || "",
+              materialCode: device.materialCode || device.snData?.materialCode || "",
+              category: device.category,
+              subCategory: device.subCategory,
               quantity: device.deviceQuantity || 1,
               ...(deviceImages !== undefined && { deviceImages }),
             }
@@ -1099,20 +1129,21 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
           router.replace("/")
         }
       }, 100)
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const normalizedError = error instanceof Error ? error : new Error("提交失败，请稍后重试！")
       console.error("提交失败", error)
       console.error("错误详情:", {
-        name: error?.name,
-        message: error?.message,
-        stack: error?.stack,
-        cause: error?.cause,
+        name: normalizedError.name,
+        message: normalizedError.message,
+        stack: normalizedError.stack,
+        cause: normalizedError.cause,
       })
       
       // 如果是网络错误
-      if (error instanceof TypeError && error.message.includes('fetch')) {
+      if (normalizedError instanceof TypeError && normalizedError.message.includes('fetch')) {
         alert("网络错误：无法连接到服务器，请检查网络连接后重试")
       } else {
-        const errorMessage = error?.message || "提交失败，请稍后重试！"
+        const errorMessage = normalizedError.message || "提交失败，请稍后重试！"
         alert(`提交失败：${errorMessage}`)
       }
       
@@ -2648,7 +2679,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
                       } else {
                         setBatchInputValid(prev => ({ ...prev, [idx]: false }))
                       }
-                    } catch (err: any) {
+                    } catch (err: unknown) {
                       console.error("设备校验失败", err)
                       setBatchInputValid(prev => ({ ...prev, [idx]: null }))
                     } finally {

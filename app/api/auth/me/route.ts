@@ -70,13 +70,12 @@ export async function GET() {
         phone: queryConfig.hasPhoneNumber ? (user.PhoneNumber || "") : "",
       },
     })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("获取用户信息失败:", error)
     return NextResponse.json(
       {
         success: false,
         message: "获取用户信息时发生错误",
-        error: error?.message || "未知错误",
       },
       { status: 500 }
     )

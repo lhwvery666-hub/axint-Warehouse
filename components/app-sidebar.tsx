@@ -1,10 +1,11 @@
 "use client"
 
-import { Home, Wrench, User, LogOut, Database, Trash2 } from "lucide-react"
+import { Home, Wrench, User, LogOut, Trash2 } from "lucide-react"
 import { useAuth } from "@/context/auth-context"
 import { Button } from "@/components/ui/button"
+import { RoleAvatar } from "@/components/role-avatar"
 import { cn } from "@/lib/utils"
-import { UserRole } from "@/lib/enums"
+import { normalizeUserRole, USER_ROLE_LABELS, UserRole } from "@/lib/enums"
 
 interface NavItem {
   id: "home" | "repair" | "profile"
@@ -23,9 +24,10 @@ export default function AppSidebar({ activeTab, onTabChange, userType }: AppSide
   
   // 根据传入的用户类型或者认证上下文中的角色显示不同的导航项
   const effectiveUserType = userType || user?.role || UserRole.TECHNICIAN
+  const normalizedUserRole = normalizeUserRole(effectiveUserType) ?? UserRole.TECHNICIAN
   
   // 根据用户角色显示不同的导航项
-  const navItems: NavItem[] = effectiveUserType === "reporter" 
+  const navItems: NavItem[] = normalizedUserRole === UserRole.REPORTER
     ? [
         // 报告人员只能看到报修页面
         { id: "repair", label: "故障报修", icon: Wrench },
@@ -38,11 +40,6 @@ export default function AppSidebar({ activeTab, onTabChange, userType }: AppSide
         { id: "profile", label: "个人中心", icon: User },
       ]
       
-  // 添加数据库管理链接（仅限维修工程师/管理员）
-  const handleDatabaseClick = () => {
-    window.location.href = "/admin/database";
-  }
-
   // 从 user context 获取用户名（不再使用 localStorage）
   const userName = user?.realName || user?.id || null
 
@@ -80,7 +77,7 @@ export default function AppSidebar({ activeTab, onTabChange, userType }: AppSide
         </ul>
 
         {/* 回收站入口（仅非现场报告人员显示） */}
-        {effectiveUserType !== "reporter" && (
+        {normalizedUserRole !== UserRole.REPORTER && (
           <div className="mt-4">
             <button
               onClick={() => onTabChange("recycle")}
@@ -99,21 +96,11 @@ export default function AppSidebar({ activeTab, onTabChange, userType }: AppSide
       </nav>
       <div className="border-t border-border dark:border-border p-4 space-y-3">
         <div className="group flex items-center gap-3 rounded-lg border border-transparent bg-muted p-3 transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-primary/15 hover:shadow-md motion-reduce:transform-none dark:bg-muted">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none">
-            <span className="text-sm font-medium text-primary-foreground">
-              {userName?.substring(0, 2) || "用户"}
-            </span>
-          </div>
+          <RoleAvatar role={normalizedUserRole} size="sm" animated showOnline />
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium truncate">{userName || "用户"}</p>
             <p className="text-xs text-muted-foreground">
-              {effectiveUserType === "reporter" 
-                ? "现场报告人员" 
-                : effectiveUserType === "admin"
-                ? "管理员"
-                : effectiveUserType === "warehouse"
-                ? "仓库管理员"
-                : "维修工程师"}
+              {USER_ROLE_LABELS[normalizedUserRole]}
             </p>
             {user?.id && (
               <p className="text-xs text-muted-foreground/70 mt-0.5">

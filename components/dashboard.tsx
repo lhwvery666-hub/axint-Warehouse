@@ -14,6 +14,7 @@ import { format, isAfter, isBefore, parseISO, subDays, subMonths } from "date-fn
 import { cn } from "@/lib/utils"
 import { useSearchParams, useRouter } from "next/navigation"
 import { useAuth } from "@/context/auth-context"
+import { RoleAvatar } from "@/components/role-avatar"
 import { WorkOrderListRow } from "@/components/work-order-list-row"
 import { WorkOrderCardStack } from "@/components/work-order-card-stack"
 import { WorkOrderFilterBar } from "@/components/work-order-filter-bar"
@@ -524,10 +525,8 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
           <h1 className="text-2xl md:text-3xl font-bold text-foreground bg-gradient-to-r from-foreground to-foreground/80 bg-clip-text">维修服务仪表盘</h1>
           <p className="text-sm text-muted-foreground mt-1">欢迎回来，{user?.realName || "用户"}</p>
         </div>
-        <div className="md:hidden w-12 h-12 rounded-full bg-gradient-to-br from-primary to-primary/80 flex items-center justify-center shadow-md">
-          <span className="text-primary-foreground font-semibold text-sm">
-            {user?.realName ? user.realName.substring(0, 2) : "用户"}
-          </span>
+        <div className="group md:hidden">
+          <RoleAvatar role={user?.role} size="md" animated showOnline />
         </div>
       </div>
 

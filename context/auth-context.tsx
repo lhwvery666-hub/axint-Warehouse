@@ -11,7 +11,6 @@ interface User {
   username: string
   realName: string
   role: UserRole | null
-  avatar?: string
   phone?: string
 }
 
@@ -68,7 +67,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               username: backendUser.username,
               realName: backendUser.realName,
               role: mappedRole,
-              avatar: "/placeholder-user.jpg",
               phone: backendUser.phone || "",
             }
             setUser(authUser)
@@ -215,7 +213,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         username: backendUser.username,
         realName: backendUser.realName,
         role: mappedRole,
-        avatar: "/placeholder-user.jpg",
         phone: backendUser.phone || "",
       }
 

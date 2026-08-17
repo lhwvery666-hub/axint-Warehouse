@@ -3,6 +3,7 @@ import test from "node:test"
 
 import {
   getChangedDeviceUpdates,
+  normalizeDeviceText,
   type DeviceUpdateSnapshot,
 } from "@/lib/device-update-diff"
 
@@ -46,4 +47,23 @@ test("清空可空字段会被识别为修改", () => {
   assert.deepEqual(getChangedDeviceUpdates({ materialCode: null }, snapshot), {
     materialCode: null,
   })
+})
+
+test("数据库旧记录中的 null 与非字符串文本不会触发 trim 异常", () => {
+  assert.equal(normalizeDeviceText(null), "")
+  assert.equal(normalizeDeviceText(100), "")
+  assert.equal(normalizeDeviceText(" AX-7CW "), "AX-7CW")
+
+  assert.doesNotThrow(() => getChangedDeviceUpdates({
+    deviceName: "网络控制板",
+    modelName: "AX-7CW",
+    category: "开关配件",
+    subCategory: "电源",
+  }, {
+    ...snapshot,
+    deviceName: null,
+    modelName: 100,
+    category: null,
+    subCategory: null,
+  }))
 })
