@@ -86,9 +86,10 @@ export default function EditRepairReportPage() {
   const [remarks, setRemarks] = useState('');
   const [savedSnapshot, setSavedSnapshot] = useState('');
 
-  // ── 锁定状态：发送流程后报告不可直接编辑 ──
+  // 签字前允许保存覆盖，签字后报告锁定；已发送状态仅防止重复推进。
   // isSentToReporter: 状态已超过 IN_REPAIR（流程已发出）
   const [isSentToReporter, setIsSentToReporter] = useState(false);
+  const [isSigned, setIsSigned] = useState(false);
   // isEditingAfterSend: 维修人员显式点击"修改报告"后进入修改模式
   const [isEditingAfterSend, setIsEditingAfterSend] = useState(false);
 
@@ -123,6 +124,7 @@ export default function EditRepairReportPage() {
             const loadedDevices = result.data.devices as BatchDevice[];
             const loadedRemarks = String(result.data.remarks || '');
             setBatchInfo(result.data.batchInfo as BatchInfo);
+            setIsSigned(Boolean(result.data.batchInfo?.reportLocked || result.data.batchInfo?.signedReportPhoto));
             setDevices(loadedDevices);
             setRemarks(loadedRemarks);
             setSavedSnapshot(JSON.stringify({ devices: loadedDevices, remarks: loadedRemarks }));
@@ -137,6 +139,7 @@ export default function EditRepairReportPage() {
             const loadedItems = Array.isArray(result.data.items) ? result.data.items as RepairItem[] : [];
             const loadedRemarks = String(result.data.remarks || '');
             setTicketInfo(result.data as SingleTicketInfo);
+            setIsSigned(Boolean(result.data.reportLocked || result.data.signedReportPhoto));
             setItems(loadedItems);
             setRemarks(loadedRemarks);
             setSavedSnapshot(JSON.stringify({ items: loadedItems, remarks: loadedRemarks }));
@@ -311,7 +314,7 @@ export default function EditRepairReportPage() {
   const hasUnsavedChanges = savedSnapshot !== '' && savedSnapshot !== currentSnapshot;
 
   // 表单是否锁定：已发送且未进入修改模式
-  const isFormLocked = isSentToReporter && !isEditingAfterSend;
+  const isFormLocked = isSigned;
 
   return (
     <div className="container mx-auto p-6 max-w-6xl">
@@ -325,21 +328,11 @@ export default function EditRepairReportPage() {
           <AlertDescription>
             <div className="flex items-center justify-between">
               <div>
-                <strong className="text-amber-900">维修报告已发送，等待现场人员签字确认</strong>
+                <strong className="text-amber-900">维修报告已签字确认</strong>
                 <p className="text-amber-700 text-sm mt-1">
-                  报告内容已锁定。如需修正信息，点击右侧“修改报告”。保存修改只更新资料，
-                  不会自动回退或改变当前流程状态。
+                  签字后的报告、报价及建议均已锁定，后续维修处置和发货仍可正常办理。
                 </p>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="ml-4 shrink-0 border-amber-400 text-amber-800 hover:bg-amber-100"
-                onClick={() => setIsEditingAfterSend(true)}
-              >
-                <Edit className="w-4 h-4 mr-1" />
-                修改报告
-              </Button>
             </div>
           </AlertDescription>
         </Alert>
@@ -624,7 +617,7 @@ export default function EditRepairReportPage() {
                   </Button>
                   <Button
                     onClick={handleSendFlow}
-                    disabled={saving || hasUnsavedChanges}
+                    disabled={saving || hasUnsavedChanges || isSentToReporter}
                     title={hasUnsavedChanges ? '请先保存当前修改' : '将已保存的报告发送至现场确认'}
                     size="lg"
                     className="bg-primary hover:bg-primary/90"

@@ -2,272 +2,117 @@ import { NextResponse } from "next/server"
 import * as sql from "mssql"
 import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, UserRole } from "@/lib/enums"
+import { TicketActionType, TicketStatus, UserRole } from "@/lib/enums"
 import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { buildShippingPlan, getSavedShippingAllocation, summarizeShippingPlan, type ShippingPlanRow } from "@/lib/shipping-plan"
+import { mergeRepairReportContent } from "@/lib/repair-report-policy"
 
-// GET /api/tickets/shipping-info/[batchId]
-// 获取批次的发货信息
-export async function GET(
-  request: Request,
-  context: { params: Promise<{ batchId: string }> } | { params: { batchId: string } }
-) {
-  const authResult = await checkUserRole(ALL_USER_ROLES)
-  if (isErrorResponse(authResult)) return authResult
-
-  try {
-    const resolvedParams = await Promise.resolve(context.params)
-
-    const batchId = resolvedParams.batchId
-
-    if (!batchId) {
-      return NextResponse.json(
-        { success: false, message: "批次ID不能为空" },
-        { status: 400 }
-      )
-    }
-
-    const pool = await getDbConnection()
-
-    // 动态检查 ShippingType 字段是否存在
-    const columnsResult = await pool.request().query(`
-      SELECT COLUMN_NAME
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_NAME = 'Repair_Tickets'
-    `)
-    const columnNames = columnsResult.recordset.map((row: unknown) => {
-      const r = row as { COLUMN_NAME: string }
-      return r.COLUMN_NAME
-    })
-    
-    const hasShippingType = columnNames.some(c => c.toLowerCase() === 'shippingtype')
-
-    // 构建动态查询
-    let selectFields = `
-      ReturnDate,
-      ReturnTrackingNum,
-      ReturnQuantity,
-      WarehouseShippedAt,
-      WarehouseShippedBy
-    `
-    if (hasShippingType) {
-      selectFields = `ShippingType, ${selectFields}`
-    }
-
-    // 优先查询有发货信息的设备（有 ReturnTrackingNum 或 ReturnDate）
-    // 如果没有，再查询批次中的第一个设备（用于验证批次存在）
-    const resultWithShipping = await pool
-      .request()
-      .input("batchId", batchId)
-      .query(`
-        SELECT TOP 1
-          ${selectFields}
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-          AND (
-            (ReturnTrackingNum IS NOT NULL AND ReturnTrackingNum != '')
-            OR ReturnDate IS NOT NULL
-          )
-        ORDER BY 
-          CASE WHEN ReturnTrackingNum IS NOT NULL AND ReturnTrackingNum != '' THEN 0 ELSE 1 END,
-          CASE WHEN ReturnDate IS NOT NULL THEN 0 ELSE 1 END
-      `)
-
-    let data: {
-      ShippingType?: string
-      ReturnDate?: Date
-      ReturnTrackingNum?: string
-      ReturnQuantity?: number
-      WarehouseShippedAt?: Date
-      WarehouseShippedBy?: string
-    } | null = null
-
-    if (resultWithShipping.recordset.length > 0) {
-      // 找到了有发货信息的设备
-      data = resultWithShipping.recordset[0] as {
-        ShippingType?: string
-        ReturnDate?: Date
-        ReturnTrackingNum?: string
-        ReturnQuantity?: number
-        WarehouseShippedAt?: Date
-        WarehouseShippedBy?: string
-      }
-    } else {
-      // 验证批次是否存在
-      const batchCheck = await pool
-        .request()
-        .input("batchId", batchId)
-        .query(`
-          SELECT TOP 1 ${DB_FIELDS.ID}
-          FROM Repair_Tickets
-          WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-        `)
-
-      if (batchCheck.recordset.length === 0) {
-        return NextResponse.json(
-          { success: false, message: "批次不存在" },
-          { status: 404 }
-        )
-      }
-
-      // 批次存在但没有发货信息，返回空数据
-      return NextResponse.json({
-        success: true,
-        data: {
-          shippingType: null,
-          returnDate: null,
-          returnTrackingNum: null,
-          returnQuantity: null,
-          shippedAt: null,
-          shippedBy: null
-        }
-      })
-    }
-
-    if (!data) {
-      return NextResponse.json(
-        { success: false, message: "未找到发货信息" },
-        { status: 404 }
-      )
-    }
-
-    return NextResponse.json({
-      success: true,
-      data: {
-        shippingType: data.ShippingType || null,
-        returnDate: data.ReturnDate || null,
-        returnTrackingNum: data.ReturnTrackingNum || null,
-        returnQuantity: data.ReturnQuantity || null,
-        shippedAt: data.WarehouseShippedAt || null,
-        shippedBy: data.WarehouseShippedBy || null
-      }
-    })
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : "获取发货信息失败"
-    console.error("获取发货信息失败:", error)
-    return NextResponse.json(
-      { success: false, message: errorMessage },
-      { status: 500 }
-    )
-  }
+interface ShippingRow extends ShippingPlanRow {
+  Status: string; ReportByUserID: number | null; ReturnDate: Date | null; ReturnTrackingNum: string | null
+  ReturnQuantity: number | null; WarehouseShippedAt: Date | null; WarehouseShippedBy: string | null
 }
-
-// PUT /api/tickets/shipping-info/[batchId]
-// 只保存批次发货信息；状态流转由 warehouse-shipping-batch 专用接口负责。
-const shippingInfoSchema = z.object({
+const batchSchema = z.string().trim().min(1).max(100)
+const bodySchema = z.object({
   shippingType: z.enum(["return", "stock"]),
   returnDate: z.string().datetime().nullable().optional(),
   returnTrackingNum: z.string().trim().max(200).optional(),
-  returnQuantity: z.coerce.number().int().min(1).max(100000).optional(),
+  returnQuantity: z.number().int().min(0).max(100000).optional(),
+  allocations: z.array(z.object({ deviceId: z.number().int().positive(), stockQuantity: z.number().int().min(0).max(100000) }).strict()).min(1).max(500).optional(),
 }).strict()
+const fields = `[Id], [Quantity], [Status], [ReportByUserID], [RepairReportContent], [ShippingType],
+  [ReturnDate], [ReturnTrackingNum], [ReturnQuantity], [WarehouseShippedAt], [WarehouseShippedBy]`
 
-export async function PUT(
-  request: Request,
-  context: { params: Promise<{ batchId: string }> }
-) {
-  const authResult = await checkUserRole([UserRole.WAREHOUSE, UserRole.ADMIN])
-  if (isErrorResponse(authResult)) return authResult
-
+export async function GET(_request: Request, context: { params: Promise<{ batchId: string }> }) {
+  const auth = await checkUserRole(ALL_USER_ROLES)
+  if (isErrorResponse(auth)) return auth
   try {
-    const batchIdResult = z.string().trim().min(1).max(100).safeParse((await context.params).batchId)
-    const bodyResult = shippingInfoSchema.safeParse(await request.json().catch(() => null))
-    if (!batchIdResult.success || !bodyResult.success) {
-      return NextResponse.json(
-        { success: false, message: "请求参数无效" },
-        { status: 400 }
-      )
-    }
-    const batchId = batchIdResult.data
-    const { shippingType, returnDate, returnQuantity } = bodyResult.data
-    const returnTrackingNum = bodyResult.data.returnTrackingNum?.replace(/\s+/g, "") || null
-
-    // 验证：如果是发回客户，必须填写发货信息
-    if (shippingType === "return" && (!returnDate || !returnTrackingNum)) {
-      return NextResponse.json(
-        { success: false, message: "发回客户时，发货日期和快递单号为必填项" },
-        { status: 400 }
-      )
-    }
-
+    const batch = batchSchema.safeParse((await context.params).batchId)
+    if (!batch.success) return NextResponse.json({ success: false, message: "批次号无效" }, { status: 400 })
     const pool = await getDbConnection()
-
-    // 动态检查 ShippingType 字段是否存在
-    const columnsResult = await pool.request().query(`
-      SELECT COLUMN_NAME
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_NAME = 'Repair_Tickets'
+    const result = await pool.request().input("batchId", sql.NVarChar(100), batch.data).query<ShippingRow>(`
+      SELECT ${fields} FROM [dbo].[Repair_Tickets] WHERE [BatchId] = @batchId AND [Status] <> 'Deleted' ORDER BY [Id];
     `)
-    const columnNames = columnsResult.recordset.map((row: unknown) => {
-      const r = row as { COLUMN_NAME: string }
-      return r.COLUMN_NAME
-    })
-    
-    const hasShippingType = columnNames.some(c => c.toLowerCase() === 'shippingtype')
-
-    // 验证批次存在
-    const batchResult = await pool
-      .request()
-      .input("batchId", sql.NVarChar(100), batchId)
-      .query(`
-        SELECT ${DB_FIELDS.ID}, ${DB_FIELDS.STATUS}
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-      `)
-
-    if (batchResult.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "批次不存在" },
-        { status: 404 }
-      )
+    const rows = result.recordset
+    if (!rows.length || (auth.normalizedRole === UserRole.REPORTER && rows.some(row => row.ReportByUserID !== Number(auth.userId)))) {
+      return NextResponse.json({ success: false, message: "批次不存在或无权访问" }, { status: 404 })
     }
-    if (batchResult.recordset.some((row: Record<string, unknown>) =>
-      !["Warehouse_Shipping", "Pending_Shipment", "Completed"].includes(String(row[DB_FIELDS.STATUS])))
-    ) {
-      return NextResponse.json(
-        { success: false, message: "当前批次状态不允许保存发货信息，请刷新页面" },
-        { status: 409 }
-      )
-    }
-
-    // 构建动态更新SQL
-    const updateFields = [
-      'ReturnDate = @returnDate',
-      'ReturnTrackingNum = @returnTrackingNum',
-      'ReturnQuantity = @returnQuantity',
-      `${DB_FIELDS.UPDATED_AT} = @updatedAt`
-    ]
-    
-    if (hasShippingType) {
-      updateFields.unshift('ShippingType = @shippingType')
-    }
-
-    // 保存字段，不触碰 Status、WarehouseShippedAt 或 WarehouseShippedBy。
-    const updateRequest = pool
-      .request()
-      .input("batchId", sql.NVarChar(100), batchId)
-      .input("returnDate", sql.DateTime2, returnDate ? new Date(returnDate) : null)
-      .input("returnTrackingNum", sql.NVarChar(200), returnTrackingNum)
-      .input("returnQuantity", sql.Int, returnQuantity ?? null)
-      .input("updatedAt", sql.DateTime2, new Date())
-    
-    if (hasShippingType) {
-      updateRequest.input("shippingType", shippingType || null)
-    }
-
-    await updateRequest.query(`
-      UPDATE Repair_Tickets
-      SET ${updateFields.join(', ')}
-      WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-    `)
-
-    return NextResponse.json({
-      success: true,
-      message: "发货信息已保存，工单状态未改变"
-    })
+    const plan = rows.map(getSavedShippingAllocation)
+    const summary = summarizeShippingPlan(plan)
+    const saved = rows.find(row => row.ReturnTrackingNum || row.ReturnDate) ?? rows[0]
+    return NextResponse.json({ success: true, data: {
+      ...summary, allocations: plan,
+      shippingType: rows.some(row => row.ShippingType) ? summary.shippingType : null,
+      returnDate: saved.ReturnDate, returnTrackingNum: saved.ReturnTrackingNum,
+      shippedAt: rows[0].WarehouseShippedAt, shippedBy: rows[0].WarehouseShippedBy,
+    } })
   } catch (error: unknown) {
-    console.error("更新发货信息失败:", error)
-    return NextResponse.json(
-      { success: false, message: "保存发货信息失败，请稍后重试" },
-      { status: 500 }
-    )
+    console.error("获取发货信息失败:", error)
+    return NextResponse.json({ success: false, message: "获取发货信息失败" }, { status: 500 })
+  }
+}
+
+export async function PUT(request: Request, context: { params: Promise<{ batchId: string }> }) {
+  const auth = await checkUserRole([UserRole.WAREHOUSE, UserRole.ADMIN])
+  if (isErrorResponse(auth)) return auth
+  let transaction: sql.Transaction | null = null
+  try {
+    const batch = batchSchema.safeParse((await context.params).batchId)
+    const body = bodySchema.safeParse(await request.json().catch(() => null))
+    if (!batch.success || !body.success) return NextResponse.json({ success: false, message: "请求参数无效" }, { status: 400 })
+    const pool = await getDbConnection()
+    transaction = new sql.Transaction(pool)
+    await transaction.begin()
+    const result = await new sql.Request(transaction).input("batchId", sql.NVarChar(100), batch.data).query<ShippingRow>(`
+      SELECT ${fields} FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
+      WHERE [BatchId] = @batchId AND [Status] <> 'Deleted' ORDER BY [Id];
+    `)
+    const rows = result.recordset
+    const allowed = new Set<string>([TicketStatus.WAREHOUSE_SHIPPING, TicketStatus.PENDING_SHIPMENT, TicketStatus.COMPLETED])
+    if (!rows.length || rows.some(row => !allowed.has(row.Status))) {
+      await transaction.rollback(); transaction = null
+      return NextResponse.json({ success: false, message: "批次状态已变化，请刷新" }, { status: 409 })
+    }
+    let plan
+    try { plan = buildShippingPlan(rows, body.data.allocations, body.data.shippingType === "stock") }
+    catch (error: unknown) {
+      await transaction.rollback(); transaction = null
+      return NextResponse.json({ success: false, message: error instanceof Error ? error.message : "发货分配无效" }, { status: 409 })
+    }
+    const summary = summarizeShippingPlan(plan)
+    const tracking = body.data.returnTrackingNum?.replace(/\s+/g, "") || null
+    const completedPlanChanged = rows.some(row => row.Status === TicketStatus.COMPLETED &&
+      getSavedShippingAllocation(row).stockQuantity !== plan.find(item => item.deviceId === row.Id)?.stockQuantity)
+    if (completedPlanChanged || (body.data.returnQuantity !== undefined && body.data.returnQuantity !== summary.returnQuantity) ||
+      (summary.returnQuantity > 0 && (!body.data.returnDate || !tracking))) {
+      await transaction.rollback(); transaction = null
+      return NextResponse.json({ success: false, message: completedPlanChanged ? "已完成批次不能更改出入库分配" : "必须一次发回全部需返回设备；请核对分配、发货日期和快递单号" }, { status: 400 })
+    }
+    for (const row of rows) {
+      const allocation = plan.find(item => item.deviceId === row.Id)!
+      await new sql.Request(transaction)
+        .input("id", sql.Int, row.Id)
+        .input("shippingType", sql.NVarChar(50), allocation.returnQuantity > 0 ? "return" : "stock")
+        .input("returnDate", sql.DateTime2, allocation.returnQuantity > 0 ? new Date(body.data.returnDate!) : null)
+        .input("tracking", sql.NVarChar(200), allocation.returnQuantity > 0 ? tracking : null)
+        .input("returnQuantity", sql.Int, allocation.returnQuantity)
+        .input("reportContent", sql.NVarChar(sql.MAX), mergeRepairReportContent(row.RepairReportContent, { shippingAllocation: allocation }))
+        .query(`UPDATE [dbo].[Repair_Tickets] SET [ShippingType] = @shippingType, [ReturnDate] = @returnDate,
+          [ReturnTrackingNum] = @tracking, [ReturnQuantity] = @returnQuantity, [RepairReportContent] = @reportContent,
+          [UpdatedAt] = GETUTCDATE() WHERE [Id] = @id;`)
+    }
+    await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batch.data)
+      .input("actionType", sql.NVarChar(50), TicketActionType.BATCH_UPDATED)
+      .input("operatorId", sql.Int, Number(auth.userId))
+      .input("operatorName", sql.NVarChar(100), auth.realName || auth.username)
+      .input("description", sql.NVarChar(sql.MAX), `保存发货信息：一次发回 ${summary.returnQuantity} 台，入库 ${summary.stockQuantity} 台；流程状态保持不变`)
+      .query(`INSERT INTO [dbo].[Repair_Ticket_History] ([BatchId], [ActionType], [OperatorId], [OperatorName], [Description], [CreatedAt])
+        VALUES (@batchId, @actionType, @operatorId, @operatorName, @description, GETUTCDATE());`)
+    await transaction.commit(); transaction = null
+    return NextResponse.json({ success: true, message: "发货分配和物流信息已保存", data: summary })
+  } catch (error: unknown) {
+    if (transaction) { try { await transaction.rollback() } catch {} finally { transaction = null } }
+    console.error("保存发货信息失败:", error)
+    return NextResponse.json({ success: false, message: "保存发货信息失败" }, { status: 500 })
   }
 }

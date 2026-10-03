@@ -1,0 +1,35 @@
+1.0 更新与回滚说明
+
+必须在独立 SQL Server 测试库完成业务验收后再替换公司运行版本。
+本次代码不执行数据库迁移、清库或附件迁移。
+运行要求：Node.js 24 LTS；保留现有 DATABASE_URL、DB_* 等运行配置。
+会话格式升级，部署后用户需重新登录；管理员重置密码将使旧登录会话失效。
+
+GitHub 版本：
+- 1.0试用：codex/1.0-trial，基线 5d70cc0c82e821fd04e967e5764e4b2752f17525。
+- 1.0：codex/1.0。master 暂时保留原公司版本。
+
+附件准备（停止服务后执行，先备份数据库及现有附件）：
+1. 确认实际 STORAGE_MODE 和 UPLOAD_DIR。S3/OSS 使用原桶与凭据，不迁移成本地。
+2. 本地默认旧附件通常位于 <部署目录>/.next/standalone/public/uploads；也可能在原配置的 UPLOAD_DIR 或 public/uploads。核对实际位置，不能只备份 Git 源码。
+3. 设置独立持久目录，如 <部署目录>/uploads（不能位于 .next、standalone 或本次更新包目录内）。
+4. 先预览，确认 source/target 和文件数量：
+   node scripts/migrate-uploads.cjs "<旧附件目录>" "<独立持久目录>"
+5. 确认后加 --copy 执行复制。脚本不删除源文件、不覆盖不同内容的同名文件，复制后校验 SHA-256；出现冲突时先人工核对，不继续覆盖部署。
+6. 多个旧附件目录需要分别核对、复制。记录复制结果和抽查照片、签字件、盖章件。
+7. 将 UPLOAD_DIR 配置为独立目录的绝对路径。文件 URL 仍是 /uploads/...，允许凭链接免登录查看。
+
+替换程序：
+- 停止 axiom-repair 服务；保留旧 standalone 目录并重命名为 standalone.trial-<日期时间>，不要删除。
+- 将更新包 standalone 目录复制到原 .next/standalone 位置。
+- 保留原环境配置；合并新版 ecosystem.config.js 并核对 UPLOAD_DIR，不能覆盖掉原服务器凭据。
+- 以原服务管理方式启动；PM2 可执行 pm2 start ecosystem.config.js --env production，再检查日志与登录、报修、查询、附件链接。
+- 更新包只包含程序与静态资源，不包含运行附件和环境文件。
+
+回滚：
+- 停止服务，将失败的新版 standalone 移到另一个保留目录，把 standalone.trial-<日期时间> 恢复原路径。
+- 旧版依赖 public/uploads 静态服务；如果新版本已新增附件，应先将独立附件目录只复制、合并回旧版本的 public/uploads（同样使用迁移脚本，不覆盖冲突），或由现有反向代理继续服务 /uploads/。
+- 恢复旧版运行配置并重启。旧版也会要求重新登录。
+- 数据库与附件恢复必须使用配套备份，不能直接覆盖已产生的新业务数据。
+
+Docker：将独立卷挂载到 /app/uploads；从旧 public/uploads 卷复制验证后切换挂载。保留旧镜像和旧卷。

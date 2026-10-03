@@ -49,3 +49,19 @@ export function canViewFactoryDetails(role: UserRole): boolean {
 export function isFactoryHistoryAction(actionType: string | null | undefined): boolean {
   return Boolean(actionType && REPORTER_HIDDEN_FACTORY_ACTIONS.has(actionType))
 }
+
+const INTERNAL_TICKET_FIELDS = new Set([
+  "deviceName", "materialCode", "fullSpec", "specification", "manufacturer",
+  "supplier", "supplierName", "warehouse", "location", "purchasePrice",
+  "factoryRepairDate", "factoryTrackingNum", "factoryReceivedDate", "factoryShipDate",
+  "isOutsourced", "repairNotes", "faultPoint",
+])
+
+/** Keep customer prices/logistics; internal catalog and factory fields never leave this boundary. */
+export function projectTicketForViewer<T extends object>(
+  data: T,
+  role: UserRole
+): Partial<T> {
+  if (role !== UserRole.REPORTER) return data
+  return Object.fromEntries(Object.entries(data).filter(([key]) => !INTERNAL_TICKET_FIELDS.has(key))) as Partial<T>
+}

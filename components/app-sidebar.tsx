@@ -1,5 +1,6 @@
 "use client"
 
+import { APP_VERSION } from "@/lib/app-version"
 import { Home, Wrench, User, LogOut, Trash2 } from "lucide-react"
 import { useAuth } from "@/context/auth-context"
 import { Button } from "@/components/ui/button"
@@ -48,7 +49,7 @@ export default function AppSidebar({ activeTab, onTabChange, userType }: AppSide
       <div className="flex h-16 items-center border-b border-border dark:border-border px-6">
         <div className="group flex items-center gap-2">
           <img src="/icon.svg" alt="Logo" className="h-6 w-6 transition-transform duration-300 group-hover:rotate-6 group-hover:scale-110 motion-reduce:transform-none" />
-          <span className="text-lg font-semibold">智能维修系统</span>
+          <span className="text-lg font-semibold">智能维修系统</span><span className="text-xs text-muted-foreground">{APP_VERSION}</span>
         </div>
       </div>
       <nav className="flex flex-1 flex-col p-4">

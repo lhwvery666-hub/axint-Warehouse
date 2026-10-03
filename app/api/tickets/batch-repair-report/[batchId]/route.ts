@@ -1,3 +1,4 @@
+import { isSignedRepairReport, mergeRepairReportContent, parseRepairReportContent, sumRepairCosts } from "@/lib/repair-report-policy"
 import { NextResponse } from "next/server"
 import * as sql from "mssql"
 import { z } from "zod"
@@ -8,6 +9,7 @@ import {
   canViewFactoryDetails,
   getVisibleRepairAction,
   getVisibleTicketStatus,
+  projectTicketForViewer,
 } from "@/lib/ticket-visibility"
 
 const REPAIR_REPORT_READ_ROLES: UserRole[] = [
@@ -83,6 +85,7 @@ export async function GET(
           ReportedBy,
           TicketId,
           RepairReportContent,
+          ReporterConfirmedAt,
           IsInvoiced,
           FactoryRepairDate,
           ReturnDate,
@@ -138,7 +141,8 @@ export async function GET(
       receiveDate: formatDate(firstRecord.ReceivedDate),
       reporterName: firstRecord.ReportedBy || "",
       signedReportPhoto: signedPhotoPath,
-      isChargeable: firstRecord[DB_FIELDS.IS_CHARGEABLE] || false,
+      reportLocked: result.recordset.some(isSignedRepairReport),
+      isChargeable: sumRepairCosts(result.recordset.map(row => ({ RepairCost: row[DB_FIELDS.REPAIR_COST] ?? 0 }))) > 0,
       status: getVisibleTicketStatus(firstRecord[DB_FIELDS.STATUS], viewerRole),
       signedPhotoViewedBy: firstRecord[DB_FIELDS.SIGNED_PHOTO_VIEWED_BY] || null,
       signedPhotoViewedAt: firstRecord[DB_FIELDS.SIGNED_PHOTO_VIEWED_AT] ? formatDate(firstRecord[DB_FIELDS.SIGNED_PHOTO_VIEWED_AT]) : null,
@@ -159,7 +163,6 @@ export async function GET(
 
       const rawRepairAction = row[DB_FIELDS.REPAIR_ACTION] || row.RepairAction || null
       const visibleRepairAction = getVisibleRepairAction(rawRepairAction, viewerRole)
-      const isReporterRma = viewerRole === UserRole.REPORTER && rawRepairAction === RepairAction.RMA
 
       return {
         id: row[DB_FIELDS.ID] || row.Id,
@@ -171,7 +174,7 @@ export async function GET(
         faultPoint: row[DB_FIELDS.FAULT_POINT] || row.FaultPoint || "",
         problem: row[DB_FIELDS.PROBLEM] || row.Problem || "",
         quantity: row[DB_FIELDS.QUANTITY] || row.Quantity || 1,
-        repairCost: isReporterRma ? 0 : row[DB_FIELDS.REPAIR_COST] || row.RepairCost || 0,
+        repairCost: row[DB_FIELDS.REPAIR_COST] || row.RepairCost || 0,
         repairAction: visibleRepairAction,
         repairActionLabel: visibleRepairAction
           ? REPAIR_ACTION_LABELS[visibleRepairAction as RepairAction] ?? visibleRepairAction
@@ -184,7 +187,7 @@ export async function GET(
         warrantyStatus: row[DB_FIELDS.WARRANTY_STATUS_OVERRIDE] || row.WarrantyStatusOverride
           || row[DB_FIELDS.WARRANTY_STATUS] || row.WarrantyStatus || null,
         // 如果有保存的内容，使用保存的，否则使用故障点（维修人员填写的）
-        repairContent: savedContent?.repairContent || row[DB_FIELDS.FAULT_POINT] || row.FaultPoint || "",
+        repairContent: savedContent?.repairContent || (viewerRole === UserRole.REPORTER ? "" : row[DB_FIELDS.FAULT_POINT] || row.FaultPoint || ""),
         improvements: savedContent?.improvements || "",  // 从保存的内容中读取
         // 从保存的内容中读取现场确认信息
         willReturn: savedContent?.willReturn !== undefined ? savedContent.willReturn : true,
@@ -194,14 +197,15 @@ export async function GET(
 
     // 计算总计
     const totalQuantity = devices.reduce((sum, d) => sum + d.quantity, 0)
-    const totalCost = devices.reduce((sum, d) => sum + d.repairCost, 0)
+    const totalCost = sumRepairCosts(devices.map(device => ({ RepairCost: device.repairCost })))
 
     const reportData = {
       batchInfo,
-      devices,
+      devices: devices.map((device) => projectTicketForViewer(device, viewerRole)),
       totalQuantity,
       totalCost,
-      remarks: "",
+      remarks: typeof parseRepairReportContent(firstRecord.RepairReportContent).remarks === "string"
+        ? parseRepairReportContent(firstRecord.RepairReportContent).remarks : "",
     }
 
     return NextResponse.json({
@@ -281,12 +285,15 @@ export async function PUT(
       Id: number
       Status: string
       Quantity: number | null
+      RepairReportContent: string | null
+      SignedReportPhoto: string | null
+      ReporterConfirmedAt: Date | null
     }
     const lockedRows = await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
       .query<BatchDeviceRow>(`
         SELECT ${DB_FIELDS.ID} AS Id, ${DB_FIELDS.STATUS} AS Status,
-               ${DB_FIELDS.QUANTITY} AS Quantity
+               ${DB_FIELDS.QUANTITY} AS Quantity, RepairReportContent, SignedReportPhoto, ReporterConfirmedAt
         FROM Repair_Tickets WITH (UPDLOCK, HOLDLOCK)
         WHERE ${DB_FIELDS.BATCH_ID} = @batchId
           AND ${DB_FIELDS.STATUS} <> 'Deleted'
@@ -300,6 +307,10 @@ export async function PUT(
         { status: 404 }
       )
     }
+    if (lockedRows.recordset.some(isSignedRepairReport)) {
+      await transaction.rollback(); transaction = null
+      return NextResponse.json({ success: false, message: "维修报告已签字确认，不能再修改报告或费用" }, { status: 409 })
+    }
     const persistedIds = new Set(lockedRows.recordset.map((row) => Number(row.Id)))
     if (persistedIds.size !== requestedIds.size || [...requestedIds].some((id) => !persistedIds.has(id))) {
       await transaction.rollback()
@@ -311,9 +322,10 @@ export async function PUT(
     }
 
     for (const device of devices) {
-      const reportContent = JSON.stringify({
+      const reportContent = mergeRepairReportContent(lockedRows.recordset.find(row => row.Id === device.id)!.RepairReportContent, {
         repairContent: device.repairContent,
         improvements: device.improvements,
+        ...(parsedBody.data.remarks !== undefined ? { remarks: parsedBody.data.remarks } : {}),
       })
       const updated = await new sql.Request(transaction)
         .input("deviceId", sql.Int, device.id)

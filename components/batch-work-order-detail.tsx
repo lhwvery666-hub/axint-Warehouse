@@ -898,17 +898,7 @@ export default function BatchWorkOrderDetail({ batchId, onBack }: BatchWorkOrder
                       : <><CheckCircle className="w-4 h-4 mr-2" />发送流程</>
                     }
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-amber-400 text-amber-800 hover:bg-amber-100"
-                    onClick={() => {
-                      document.getElementById("signature-section")?.scrollIntoView({ behavior: "smooth" })
-                    }}
-                  >
-                    <Upload className="w-4 h-4 mr-2" />
-                    重新上传签字凭证
-                  </Button>
+
                 </div>
               </>
             ) : (

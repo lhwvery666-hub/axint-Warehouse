@@ -9,10 +9,12 @@ import {
   canEditDeviceIdentity,
 } from "@/lib/device-identity-permissions"
 import { getChangedDeviceUpdates } from "@/lib/device-update-diff"
+import { isSignedRepairReport } from "@/lib/repair-report-policy"
 import {
   canViewFactoryDetails,
   getVisibleRepairAction,
   getVisibleTicketStatus,
+  projectTicketForViewer,
 } from "@/lib/ticket-visibility"
 
 const batchIdSchema = z.string().trim().min(1).max(100)
@@ -61,6 +63,8 @@ interface BatchGuardRow {
   Quantity: number | null
   ManufactureDate: Date | null
   ArrivalDate: Date | null
+  SignedReportPhoto?: string | null
+  ReporterConfirmedAt?: Date | null
 }
 
 async function rollback(transaction: sql.Transaction | null): Promise<null> {
@@ -209,7 +213,7 @@ export async function GET(
             : {}),
           customerReturnDate: first.ReceivedDate || first.ArrivalDate || null,
         },
-        devices,
+        devices: devices.map((device) => projectTicketForViewer(device, viewerRole)),
       },
     })
   } catch (error: unknown) {
@@ -395,7 +399,8 @@ export async function PUT(
       .query<BatchGuardRow>(`
         SELECT [Id], [Status], [ReportByUserID], [ProjectName], [ContactInfo],
                [DeviceSN], [DeviceName], [ModelName], [Category], [SubCategory],
-               [Problem], [MaterialCode], [Quantity], [ManufactureDate], [ArrivalDate]
+               [Problem], [MaterialCode], [Quantity], [ManufactureDate], [ArrivalDate],
+               [SignedReportPhoto], [ReporterConfirmedAt]
         FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BatchId] = @batchId;
       `)
@@ -443,6 +448,16 @@ export async function PUT(
         changed: false,
         message: "信息未发生变化，无需保存",
       })
+    }
+
+    // Customer return logistics may continue after signing, but report identity
+    // and warranty data are frozen. Compare the locked row, not submitted keys.
+    if (isSignedRepairReport(targetRow) && Object.keys(effectiveUpdates).some((field) => field !== "arrivalDate")) {
+      transaction = await rollback(transaction)
+      return NextResponse.json(
+        { success: false, message: "报告已签字确认，不能修改设备信息或保修日期" },
+        { status: 409 }
+      )
     }
 
     const fields: string[] = []

@@ -2,14 +2,16 @@ import { readdir, readFile } from "node:fs/promises"
 import path from "node:path"
 import ts from "typescript"
 
-const API_ROOT = path.join(process.cwd(), "app", "api")
+const API_ROOT = path.join(process.cwd(), "app")
 const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"])
 const AUTH_CALLS = new Set(["checkUserRole", "getCurrentUserRole"])
 const PUBLIC_AUTH_HANDLERS = new Set([
-  "auth/login/route.ts#POST",
-  "auth/logout/route.ts#POST",
-  "auth/me/route.ts#GET",
-  "auth/register/route.ts#POST",
+  "api/auth/login/route.ts#POST",
+  "api/auth/logout/route.ts#POST",
+  "api/auth/me/route.ts#GET",
+  "api/auth/register/route.ts#POST",
+  // User explicitly permits attachments to be shared without login.
+  "uploads/[...path]/route.ts#GET",
 ])
 
 async function findRouteFiles(directory: string): Promise<string[]> {

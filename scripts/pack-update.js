@@ -22,7 +22,7 @@ console.log("✅ 构建完成\n")
 
 // ── 2. 收集需要部署的文件 ──────────────────────────────────────────────────
 console.log("📂 [2/4] 收集部署文件...")
-if (fs.existsSync(outDir)) fs.rmSync(outDir, { recursive: true })
+if (fs.existsSync(outDir)) throw new Error("更新输出目录已存在，请稍后重新打包")
 fs.mkdirSync(outDir)
 
 function copyDir(src, dest) {
@@ -31,6 +31,8 @@ function copyDir(src, dest) {
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
     const s = path.join(src, entry.name)
     const d = path.join(dest, entry.name)
+    const relative = path.relative(root, s).split(path.sep).join("/")
+    if (entry.name.startsWith(".env") || ["public/uploads", "uploads", ".next/standalone/public/uploads", ".next/standalone/uploads"].includes(relative)) continue
     if (entry.isDirectory()) copyDir(s, d)
     else fs.copyFileSync(s, d)
   }
@@ -62,55 +64,11 @@ fs.copyFileSync(
 
 // ── 3. 写入部署说明 ────────────────────────────────────────────────────────
 console.log("📝 [3/4] 生成部署说明...")
-const instructions = `
-=======================================================
-  Axiom 维修系统 - 更新部署说明
-  打包时间：${new Date().toLocaleString("zh-CN")}
-=======================================================
-
-【前提条件】
-  服务器上已安装 Node.js 18+ 和 PM2。
-  系统当前正在运行（pm2 list 可以看到 axiom-repair）。
-
-【更新步骤】（在服务器上执行）
-
-  第一步：备份当前版本（可选但建议）
-    cp -r /你的部署路径 /你的部署路径.bak.$(date +%Y%m%d)
-
-  第二步：将本压缩包上传到服务器并解压
-    unzip ${outName}.zip -d /tmp/${outName}
-
-  第三步：替换 standalone 目录
-    # 停止服务（会有几秒中断）
-    pm2 stop axiom-repair
-    
-    # 替换文件
-    rm -rf /你的部署路径/.next/standalone
-    cp -r /tmp/${outName}/standalone /你的部署路径/.next/standalone
-    
-    # 如果 ecosystem.config.js 也有更新，一并替换：
-    cp /tmp/${outName}/ecosystem.config.js /你的部署路径/ecosystem.config.js
-
-  第四步：重启服务
-    pm2 start /你的部署路径/ecosystem.config.js --env production
-    # 或者如果进程已存在：
-    pm2 restart axiom-repair
-
-  第五步：验证
-    pm2 list          ← 确认状态是 online
-    pm2 logs axiom-repair --lines 20   ← 查看启动日志有无报错
-
-【遇到问题】
-  如果启动失败，立刻回滚：
-    pm2 stop axiom-repair
-    rm -rf /你的部署路径/.next/standalone
-    cp -r /你的部署路径.bak.xxxx/.next/standalone /你的部署路径/.next/standalone
-    pm2 start /你的部署路径/ecosystem.config.js --env production
-
-=======================================================
-`.trim()
+const instructions = fs.readFileSync(path.join(root, "docs", "DEPLOY-1.0.txt"), "utf8")
 
 fs.writeFileSync(path.join(outDir, "DEPLOY.txt"), instructions, "utf-8")
+fs.mkdirSync(path.join(outDir, "scripts"), { recursive: true })
+fs.copyFileSync(path.join(root, "scripts", "migrate-uploads.cjs"), path.join(outDir, "scripts", "migrate-uploads.cjs"))
 
 // ── 4. 压缩打包 ────────────────────────────────────────────────────────────
 console.log("🗜  [4/4] 压缩打包...")

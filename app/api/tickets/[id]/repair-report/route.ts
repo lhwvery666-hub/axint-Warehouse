@@ -1,7 +1,10 @@
+import { z } from "zod";
+import { isSignedRepairReport, mergeRepairReportContent, parseRepairReportContent, sumRepairCosts } from "@/lib/repair-report-policy";
 import { NextResponse } from "next/server";
 import { getDbConnection } from "@/lib/db-config";
 import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils";
-import { UserRole } from "@/lib/enums";
+import { UserRole, TicketActionType } from "@/lib/enums";
+import * as sql from "mssql";
 
 /**
  * GET /api/tickets/[id]/repair-report
@@ -17,13 +20,24 @@ export async function GET(
   try {
     const resolvedParams = await params;
     const { id } = resolvedParams;
+    if (!/^\d+$/.test(id) || !Number.isSafeInteger(Number(id)) || Number(id) < 1) {
+      return NextResponse.json({ success: false, message: "工单ID无效" }, { status: 400 });
+    }
     const pool = await getDbConnection();
 
     // 查询工单基本信息
-    const ticketResult = await pool
+    const ticketRequest = pool
       .request()
-      .input("id", id)
-      .query(`
+      .input("id", sql.Int, Number(id));
+    const reporterOnly = authResult.normalizedRole === UserRole.REPORTER;
+    if (reporterOnly) {
+      const reporterUserId = Number(authResult.userId);
+      if (!Number.isSafeInteger(reporterUserId) || reporterUserId < 1) {
+        return NextResponse.json({ success: false, message: "登录身份无效" }, { status: 401 });
+      }
+      ticketRequest.input("reporterUserId", sql.Int, reporterUserId);
+    }
+    const ticketResult = await ticketRequest.query(`
         SELECT 
           Id,
           TicketId as WorkOrderNumber,
@@ -37,12 +51,15 @@ export async function GET(
           Quantity,
           Problem as FaultDescription,
           RepairCost,
+          RepairReportContent,
+          SignedReportPhoto,
+          ReporterConfirmedAt,
           WarrantyStatus,
           RepairNotes,
           SenderAddress as CustomerAddress,
           ReportedBy as ReporterName
         FROM Repair_Tickets
-        WHERE Id = @id
+        WHERE Id = @id ${reporterOnly ? "AND ReportByUserID = @reporterUserId" : ""}
       `);
 
     if (ticketResult.recordset.length === 0) {
@@ -54,44 +71,23 @@ export async function GET(
 
     const ticket = ticketResult.recordset[0];
 
-    // 处理序列号（如果有多个，按逗号分割）
-    const serialNumbers = ticket.DeviceSN 
-      ? ticket.DeviceSN.split(/[,;，；\n]/).map((sn: string) => sn.trim()).filter((sn: string) => sn)
-      : [];
-
-    // 构建报告数据项
-    const items = [];
-    
-    if (serialNumbers.length > 0) {
-      // 有序列号：每个序列号一行
-      for (const sn of serialNumbers) {
-        items.push({
-          deviceModel: ticket.ModelName || '',
-          quantity: 1,
-          serialNumber: sn,
-          repairContent: ticket.FaultDescription || '',
-          repairCost: ticket.RepairCost || 0,
-          improvements: ticket.RepairNotes || '',
-        });
-      }
-    } else {
-      // 无序列号：使用数量字段
-      items.push({
-        deviceModel: ticket.ModelName || '',
-        quantity: ticket.Quantity || 1,
-        serialNumber: '',
-        repairContent: ticket.FaultDescription || '',
-        repairCost: ticket.RepairCost || 0,
-        improvements: ticket.RepairNotes || '',
-      });
-    }
+    const reportContent = parseRepairReportContent(ticket.RepairReportContent);
+    const savedItems = z.array(z.object({
+      deviceModel: z.string(), quantity: z.number().positive(), serialNumber: z.string(),
+      repairContent: z.string(), repairCost: z.number().finite().nonnegative(), improvements: z.string(),
+    })).safeParse(reportContent.items);
+    const items = savedItems.success ? savedItems.data : [{
+      deviceModel: ticket.ModelName || "", quantity: ticket.Quantity || 1, serialNumber: ticket.DeviceSN || "",
+      repairContent: ticket.FaultDescription || "", repairCost: ticket.RepairCost || 0,
+      improvements: reporterOnly ? "" : ticket.RepairNotes || "",
+    }];
 
     // 计算合计
     const totalQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
-    const totalCost = items.reduce((sum, item) => sum + (item.repairCost || 0), 0);
+    const totalCost = sumRepairCosts(items.map(item => ({ RepairCost: item.repairCost })));
 
     // 格式化日期
-    const formatDate = (date: any) => {
+    const formatDate = (date: string | number | Date | null | undefined) => {
       if (!date) return '';
       const d = new Date(date);
       if (isNaN(d.getTime())) return '';
@@ -102,9 +98,9 @@ export async function GET(
     const isOutOfWarranty = ticket.WarrantyStatus === 'OutOfWarranty' ? '是' : '否';
 
     const reportData = {
-      ticketId: ticket.ID,
+      ticketId: ticket.Id,
       receiveDate: formatDate(ticket.ReceivedDate),
-      repairNumber: ticket.WorkOrderNumber || ticket.ID,
+      repairNumber: ticket.WorkOrderNumber || ticket.Id,
       customerName: ticket.ClientName || '',
       projectName: ticket.ProjectName || '',
       customerAddress: ticket.CustomerAddress || '',
@@ -114,7 +110,8 @@ export async function GET(
       items,
       totalQuantity,
       totalCost,
-      remarks: '',
+      remarks: typeof reportContent.remarks === "string" ? reportContent.remarks : "",
+      reportLocked: isSignedRepairReport(ticket),
     };
 
     return NextResponse.json({
@@ -122,10 +119,10 @@ export async function GET(
       data: reportData
     });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("获取维修报告数据失败:", error);
     return NextResponse.json(
-      { success: false, message: "获取维修报告数据时发生错误", error: error?.message },
+      { success: false, message: "获取维修报告数据时发生错误" },
       { status: 500 }
     );
   }
@@ -135,91 +132,49 @@ export async function GET(
  * PUT /api/tickets/[id]/repair-report
  * 更新维修报告内容（维修人员填写）
  */
-export async function PUT(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.TECHNICIAN]);
-  if (isErrorResponse(authResult)) return authResult;
-
+export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await checkUserRole([UserRole.ADMIN, UserRole.TECHNICIAN]);
+  if (isErrorResponse(auth)) return auth;
+  let transaction: sql.Transaction | null = null;
   try {
-    const resolvedParams = await params;
-    const { id } = resolvedParams;
-    const body = await request.json();
-    const { 
-      items,           // 维修项目数组
-      remarks,         // 备注
-      totalCost,       // 总费用
-    } = body;
-
+    const id = z.coerce.number().int().positive().safeParse((await params).id);
+    const body = z.object({
+      items: z.array(z.object({
+        deviceModel: z.string().max(200), quantity: z.number().int().positive(), serialNumber: z.string().max(100),
+        repairContent: z.string().max(10000), repairCost: z.number().finite().min(0).max(100000000), improvements: z.string().max(10000),
+      }).strict()).min(1).max(500),
+      remarks: z.string().max(5000).default(""), totalCost: z.number().finite().nonnegative().optional(),
+    }).strict().safeParse(await request.json().catch(() => null));
+    if (!id.success || !body.success) return NextResponse.json({ success: false, message: "请求参数无效" }, { status: 400 });
     const pool = await getDbConnection();
-
-    // 检查工单是否存在
-    const ticketCheck = await pool
-      .request()
-      .input("id", id)
-      .query("SELECT ID FROM Repair_Tickets WHERE ID = @id");
-
-    if (ticketCheck.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "工单不存在" },
-        { status: 404 }
-      );
+    transaction = new sql.Transaction(pool);
+    await transaction.begin();
+    const ticketResult = await new sql.Request(transaction).input("id", sql.Int, id.data).query<{
+      Id: number; BatchId: string | null; RepairReportContent: string | null; SignedReportPhoto: string | null; ReporterConfirmedAt: Date | null;
+    }>(`SELECT [Id], [BatchId], [RepairReportContent], [SignedReportPhoto], [ReporterConfirmedAt]
+      FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK) WHERE [Id] = @id AND [Status] <> 'Deleted';`);
+    const ticket = ticketResult.recordset[0];
+    if (!ticket || isSignedRepairReport(ticket)) {
+      await transaction.rollback(); transaction = null;
+      return NextResponse.json({ success: false, message: ticket ? "维修报告已签字确认，不能再修改报告或费用" : "工单不存在" }, { status: ticket ? 409 : 404 });
     }
-
-    // 将维修项目保存为JSON（如果字段存在）
-    const columnCheck = await pool
-      .request()
-      .query(`
-        SELECT COLUMN_NAME 
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_NAME = 'Repair_Tickets' 
-        AND COLUMN_NAME IN ('RepairReportContent', 'RepairCost', 'RepairNotes', 'RepairReportGenerated')
-      `);
-
-    const availableColumns = columnCheck.recordset.map((r: any) => r.COLUMN_NAME);
-
-    const updateParts: string[] = [];
-    const updateRequest = pool.request().input("id", id);
-
-    if (availableColumns.includes('RepairReportContent')) {
-      updateParts.push("RepairReportContent = @reportContent");
-      updateRequest.input("reportContent", JSON.stringify({ items, remarks }));
-    }
-
-    if (availableColumns.includes('RepairCost') && totalCost !== undefined) {
-      updateParts.push("RepairCost = @totalCost");
-      updateRequest.input("totalCost", totalCost);
-    }
-
-    if (availableColumns.includes('RepairNotes') && remarks) {
-      updateParts.push("RepairNotes = @remarks");
-      updateRequest.input("remarks", remarks);
-    }
-
-    if (availableColumns.includes('RepairReportGenerated')) {
-      updateParts.push("RepairReportGenerated = 1");
-    }
-
-    if (updateParts.length > 0) {
-      const updateSQL = `
-        UPDATE Repair_Tickets 
-        SET ${updateParts.join(", ")}
-        WHERE ID = @id
-      `;
-      await updateRequest.query(updateSQL);
-    }
-
-    return NextResponse.json({
-      success: true,
-      message: "维修报告已更新"
-    });
-
-  } catch (error: any) {
-    console.error("更新维修报告失败:", error);
-    return NextResponse.json(
-      { success: false, message: "更新维修报告时发生错误", error: error?.message },
-      { status: 500 }
-    );
+    const totalCost = sumRepairCosts(body.data.items.map(item => ({ RepairCost: item.repairCost })));
+    await new sql.Request(transaction).input("id", sql.Int, id.data)
+      .input("content", sql.NVarChar(sql.MAX), mergeRepairReportContent(ticket.RepairReportContent, { items: body.data.items, remarks: body.data.remarks }))
+      .input("cost", sql.Decimal(18, 2), totalCost)
+      .query(`UPDATE [dbo].[Repair_Tickets] SET [RepairReportContent] = @content, [RepairCost] = @cost, [UpdatedAt] = GETUTCDATE() WHERE [Id] = @id;`);
+    await new sql.Request(transaction).input("ticketId", sql.NVarChar(50), String(id.data))
+      .input("batchId", sql.NVarChar(100), ticket.BatchId)
+      .input("operatorId", sql.Int, Number(auth.userId))
+      .input("operatorName", sql.NVarChar(100), auth.realName || auth.username)
+      .input("actionType", sql.NVarChar(50), TicketActionType.REPAIR_REPORT_SAVED)
+      .query(`INSERT INTO [dbo].[Repair_Ticket_History] ([TicketID], [BatchId], [ActionType], [OperatorId], [OperatorName], [Description], [CreatedAt])
+        VALUES (@ticketId, @batchId, @actionType, @operatorId, @operatorName, N'保存签字前维修报告', GETUTCDATE());`);
+    await transaction.commit(); transaction = null;
+    return NextResponse.json({ success: true, message: "维修报告已保存", data: { totalCost } });
+  } catch (error: unknown) {
+    if (transaction) { try { await transaction.rollback() } catch {} finally { transaction = null; } }
+    console.error("保存维修报告失败:", error);
+    return NextResponse.json({ success: false, message: "保存维修报告失败" }, { status: 500 });
   }
 }

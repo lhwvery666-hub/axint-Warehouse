@@ -4,6 +4,7 @@ import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
 import { TicketActionType, UserRole } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { isSignedRepairReport } from "@/lib/repair-report-policy"
 
 const deviceIdSchema = z.coerce.number().int().positive()
 const manufactureDateSchema = z.object({
@@ -16,6 +17,10 @@ interface DeviceRow {
   DeviceSN: string | null
   BatchId: string | null
   Status: string
+  ManufactureDate: Date | null
+  WarrantyStatus: string | null
+  SignedReportPhoto: string | null
+  ReporterConfirmedAt: Date | null
 }
 
 async function rollback(transaction: sql.Transaction | null): Promise<null> {
@@ -50,22 +55,14 @@ export async function PUT(
     }
 
     const deviceId = deviceIdResult.data
-    const manufactureDate = bodyResult.data.manufactureDate
-      ? new Date(bodyResult.data.manufactureDate)
-      : null
-    let warrantyStatus = bodyResult.data.warrantyStatus || null
-    if (!warrantyStatus && manufactureDate) {
-      const ageInYears = (Date.now() - manufactureDate.getTime()) / (1000 * 60 * 60 * 24 * 365)
-      warrantyStatus = ageInYears <= 1 ? "InWarranty" : "OutOfWarranty"
-    }
-
     const pool = await getDbConnection()
     transaction = new sql.Transaction(pool)
     await transaction.begin()
     const deviceResult = await new sql.Request(transaction)
       .input("deviceId", sql.Int, deviceId)
       .query<DeviceRow>(`
-        SELECT [Id], [DeviceSN], [BatchId], [Status]
+        SELECT [Id], [DeviceSN], [BatchId], [Status], [ManufactureDate],
+               [WarrantyStatus], [SignedReportPhoto], [ReporterConfirmedAt]
         FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [Id] = @deviceId;
       `)
@@ -73,6 +70,36 @@ export async function PUT(
     if (!device) {
       transaction = await rollback(transaction)
       return NextResponse.json({ success: false, message: "设备不存在" }, { status: 404 })
+    }
+
+    const submitted = bodyResult.data
+    const manufactureDate = submitted.manufactureDate === undefined
+      ? device.ManufactureDate
+      : submitted.manufactureDate ? new Date(submitted.manufactureDate) : null
+    let warrantyStatus = submitted.warrantyStatus === undefined && submitted.manufactureDate === undefined
+      ? device.WarrantyStatus
+      : submitted.warrantyStatus || null
+    if (!warrantyStatus && manufactureDate && Object.keys(submitted).length > 0) {
+      const ageInYears = (Date.now() - manufactureDate.getTime()) / (1000 * 60 * 60 * 24 * 365)
+      warrantyStatus = ageInYears <= 1 ? "InWarranty" : "OutOfWarranty"
+    }
+    const dateChanged = (manufactureDate?.getTime() ?? null) !== (device.ManufactureDate?.getTime() ?? null)
+    const warrantyChanged = (warrantyStatus || null) !== (device.WarrantyStatus || null)
+    if (!dateChanged && !warrantyChanged) {
+      transaction = await rollback(transaction)
+      return NextResponse.json({
+        success: true,
+        changed: false,
+        message: "信息未发生变化，无需保存",
+        data: { warrantyStatus, didRevert: false },
+      })
+    }
+    if (isSignedRepairReport(device)) {
+      transaction = await rollback(transaction)
+      return NextResponse.json(
+        { success: false, message: "报告已签字确认，不能修改出厂日期或保修状态" },
+        { status: 409 }
+      )
     }
 
     const updateResult = await new sql.Request(transaction)

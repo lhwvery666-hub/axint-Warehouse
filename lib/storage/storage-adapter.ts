@@ -16,6 +16,7 @@ import { S3StorageClient } from "./s3-client";
 import { writeFile, mkdir } from "fs/promises";
 import { isAbsolute, relative, resolve, sep } from "path";
 import { existsSync } from "fs";
+import { getUploadDirectory } from "./upload-directory";
 
 function decodeStoredPath(value: string): string {
   try {
@@ -172,7 +173,7 @@ export class LocalStorageAdapter implements StorageAdapter {
 
   constructor() {
     // 使用环境变量或默认路径
-    this.baseDir = process.env.UPLOAD_DIR || resolve(process.cwd(), "public", "uploads");
+    this.baseDir = getUploadDirectory();
   }
 
   async upload(

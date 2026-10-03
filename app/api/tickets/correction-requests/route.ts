@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { Prisma } from "@prisma/client"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 import { prisma } from "@/lib/prisma"
+import { isSignedRepairReport } from "@/lib/repair-report-policy"
 import { TicketStatus, UserRole, normalizeTicketStatus } from "@/lib/enums"
 import {
   CORRECTION_ACTION,
@@ -13,6 +14,7 @@ import {
   correctionHistoryKey,
   correctionRequestSchema,
   correctionValueEquals,
+  correctionAffectsSignedReport,
   getHighestCorrectionImpact,
   isCorrectionTerminalStatus,
 } from "@/lib/ticket-correction"
@@ -251,6 +253,9 @@ export async function POST(request: Request) {
     if (changes.length === 0) {
       return NextResponse.json({ success: false, message: "未检测到任何实际修改" }, { status: 400 })
     }
+    if (rows.some(isSignedRepairReport) && correctionAffectsSignedReport(changes)) {
+      return NextResponse.json({ success: false, message: "报告已签字，客户、设备及报告信息不可修改；仅可更正物流信息" }, { status: 409 })
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       const stillPending = await tx.repair_Ticket_History.findFirst({
@@ -284,6 +289,9 @@ export async function POST(request: Request) {
 
       const freshChanges = buildChanges(input, freshRows)
       if (freshChanges.length === 0) throw new Error("CORRECTION_NO_CHANGES")
+      if (freshRows.some(isSignedRepairReport) && correctionAffectsSignedReport(freshChanges)) {
+        throw new Error("SIGNED_REPORT_LOCKED")
+      }
       const impact = getHighestCorrectionImpact(freshChanges)
       const now = new Date()
       const payload: CorrectionRequestPayload = {
@@ -339,6 +347,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, message: "工单数据刚刚发生变化，请刷新后重新提交" }, { status: 409 })
     }
     const domainError = error instanceof Error ? error.message : ""
+    if (domainError === "SIGNED_REPORT_LOCKED") {
+      return NextResponse.json({ success: false, message: "报告已签字，客户、设备及报告信息不可修改；仅可更正物流信息" }, { status: 409 })
+    }
     if (["CORRECTION_STALE", "DIRECT_EDIT_AVAILABLE"].includes(domainError)) {
       return NextResponse.json({ success: false, message: "工单数据或状态刚刚发生变化，请刷新后重新提交" }, { status: 409 })
     }

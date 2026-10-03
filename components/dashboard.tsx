@@ -50,7 +50,7 @@ function getUnreadCount(batchId: string, totalCount: number): number {
 
 export default function Dashboard({ onStartRepair }: DashboardProps) {
   // 从RepairContext获取维修工单数据
-  const { repairs, loading } = useRepairContext();
+  const { repairs, loading, error, refreshRepairs } = useRepairContext();
   const { user } = useAuth();
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -464,6 +464,16 @@ export default function Dashboard({ onStartRepair }: DashboardProps) {
         </div>
       </div>
     );
+  }
+
+  if (error) {
+    return (
+      <div role="alert" className="p-6 space-y-3">
+        <p className="font-semibold text-destructive">工单加载失败</p>
+        <p className="text-sm text-muted-foreground">{error}</p>
+        <Button onClick={() => void refreshRepairs()}>重新加载</Button>
+      </div>
+    )
   }
 
   // 始终渲染完整仪表盘布局（即使当前没有数据，也保持美观一致）

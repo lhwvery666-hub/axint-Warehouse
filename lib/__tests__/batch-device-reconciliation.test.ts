@@ -1,55 +1,37 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import {
-  BatchDeviceReconciliationError,
-  planBatchDeviceReconciliation,
-} from "../batch-device-reconciliation"
+import { BatchDeviceReconciliationError, planBatchDeviceReconciliation } from "../batch-device-reconciliation"
 
-test("stable IDs keep existing devices matched even after rows are reordered", () => {
-  const plan = planBatchDeviceReconciliation(
-    [1208, 1209],
-    [{ deviceId: 1209 }, { deviceId: 1208 }],
-  )
-
-  assert.equal(plan.mode, "stable-id")
-  assert.deepEqual(plan.updates, [
-    { submittedIndex: 0, deviceId: 1209 },
-    { submittedIndex: 1, deviceId: 1208 },
-  ])
-  assert.deepEqual(plan.inserts, [])
+test("reordered stable IDs retain identity", () => {
+  const plan = planBatchDeviceReconciliation([20, 21], [{ deviceId: 21 }, { deviceId: 20 }], { expectedDeviceIds: [20, 21] })
+  assert.deepEqual(plan.updates, [{ submittedIndex: 0, deviceId: 21 }, { submittedIndex: 1, deviceId: 20 }])
   assert.deepEqual(plan.deletes, [])
 })
-
-test("stable IDs distinguish additions and removals", () => {
-  const plan = planBatchDeviceReconciliation(
-    [1208, 1209],
-    [{ deviceId: 1209 }, {}],
-  )
-
-  assert.deepEqual(plan.updates, [{ submittedIndex: 0, deviceId: 1209 }])
+test("a stale form cannot delete a device another operator added", () => {
+  assert.throws(() => planBatchDeviceReconciliation([20, 21, 22], [{ deviceId: 20 }, { deviceId: 21 }], { expectedDeviceIds: [20, 21] }),
+    (error) => error instanceof BatchDeviceReconciliationError && error.code === "STALE_DEVICE_LIST")
+})
+test("a concurrent deletion or replacement also invalidates the snapshot", () => {
+  for (const existing of [[20], [20, 22]]) {
+    assert.throws(() => planBatchDeviceReconciliation(existing, [{ deviceId: 20 }], { expectedDeviceIds: [20, 21], deletedDeviceIds: [21] }),
+      (error) => error instanceof BatchDeviceReconciliationError && error.code === "STALE_DEVICE_LIST")
+  }
+})
+test("omitted devices are preserved; only explicit deletions remove rows", () => {
+  assert.deepEqual(planBatchDeviceReconciliation([20, 21], [{ deviceId: 21 }], { expectedDeviceIds: [20, 21] }).deletes, [])
+  const plan = planBatchDeviceReconciliation([20, 21], [{ deviceId: 21 }, {}], { expectedDeviceIds: [20, 21], deletedDeviceIds: [20] })
+  assert.deepEqual(plan.deletes, [20])
   assert.deepEqual(plan.inserts, [1])
-  assert.deepEqual(plan.deletes, [1208])
 })
-
-test("unknown and duplicate IDs are rejected instead of updating another row", () => {
-  assert.throws(
-    () => planBatchDeviceReconciliation([1208], [{ deviceId: 9999 }]),
-    (error) => error instanceof BatchDeviceReconciliationError
-      && error.code === "UNKNOWN_DEVICE_ID",
-  )
-  assert.throws(
-    () => planBatchDeviceReconciliation([1208], [{ deviceId: 1208 }, { deviceId: 1208 }]),
-    (error) => error instanceof BatchDeviceReconciliationError
-      && error.code === "DUPLICATE_DEVICE_ID",
-  )
+test("unknown, duplicate, or simultaneously retained and deleted IDs fail", () => {
+  for (const submitted of [[{ deviceId: 999 }], [{ deviceId: 20 }, { deviceId: 20 }]]) {
+    assert.throws(() => planBatchDeviceReconciliation([20], submitted, { expectedDeviceIds: [20] }), BatchDeviceReconciliationError)
+  }
+  assert.throws(() => planBatchDeviceReconciliation([20], [{ deviceId: 20 }], { expectedDeviceIds: [20], deletedDeviceIds: [20] }), BatchDeviceReconciliationError)
 })
-
-test("legacy post-create photo sync keeps the original ordered fallback", () => {
-  const plan = planBatchDeviceReconciliation([20, 21], [{}, {}])
-
-  assert.equal(plan.mode, "legacy-order")
-  assert.deepEqual(plan.updates, [
-    { submittedIndex: 0, deviceId: 20 },
-    { submittedIndex: 1, deviceId: 21 },
-  ])
+test("an edit replacing every row creates new identities instead of overwriting by order", () => {
+  const plan = planBatchDeviceReconciliation([20, 21], [{}], { expectedDeviceIds: [20, 21], deletedDeviceIds: [20, 21] })
+  assert.deepEqual(plan.updates, [])
+  assert.deepEqual(plan.inserts, [0])
+  assert.deepEqual(plan.deletes, [20, 21])
 })

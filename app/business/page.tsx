@@ -70,6 +70,7 @@ export default function BusinessDashboard() {
   const { repairs, refreshRepairs } = useRepairContext();
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
+  const [loadErrors, setLoadErrors] = useState<Record<string, string>>({});
 
   // ── 工单列表（数据总览 Tab 使用） ────────────────────────────────────────────
   const [allBatches, setAllBatches] = useState<BatchTicket[]>([]);
@@ -117,6 +118,7 @@ export default function BusinessDashboard() {
   // 加载全部工单（数据总览 Tab）
   const loadAllBatches = useCallback(async (): Promise<boolean> => {
     setLoadingBatches(true);
+    setLoadErrors((errors) => ({ ...errors, overview: "" }));
     try {
       const res = await fetch("/api/tickets/all-batches", { cache: "no-store" });
       const result = await res.json();
@@ -127,6 +129,7 @@ export default function BusinessDashboard() {
       return true;
     } catch (e) {
       console.error("加载批次工单失败:", e);
+      setLoadErrors((errors) => ({ ...errors, overview: "加载失败，请检查连接后重试" }));
       return false;
     } finally {
       setLoadingBatches(false);
@@ -136,6 +139,7 @@ export default function BusinessDashboard() {
   // 加载待审核批次（待审核批次 Tab）
   const loadPendingBatches = useCallback(async (): Promise<boolean> => {
     setLoadingPending(true);
+    setLoadErrors((errors) => ({ ...errors, pending: "" }));
     try {
       const res = await fetch("/api/tickets/business-pending-batches", { cache: "no-store" });
       const result = await res.json();
@@ -149,6 +153,7 @@ export default function BusinessDashboard() {
       return true;
     } catch (e) {
       console.error("加载待审核批次失败:", e);
+      setLoadErrors((errors) => ({ ...errors, pending: "加载失败，请检查连接后重试" }));
       return false;
     } finally {
       setLoadingPending(false);
@@ -158,6 +163,7 @@ export default function BusinessDashboard() {
   // 加载财务跟进批次（财务跟进 Tab）
   const loadFollowupBatches = useCallback(async (): Promise<boolean> => {
     setLoadingFollowup(true);
+    setLoadErrors((errors) => ({ ...errors, followup: "" }));
     try {
       const res = await fetch("/api/tickets/business-financial-followup", { cache: "no-store" });
       const result = await res.json();
@@ -170,6 +176,7 @@ export default function BusinessDashboard() {
       return true;
     } catch (e) {
       console.error("加载财务跟进批次失败:", e);
+      setLoadErrors((errors) => ({ ...errors, followup: "加载失败，请检查连接后重试" }));
       return false;
     } finally {
       setLoadingFollowup(false);
@@ -413,6 +420,8 @@ export default function BusinessDashboard() {
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
                 <span className="ml-2 text-muted-foreground">加载中...</span>
               </div>
+            ) : loadErrors.overview ? (
+              <div role="alert" className="py-8 space-y-3 text-center"><p className="text-destructive">{loadErrors.overview}</p><Button variant="outline" onClick={() => void loadAllBatches()}>重新加载</Button></div>
             ) : filteredBatches.length === 0 ? (
               <div className="text-center py-12">
                 <Package className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
@@ -463,6 +472,8 @@ export default function BusinessDashboard() {
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
                 <span className="ml-2 text-muted-foreground">加载中...</span>
               </div>
+            ) : loadErrors.pending ? (
+              <div role="alert" className="py-8 space-y-3 text-center"><p className="text-destructive">{loadErrors.pending}</p><Button variant="outline" onClick={() => void loadPendingBatches()}>重新加载</Button></div>
             ) : pendingBatches.length === 0 ? (
               <div className="text-center py-12">
                 <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />
@@ -554,6 +565,8 @@ export default function BusinessDashboard() {
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
                 <span className="ml-2 text-muted-foreground">加载中...</span>
               </div>
+            ) : loadErrors.followup ? (
+              <div role="alert" className="py-8 space-y-3 text-center"><p className="text-destructive">{loadErrors.followup}</p><Button variant="outline" onClick={() => void loadFollowupBatches()}>重新加载</Button></div>
             ) : filteredFollowupBatches.length === 0 ? (
               <div className="text-center py-12">
                 <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />

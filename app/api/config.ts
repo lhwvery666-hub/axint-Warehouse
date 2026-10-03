@@ -1,9 +1,4 @@
-// 全局上传目录配置
-// 注意：这是后端运行时使用的物理路径，前端不会直接使用这个路径
-// 将来部署到服务器时，只需要修改这里的路径（或改为读取环境变量）即可
-// 例如：D:\\repair-photos 或 /data/repair-photos
+import { getUploadDirectory } from "@/lib/storage/upload-directory"
 
-export const UPLOAD_DIR: string =
-  process.env.UPLOAD_DIR ||
-  "D:\\\\MY app\\\\axiom-repair\\\\public\\\\uploads" // 本地开发默认存储到项目 public/uploads 目录
-
+// Legacy routes use the same persistent directory as the storage adapter.
+export const UPLOAD_DIR = getUploadDirectory()

@@ -90,7 +90,7 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
   const userRole = userType || user?.role || "technician"
   
   // 使用RepairContext获取维修工单数据
-  const { repairs, refreshRepairs } = useRepairContext();
+  const { repairs, refreshRepairs, error: repairsError } = useRepairContext();
   
   // 视图状态：tasks(任务列表), new(新建维修), detail(维修详情), batchSelect(批次设备选择)
   // 如果传入了taskId，则直接显示详情页面
@@ -514,6 +514,10 @@ export default function RepairPage({ onBack, taskId, userType, batchContext }: R
   }, [filteredTasks.length, tasks.length])
 
   const paginatedTasks = paginateItems(filteredTasks, currentPage)
+
+  if (repairsError && view === "tasks") {
+    return <div role="alert" className="p-6 space-y-3"><p className="font-semibold text-destructive">工单加载失败</p><p>{repairsError}</p><Button onClick={() => void refreshRepairs()}>重新加载</Button></div>
+  }
 
   // 报告人员使用专门的报告页面，不再在这里处理
   if (userRole === UserRole.REPORTER) {

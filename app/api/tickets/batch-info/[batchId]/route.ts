@@ -1,3 +1,4 @@
+import { isSignedRepairReport } from "@/lib/repair-report-policy"
 import { NextResponse } from "next/server"
 import * as sql from "mssql"
 import { z } from "zod"
@@ -14,6 +15,8 @@ const batchInfoSchema = z.object({
 }).strict()
 
 interface BatchInfoRow {
+  SignedReportPhoto: string | null
+  ReporterConfirmedAt: Date | null
   Id: number
   Status: string
   ReportByUserID: number
@@ -71,7 +74,7 @@ export async function PUT(
       .input("batchId", sql.NVarChar(100), batchId)
       .query<BatchInfoRow>(`
         SELECT [Id], [Status], [ReportByUserID], [ProjectName], [ContactInfo],
-               [ProjectLocation], [SenderAddress]
+               [ProjectLocation], [SenderAddress], [SignedReportPhoto], [ReporterConfirmedAt]
         FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BatchId] = @batchId AND [Status] <> 'Deleted';
       `)
@@ -134,6 +137,11 @@ export async function PUT(
     if (updateFields.length === 0) {
       transaction = await rollback(transaction)
       return NextResponse.json({ success: true, changed: false, message: "信息未发生变化，无需保存" })
+    }
+
+    if (rows.some(isSignedRepairReport)) {
+      transaction = await rollback(transaction)
+      return NextResponse.json({ success: false, message: "报告已签字确认，不能修改报告中的客户资料" }, { status: 409 })
     }
 
     updateFields.push("[UpdatedAt] = GETUTCDATE()")

@@ -211,6 +211,8 @@ export async function PUT(
                  inserted.[DeviceSN], deleted.[Status] AS [OldStatus],
                  inserted.[Status] AS [NewStatus]
           WHERE [Id] = @ticketId
+            AND NULLIF(LTRIM(RTRIM([SignedReportPhoto])), '') IS NULL
+            AND [ReporterConfirmedAt] IS NULL
             AND [Status] NOT IN ('Completed', 'Cancelled', 'Scrapped', 'Deleted');
         `)
       updated = updateResult.recordset[0]

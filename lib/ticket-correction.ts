@@ -32,6 +32,12 @@ export interface CorrectionChange {
   impact: CorrectionImpact
 }
 
+/** After signature, only logistics that do not alter the report may be corrected. */
+export function correctionAffectsSignedReport(changes: readonly CorrectionChange[]): boolean {
+  return changes.some((change) => change.scope !== "batch" ||
+    !["trackingNumber", "expressCompany"].includes(change.field))
+}
+
 export interface CorrectionDeviceVersion {
   deviceId: number
   status: string

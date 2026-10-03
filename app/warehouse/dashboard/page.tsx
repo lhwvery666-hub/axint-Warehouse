@@ -61,6 +61,7 @@ export default function WarehouseDashboard() {
   const [completedBatches, setCompletedBatches] = useState<PendingBatch[]>([]);
   const [allBatches, setAllBatches] = useState<PendingBatch[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadErrors, setLoadErrors] = useState<Record<string, string>>({});
   const [correctionsLoading, setCorrectionsLoading] = useState(false);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [selectedFactoryTransferDevice, setSelectedFactoryTransferDevice] = useState<WarehouseFactoryTransferDevice | null>(null);
@@ -73,6 +74,7 @@ export default function WarehouseDashboard() {
 
   const loadPendingBatches = useCallback(async (): Promise<boolean> => {
     setLoading(true);
+    setLoadErrors((errors) => ({ ...errors, pending: "" }));
     try {
       const response = await fetch("/api/tickets/warehouse-pending-batches", { cache: "no-store" });
       const result = await response.json();
@@ -84,6 +86,7 @@ export default function WarehouseDashboard() {
       return true;
     } catch (error) {
       console.error("加载待确认批次失败:", error);
+      setLoadErrors((errors) => ({ ...errors, pending: "加载失败，请检查连接后重试" }));
       return false;
     } finally {
       setLoading(false);
@@ -92,6 +95,7 @@ export default function WarehouseDashboard() {
 
   const loadShippingBatches = useCallback(async (): Promise<boolean> => {
     setLoading(true);
+    setLoadErrors((errors) => ({ ...errors, shipping: "" }));
     try {
       const response = await fetch("/api/tickets/warehouse-shipping-batches", { cache: "no-store" });
       const result = await response.json();
@@ -103,6 +107,7 @@ export default function WarehouseDashboard() {
       return true;
     } catch (error) {
       console.error("加载待发货批次失败:", error);
+      setLoadErrors((errors) => ({ ...errors, shipping: "加载失败，请检查连接后重试" }));
       return false;
     } finally {
       setLoading(false);
@@ -111,6 +116,7 @@ export default function WarehouseDashboard() {
 
   const loadFactoryTransferDevices = useCallback(async (): Promise<boolean> => {
     setLoading(true);
+    setLoadErrors((errors) => ({ ...errors, transfer: "" }));
     try {
       const response = await fetch("/api/tickets/warehouse-factory-transfer-devices", { cache: "no-store" });
       const result = await response.json();
@@ -122,6 +128,7 @@ export default function WarehouseDashboard() {
       return true;
     } catch (error: unknown) {
       console.error("加载待移交设备失败:", error);
+      setLoadErrors((errors) => ({ ...errors, transfer: "加载失败，请检查连接后重试" }));
       return false;
     } finally {
       setLoading(false);
@@ -130,6 +137,7 @@ export default function WarehouseDashboard() {
 
   const loadCorrectionRequests = useCallback(async (): Promise<boolean> => {
     setCorrectionsLoading(true);
+    setLoadErrors((errors) => ({ ...errors, corrections: "" }));
     try {
       const response = await fetch("/api/tickets/correction-requests", { cache: "no-store" });
       const result = await response.json();
@@ -141,6 +149,7 @@ export default function WarehouseDashboard() {
       return true;
     } catch (error: unknown) {
       console.error("加载修改申请失败:", error);
+      setLoadErrors((errors) => ({ ...errors, corrections: "加载失败，请检查连接后重试" }));
       return false;
     } finally {
       setCorrectionsLoading(false);
@@ -149,6 +158,7 @@ export default function WarehouseDashboard() {
 
   const loadCompletedBatches = useCallback(async (): Promise<boolean> => {
     setLoading(true);
+    setLoadErrors((errors) => ({ ...errors, completed: "" }));
     try {
       const response = await fetch("/api/tickets/warehouse-completed-batches", { cache: "no-store" });
       const result = await response.json();
@@ -160,6 +170,7 @@ export default function WarehouseDashboard() {
       return true;
     } catch (error) {
       console.error("加载已完成批次失败:", error);
+      setLoadErrors((errors) => ({ ...errors, completed: "加载失败，请检查连接后重试" }));
       return false;
     } finally {
       setLoading(false);
@@ -168,6 +179,7 @@ export default function WarehouseDashboard() {
 
   const loadAllBatches = useCallback(async (): Promise<boolean> => {
     setLoading(true);
+    setLoadErrors((errors) => ({ ...errors, all: "" }));
     try {
       const response = await fetch("/api/tickets/all-batches", { cache: "no-store" });
       const result = await response.json();
@@ -179,6 +191,7 @@ export default function WarehouseDashboard() {
       return true;
     } catch (error) {
       console.error("加载全部批次失败:", error);
+      setLoadErrors((errors) => ({ ...errors, all: "加载失败，请检查连接后重试" }));
       return false;
     } finally {
       setLoading(false);
@@ -423,6 +436,8 @@ export default function WarehouseDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <span className="ml-2 text-muted-foreground">加载中...</span>
                 </div>
+              ) : loadErrors.pending ? (
+                <div role="alert" className="py-8 space-y-3 text-center"><p className="text-destructive">{loadErrors.pending}</p><Button variant="outline" onClick={() => void loadPendingBatches()}>重新加载</Button></div>
               ) : filteredPendingBatches.length === 0 ? (
                 <div className="text-center py-12">
                   <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />
@@ -498,6 +513,8 @@ export default function WarehouseDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <span className="ml-2 text-muted-foreground">加载中...</span>
                 </div>
+              ) : loadErrors.shipping ? (
+                <div role="alert" className="py-8 space-y-3 text-center"><p className="text-destructive">{loadErrors.shipping}</p><Button variant="outline" onClick={() => void loadShippingBatches()}>重新加载</Button></div>
               ) : filteredShippingBatches.length === 0 ? (
                 <div className="text-center py-12">
                   <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />
@@ -591,6 +608,8 @@ export default function WarehouseDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <span className="ml-2 text-muted-foreground">加载中...</span>
                 </div>
+              ) : loadErrors.transfer ? (
+                <div role="alert" className="py-8 space-y-3 text-center"><p className="text-destructive">{loadErrors.transfer}</p><Button variant="outline" onClick={() => void loadFactoryTransferDevices()}>重新加载</Button></div>
               ) : filteredFactoryTransferDevices.length === 0 ? (
                 <div className="py-12 text-center">
                   <CheckCircle2 className="mx-auto mb-4 h-12 w-12 text-green-500" />
@@ -670,6 +689,8 @@ export default function WarehouseDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <span className="ml-2 text-muted-foreground">加载中...</span>
                 </div>
+              ) : loadErrors.corrections ? (
+                <div role="alert" className="py-8 space-y-3 text-center"><p className="text-destructive">{loadErrors.corrections}</p><Button variant="outline" onClick={() => void loadCorrectionRequests()}>重新加载</Button></div>
               ) : correctionRequests.length === 0 ? (
                 <div className="py-12 text-center">
                   <CheckCircle2 className="mx-auto mb-4 h-12 w-12 text-green-500" />
@@ -739,6 +760,8 @@ export default function WarehouseDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <span className="ml-2 text-muted-foreground">加载中...</span>
                 </div>
+              ) : loadErrors.completed ? (
+                <div role="alert" className="py-8 space-y-3 text-center"><p className="text-destructive">{loadErrors.completed}</p><Button variant="outline" onClick={() => void loadCompletedBatches()}>重新加载</Button></div>
               ) : filteredCompletedBatches.length === 0 ? (
                 <div className="text-center py-12">
                   <Package className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
@@ -808,6 +831,8 @@ export default function WarehouseDashboard() {
                   <Loader2 className="h-8 w-8 animate-spin text-primary" />
                   <span className="ml-2 text-muted-foreground">加载中...</span>
                 </div>
+              ) : loadErrors.all ? (
+                <div role="alert" className="py-8 space-y-3 text-center"><p className="text-destructive">{loadErrors.all}</p><Button variant="outline" onClick={() => void loadAllBatches()}>重新加载</Button></div>
               ) : filteredAllBatches.length === 0 ? (
                 <div className="text-center py-12">
                   <Package className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />

@@ -1,13 +1,13 @@
 {
   "name": "my-v0-project",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "build": "next build",
     "dev": "next dev",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit --pretty false --incremental false",
-    "test": "tsx --test lib/__tests__/workflow-utils.test.ts lib/__tests__/ticket-workflow-actions.test.ts lib/__tests__/session.test.ts lib/__tests__/repair-list-filters.test.ts lib/__tests__/pagination.test.ts lib/__tests__/device-import.test.ts lib/__tests__/device-identity-permissions.test.ts lib/__tests__/device-update-diff.test.ts lib/__tests__/batch-device-reconciliation.test.ts lib/__tests__/batch-number-format.test.ts lib/__tests__/ticket-correction.test.ts",
+    "test": "node scripts/run-tests.cjs",
     "audit:api-auth": "tsx scripts/audit-api-auth.ts",
     "audit:schema": "tsx scripts/audit-runtime-schema.ts",
     "stress:ui:audit": "tsx scripts/manage-ui-stress-tickets.ts audit",
@@ -31,7 +31,8 @@
     "create-config-table": "tsx scripts/create-system-config-table.ts",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "prisma:validate": "prisma validate"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1002.0",
@@ -62,16 +63,17 @@
     "date-fns": "4.1.0",
     "lucide-react": "^0.454.0",
     "mssql": "^11.0.1",
-    "next": "16.0.10",
+    "next": "16.3.8",
     "next-themes": "^0.4.6",
     "prisma": "^5.0.0",
-    "react": "19.2.0",
+    "react": "19.3.0",
     "react-day-picker": "9.8.0",
-    "react-dom": "19.2.0",
+    "react-dom": "19.3.0",
     "react-hook-form": "^7.60.0",
     "sonner": "^1.7.4",
     "tailwind-merge": "^3.3.1",
     "tailwindcss-animate": "^1.0.7",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "3.25.76"
   },
   "devDependencies": {
@@ -81,14 +83,15 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "@types/xlsx": "^0.0.36",
     "eslint": "^9.39.5",
-    "eslint-config-next": "^16.0.10",
+    "eslint-config-next": "16.3.8",
     "postcss": "^8.5",
     "tailwindcss": "^4.1.9",
     "tsx": "^4.21.0",
     "tw-animate-css": "1.3.3",
-    "typescript": "^5",
-    "xlsx": "^0.18.5"
+    "typescript": "^5"
+  },
+  "engines": {
+    "node": ">=20.9.0"
   }
 }

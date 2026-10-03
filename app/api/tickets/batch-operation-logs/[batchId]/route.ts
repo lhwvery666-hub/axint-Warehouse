@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server"
 import { DB_FIELDS, OperationLogType, OPERATION_LOG_TYPE_LABELS, UserRole, TicketActionType } from "@/lib/enums"
-import { checkUserRole, isErrorResponse, getCurrentUserRole } from "@/lib/auth-utils"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
+import { canReadTicketBatch } from "@/lib/ticket-access"
+import { getVisibleTicketStatus, isFactoryHistoryAction } from "@/lib/ticket-visibility"
 
 // ==================== 类型定义 ====================
 /**
@@ -62,20 +64,24 @@ export async function GET(
     }
 
     // ==================== 参数验证 ====================
-    const resolvedParams =
-      "then" in (context as any).params
-        ? await (context as { params: Promise<{ batchId: string }> }).params
-        : (context as { params: { batchId: string } }).params
+    const resolvedParams = await context.params
 
     const batchId = resolvedParams.batchId
 
-    if (!batchId) {
+    if (!batchId || batchId.length > 50) {
       return NextResponse.json(
         { success: false, message: "批次ID不能为空" },
         { status: 400 }
       )
     }
 
+    const owners = await prisma.repair_Tickets.findMany({
+      where: { batchId },
+      select: { ReportByUserID: true },
+    })
+    if (!canReadTicketBatch(authResult, owners)) {
+      return NextResponse.json({ success: false, message: "工单不存在或无权访问" }, { status: 404 })
+    }
     // ==================== 数据库查询 ====================
     // 从 Repair_Ticket_History 表获取真实的操作记录（使用 Prisma ORM，字段名使用驼峰写法）
     const historyLogs = await prisma.repair_Ticket_History.findMany({
@@ -212,7 +218,7 @@ export async function GET(
         success: true,
         data: {
           batchId,
-          currentStatus: data.CurrentStatus,
+          currentStatus: getVisibleTicketStatus(data.CurrentStatus, authResult.normalizedRole),
           operations
         }
       })
@@ -221,9 +227,7 @@ export async function GET(
     // ==================== 从 Repair_Ticket_History 构建操作记录 ====================
     
     // 获取当前用户角色（用于过滤操作记录）
-    const userInfo = await getCurrentUserRole()
-    const isReporter = userInfo?.normalizedRole === UserRole.REPORTER
-    const isTechnician = userInfo?.normalizedRole === UserRole.TECHNICIAN
+    const isReporter = authResult.normalizedRole === UserRole.REPORTER
     
     /**
      * 将 TicketActionType 精确映射为 OperationLogType（用于前端图标和标签渲染）
@@ -270,7 +274,7 @@ export async function GET(
     // 判断是否是返厂相关的操作记录（需要隐藏给现场人员，但维修人员、商务人员、仓库人员可见）
     const isRMAOperation = (record: { actionType: string; description: string | null }): boolean => {
       // 使用枚举值进行精确匹配
-      if (record.actionType === TicketActionType.RMA_REQUEST) {
+      if (isFactoryHistoryAction(record.actionType)) {
         return true
       }
       
@@ -301,10 +305,9 @@ export async function GET(
             : new Date().toISOString(),
           operator: record.operatorName || "系统操作",
           // 兼容：优先使用自定义描述，否则退回到枚举标签或原始 actionType
-          description:
-            record.description ||
-            OPERATION_LOG_TYPE_LABELS[mappedType] ||
-            record.actionType,
+          description: isReporter
+            ? OPERATION_LOG_TYPE_LABELS[mappedType] || "工单已更新"
+            : record.description || OPERATION_LOG_TYPE_LABELS[mappedType] || record.actionType,
         }
       })
 
@@ -322,16 +325,15 @@ export async function GET(
       success: true,
       data: {
         batchId,
-        currentStatus,
+        currentStatus: getVisibleTicketStatus(currentStatus, authResult.normalizedRole),
         operations
       }
     })
 
   } catch (error: unknown) {
     console.error("获取批次操作记录失败:", error)
-    const errorMessage = error instanceof Error ? error.message : "获取操作记录失败"
     return NextResponse.json(
-      { success: false, message: errorMessage },
+      { success: false, message: "获取操作记录失败" },
       { status: 500 }
     )
   }

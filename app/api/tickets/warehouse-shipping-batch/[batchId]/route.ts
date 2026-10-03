@@ -4,14 +4,15 @@ import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
 import { TicketActionType, TicketStatus, UserRole } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
-import { sumDeviceQuantity } from "@/lib/device-quantity"
+import { buildShippingPlan, getSavedShippingAllocation, summarizeShippingPlan } from "@/lib/shipping-plan"
 
 const batchIdSchema = z.string().trim().min(1).max(100)
 
 interface ShippingDeviceRow {
   Id: number
   Status: string
-  quantity: number | null
+  Quantity: number | null
+  RepairReportContent: string | null
   ShippingType: string | null
   ReturnDate: Date | null
   ReturnTrackingNum: string | null
@@ -53,17 +54,10 @@ export async function POST(
     transaction = new sql.Transaction(pool)
     await transaction.begin()
 
-    const columnResult = await new sql.Request(transaction).query<{ HasShippingType: number }>(`
-      SELECT CASE WHEN COL_LENGTH('dbo.Repair_Tickets', 'ShippingType') IS NULL THEN 0 ELSE 1 END AS HasShippingType;
-    `)
-    const shippingTypeExpression = columnResult.recordset[0]?.HasShippingType === 1
-      ? "[ShippingType]"
-      : "CAST(NULL AS NVARCHAR(20)) AS [ShippingType]"
-
     const devicesResult = await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
       .query<ShippingDeviceRow>(`
-        SELECT [Id], [Status], [Quantity] AS [quantity], ${shippingTypeExpression},
+        SELECT [Id], [Status], [Quantity], [RepairReportContent], [ShippingType],
                [ReturnDate], [ReturnTrackingNum], [ReturnQuantity]
         FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BatchId] = @batchId AND [Status] <> 'Deleted'
@@ -82,22 +76,27 @@ export async function POST(
       )
     }
 
-    const saved = devices[0]
-    const shippingType = saved.ShippingType ||
-      (saved.ReturnDate || saved.ReturnTrackingNum ? "return" : "stock")
-    if (!["return", "stock"].includes(shippingType)) {
+    let plan
+    try {
+      plan = buildShippingPlan(devices, devices.map(getSavedShippingAllocation))
+    } catch (error: unknown) {
       transaction = await rollback(transaction)
-      return NextResponse.json(
-        { success: false, message: "请先保存有效的发货方式" },
-        { status: 400 }
-      )
+      return NextResponse.json({ success: false, message: error instanceof Error ? error.message : "发货分配无效" }, { status: 409 })
     }
-    if (shippingType === "return" && (!saved.ReturnDate || !saved.ReturnTrackingNum || !saved.ReturnQuantity)) {
+    const summary = summarizeShippingPlan(plan)
+    const shippingType = summary.shippingType
+    const returning = devices.filter(device => plan.find(item => item.deviceId === device.Id)!.returnQuantity > 0)
+    const saved = returning[0] ?? devices[0]
+    const invalidPlan = devices.some(device => {
+      const allocation = plan.find(item => item.deviceId === device.Id)!
+      return !device.ShippingType || device.ReturnQuantity !== allocation.returnQuantity ||
+        (allocation.returnQuantity > 0 && (!device.ReturnDate || !device.ReturnTrackingNum ||
+          device.ReturnTrackingNum !== saved.ReturnTrackingNum ||
+          device.ReturnDate.getTime() !== saved.ReturnDate?.getTime()))
+    })
+    if (invalidPlan) {
       transaction = await rollback(transaction)
-      return NextResponse.json(
-        { success: false, message: "请先保存发货日期、快递单号和发货数量" },
-        { status: 400 }
-      )
+      return NextResponse.json({ success: false, message: "请先保存每台设备的入库/发回分配；需返回的设备必须使用同一批物流一次发回" }, { status: 409 })
     }
 
     const operatorName = authResult.realName || authResult.username
@@ -124,9 +123,9 @@ export async function POST(
       )
     }
 
-    const deviceCount = sumDeviceQuantity(devices)
+    const deviceCount = summary.deviceCount
     const shippingDescription = shippingType === "return"
-      ? `发回客户（快递单号：${saved.ReturnTrackingNum}，数量：${saved.ReturnQuantity} 台）`
+      ? `发回客户 ${summary.returnQuantity} 台（快递单号：${saved.ReturnTrackingNum}），入库 ${summary.stockQuantity} 台`
       : "产品入库存储"
     await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
@@ -151,9 +150,9 @@ export async function POST(
     return NextResponse.json({
       success: true,
       message: shippingType === "return"
-        ? `发送流程成功，共 ${deviceCount} 台设备已发回客户`
+        ? `发送流程成功：${summary.returnQuantity} 台已发回客户，${summary.stockQuantity} 台已入库`
         : `发送流程成功，共 ${deviceCount} 台设备已入库`,
-      data: { batchId, deviceCount, shippingType, newStatus: TicketStatus.COMPLETED },
+      data: { batchId, ...summary, newStatus: TicketStatus.COMPLETED },
     })
   } catch (error: unknown) {
     console.error("[Warehouse Shipping] 发送流程失败:", error)

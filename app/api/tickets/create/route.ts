@@ -1,435 +1,166 @@
-import { NextResponse } from "next/server";
-import { getDbConnection } from "@/lib/db-config";
-import { UPLOAD_DIR } from "@/app/api/config";
-import { TicketStatus, SPECIAL_VALUES, UserRole } from "@/lib/enums"; // ✅ Rule 4 — 消除 Magic String
-import { checkUserRole, isErrorResponse } from "@/lib/auth-utils";
-import * as fs from "fs";
-import * as path from "path";
-import * as crypto from "crypto";
-import { generateSequentialBatchId } from "@/lib/batch-number";
-// POST /api/tickets/create
-// 现场人员提交报修：创建新的维修工单
+import { NextResponse } from "next/server"
+import * as sql from "mssql"
+import { z } from "zod"
+import { getDbConnection } from "@/lib/db-config"
+import { getStorageAdapter } from "@/lib/storage/storage-adapter"
+import { TicketStatus, TicketActionType, SPECIAL_VALUES, UserRole } from "@/lib/enums"
+import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { createUploadStoragePath, validateUploadedFile, type UploadValidationResult } from "@/lib/storage/upload-security"
+import { generateSequentialBatchId } from "@/lib/batch-number"
+
+const optionalText = (max: number) => z.string().trim().max(max).default("")
+const createSchema = z.object({
+  deviceSn: optionalText(100), productSn: optionalText(100), modelName: optionalText(200),
+  faultDesc: z.string().trim().min(1).max(10000),
+  courierInfo: optionalText(200), courierCompany: optionalText(200), trackingNumberIn: optionalText(100),
+  projectLocation: optionalText(200), projectName: optionalText(500), senderAddress: optionalText(500),
+  contactInfo: optionalText(200), category: optionalText(200), subCategory: optionalText(200),
+  materialCode: optionalText(100), fullSpec: optionalText(500), faultPoint: optionalText(500),
+  quantity: z.coerce.number().int().min(1).max(100000).default(1),
+  submitDate: z.string().optional(),
+  isChargeable: z.enum(["", "true", "false", "1", "0"]).default(""),
+  repairCost: z.union([z.literal(""), z.coerce.number().finite().min(0).max(9999999999999999)]).default(""),
+}).refine(value => Boolean(value.deviceSn) || value.productSn === "PENDING_VERIFY", {
+  message: "设备序列号为必填项", path: ["deviceSn"],
+})
+
+interface InventoryRow { SerialNumber: string; Status: string | null; ModelName: string | null; MaterialCode: string | null }
+type ValidUpload = { file: File; kind: "deviceImages" | "damageImages"; validation: Extract<UploadValidationResult, { success: true }> }
+
+/** Legacy single-device form; a single device still creates one ordinary batch. */
 export async function POST(request: Request) {
-  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER]);
-  if (isErrorResponse(authResult)) return authResult;
-
+  const auth = await checkUserRole([UserRole.ADMIN, UserRole.REPORTER])
+  if (isErrorResponse(auth)) return auth
+  const uploadedPaths: string[] = []
+  let transaction: sql.Transaction | null = null
   try {
-    const formData = await request.formData()
-
-    // --- 1. 提取基础字段 ---
-    const deviceSn = (formData.get("deviceSn") || "").toString().trim()
-    const faultDesc = (formData.get("faultDesc") || "").toString().trim()
-    const courierInfo = (formData.get("courierInfo") || "").toString().trim() || null
-    const courierCompany = (formData.get("courierCompany") || "").toString().trim() || null
-    const userIdRaw = authResult.userId
-    const projectLocation = (formData.get("projectLocation") || "").toString().trim()
-    const materialCode = (formData.get("materialCode") || "").toString().trim() || null
-
-    // --- 2. 提取现场人员填报区字段 ---
-    const submitDate = formData.get("submitDate") ? new Date(formData.get("submitDate") as string) : new Date()
-    let trackingNumberIn = (formData.get("trackingNumberIn") || "").toString().trim() || null
-    // 清理快递单号中的空格（防呆处理）
-    if (trackingNumberIn) {
-      trackingNumberIn = trackingNumberIn.replace(/\s+/g, '')
+    const form = await request.formData()
+    const parsed = createSchema.safeParse(Object.fromEntries(form.entries()))
+    if (!parsed.success) return NextResponse.json({ success: false, message: "请检查报修字段、数量和费用" }, { status: 400 })
+    const fields = parsed.data
+    const userId = Number(auth.userId)
+    const submitDate = fields.submitDate ? new Date(fields.submitDate) : new Date()
+    if (!Number.isSafeInteger(userId) || userId < 1 || !Number.isFinite(submitDate.getTime())) {
+      return NextResponse.json({ success: false, message: "登录身份或报修日期无效" }, { status: 400 })
     }
-    const senderAddress = (formData.get("senderAddress") || "").toString().trim() || null
-    const contactInfo = (formData.get("contactInfo") || "").toString().trim() || null
-    const projectName = (formData.get("projectName") || "").toString().trim() || null
-    const category = (formData.get("category") || "").toString().trim() || null
-    const selectedModelName = (formData.get("modelName") || "").toString().trim() || null
-    const quantityRaw = (formData.get("quantity") || "1").toString().trim()
-    const quantity = quantityRaw && !Number.isNaN(Number(quantityRaw)) ? Number(quantityRaw) : 1
-    const rawProductSn = (formData.get("productSn") || "").toString().trim() || deviceSn
 
-    // --- 3. 提取产品信息类 (三级联动) ---
-    const subCategory = (formData.get("subCategory") || "").toString().trim() || null
-    const fullSpec = (formData.get("fullSpec") || "").toString().trim() || null
-
-    // --- 4. 关键逻辑：“标签磨损/无法辨识”模式 ---
-    // 如果前端传来了 "PENDING_VERIFY"，说明用户勾选了那个框
-    const isPendingVerify =
-      rawProductSn === "PENDING_VERIFY" || deviceSn === "PENDING_VERIFY"
-    
-    // 最终存入数据库的 SN：如果是待定模式，存 "PENDING"，否则存真实的 SN
-    const productSn = isPendingVerify ? "PENDING" : (rawProductSn || deviceSn)
-
-    // --- 5. 提取维修信息类 ---
-    const faultPoint = (formData.get("faultPoint") || "").toString().trim() || null
-    const isChargeableRaw = (formData.get("isChargeable") || "")
-      .toString()
-      .trim()
-      .toLowerCase()
-    const isChargeable =
-      isChargeableRaw === "true" || isChargeableRaw === "1"
-        ? 1
-        : isChargeableRaw === "false" || isChargeableRaw === "0" || !isChargeableRaw
-        ? 0
-        : null
-    const repairCostRaw = (formData.get("repairCost") || "").toString().trim()
-    const repairCost =
-      repairCostRaw && !Number.isNaN(Number(repairCostRaw)) ? Number(repairCostRaw) : null
-
-    // --- 6. 提取图片文件 ---
-    const deviceImageFiles = formData.getAll("deviceImages")
-    const damageImageFiles = formData.getAll("damageImages")
-
-    // --- 校验逻辑 ---
-    // 只有在“非待定”模式下，才强制要求 SN 必填
-    if ((!deviceSn && !isPendingVerify) || !faultDesc) {
-      return NextResponse.json(
-        { success: false, message: "设备序列号和故障描述为必填项" },
-        { status: 400 }
-      )
+    const entries = (["deviceImages", "damageImages"] as const).flatMap(kind => form.getAll(kind).map(file => ({ kind, file })))
+    if (entries.length > 20) return NextResponse.json({ success: false, message: "一次最多上传 20 张照片" }, { status: 400 })
+    const uploads: ValidUpload[] = []
+    // Validate the whole set before database access or storage writes.
+    for (const entry of entries) {
+      if (!(entry.file instanceof File)) return NextResponse.json({ success: false, message: "照片参数无效" }, { status: 400 })
+      const validation = await validateUploadedFile(entry.file, entry.kind === "deviceImages" ? "device_photo" : "damage_photo")
+      if (!validation.success) return NextResponse.json({ success: false, message: validation.message }, { status: 400 })
+      uploads.push({ ...entry, file: entry.file, validation })
     }
 
     const pool = await getDbConnection()
-
-    // 工具函数：确保目录存在
-    const ensureDirExists = async (dir: string) => {
-      await fs.promises.mkdir(dir, { recursive: true })
-    }
-
-    // 工具函数：保存文件 (修复了 Windows 路径反斜杠问题)
-    const saveUploadedFiles = async (files: any[]): Promise<string[]> => {
-      if (!files || files.length === 0) return []
-
-      const today = new Date()
-      const folderName = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`
-      const targetDir = path.join(UPLOAD_DIR, folderName)
-      await ensureDirExists(targetDir)
-
-      const savedRelativePaths: string[] = []
-
-      for (const file of files) {
-        if (!file || typeof (file as any).arrayBuffer !== "function") continue
-        const f = file as any
-        const originalName: string = (f.name || "").toString()
-        const mimeType: string = (f.type || "").toString()
-
-        let extension = path.extname(originalName) || ""
-        if (!extension) {
-            if (mimeType === "image/png") extension = ".png"
-            else if (mimeType === "image/jpeg" || mimeType === "image/jpg") extension = ".jpg"
-            else extension = ".jpg"
-        }
-
-        const fileName = `${crypto.randomUUID()}${extension}`
-        const filePath = path.join(targetDir, fileName)
-        const arrayBuffer = await f.arrayBuffer()
-        const buffer = Buffer.from(arrayBuffer)
-        await fs.promises.writeFile(filePath, buffer)
-
-        // 强制使用正斜杠，兼容 Web 显示
-        const relativePath = path.posix.join(folderName, fileName).replace(/\\/g, "/")
-        savedRelativePaths.push(relativePath)
-      }
-      return savedRelativePaths
-    }
-
-    // 获取数据库列结构，用于动态生成 INSERT
-    const columnCheck = await pool.request().query(`
-        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'Repair_Tickets'
+    // Exact column names are declared by schema.prisma; fail closed if the deployed
+    // database cannot preserve ownership, batch identity or uploaded attachments.
+    const columns = await pool.request().query<{ COLUMN_NAME: string }>(`
+      SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'Repair_Tickets';
     `)
-    const availableColumns = columnCheck.recordset.map((row: any) => row.COLUMN_NAME)
-    
-    // 检查列是否存在 - 现场人员填报区
-    const hasSubmitDate = availableColumns.some((col: string) => col.toLowerCase() === "submitdate")
-    const hasTrackingNumberIn = availableColumns.some((col: string) => col.toLowerCase() === "trackingnumber_in")
-    const hasSenderAddress = availableColumns.some((col: string) => col.toLowerCase() === "senderaddress")
-    const hasContactInfo = availableColumns.some((col: string) => col.toLowerCase() === "contactinfo")
-    const hasProjectName = availableColumns.some((col: string) => col.toLowerCase() === "projectname")
-    const hasCategory = availableColumns.some((col: string) => col.toLowerCase() === "category")
-    const hasQuantity = availableColumns.some((col: string) => col.toLowerCase() === "quantity")
-    const hasProductSn = availableColumns.some((col: string) => col.toLowerCase() === "productsn")
-    const hasFaultDescription = availableColumns.some((col: string) => col.toLowerCase() === "faultdescription")
-    
-    // 维修人员填写区
-    const hasMaterialCode = availableColumns.some((col: string) => col.toLowerCase() === "materialcode")
-    const hasDeviceName = availableColumns.some((col: string) => col.toLowerCase() === "devicename")
-    const hasFullSpec = availableColumns.some((col: string) => col.toLowerCase() === "fullspec")
-    const hasFaultPoint = availableColumns.some((col: string) => col.toLowerCase() === "faultpoint")
-    const hasIsChargeable = availableColumns.some((col: string) => col.toLowerCase() === "ischargeable")
-    const hasIsOutsourced = availableColumns.some((col: string) => col.toLowerCase() === "isoutsourced")
-    
-    // 管理员填写区
-    const hasFactoryRepairDate = availableColumns.some((col: string) => col.toLowerCase() === "factoryrepairdate")
-    const hasFactoryTrackingNum = availableColumns.some((col: string) => col.toLowerCase() === "factorytrackingnum")
-    const hasSupplierName = availableColumns.some((col: string) => col.toLowerCase() === "suppliername")
-    const hasRepairCost = availableColumns.some((col: string) => col.toLowerCase() === "repaircost")
-    const hasClientName = availableColumns.some((col: string) => col.toLowerCase() === "clientname")
-    const hasIsInvoiced = availableColumns.some((col: string) => col.toLowerCase() === "isinvoiced")
-    const hasFactoryReceivedDate = availableColumns.some((col: string) => col.toLowerCase() === "factoryreceiveddate")
-    
-    // 仓库管理员填写区
-    const hasReceivedDate = availableColumns.some((col: string) => col.toLowerCase() === "receiveddate")
-    const hasFactoryShipDate = availableColumns.some((col: string) => col.toLowerCase() === "factoryshipdate")
-    const hasReturnDate = availableColumns.some((col: string) => col.toLowerCase() === "returndate")
-    const hasReturnQuantity = availableColumns.some((col: string) => col.toLowerCase() === "returnquantity")
-    const hasReturnTrackingNum = availableColumns.some((col: string) => col.toLowerCase() === "returntrackingnum")
-    
-    // 其他字段
-    const hasDevicePhotos = availableColumns.some((col: string) => col.toLowerCase() === "devicephotos")
-    const hasDamageImages = availableColumns.some((col: string) => col.toLowerCase() === "damageimages")
-    const hasWarehouse = availableColumns.some((col: string) => col.toLowerCase() === "warehouse")
-    const hasWorkOrderNumber = availableColumns.some((col: string) => col.toLowerCase() === "workordernumber")
-    const hasBatchId = availableColumns.some((col: string) => col.toLowerCase() === "batchid")
-    
-    // 兼容旧字段
-    const hasContactName = availableColumns.some((col: string) => col.toLowerCase() === "contactname")
-    const hasContactPhone = availableColumns.some((col: string) => col.toLowerCase() === "contactphone")
-    const hasSubCategory = availableColumns.some((col: string) => col.toLowerCase() === "subcategory")
-    const hasDeviceType = availableColumns.some((col: string) => col.toLowerCase() === "devicetype")
-    const hasProjectLocation = availableColumns.some((col: string) => col.toLowerCase() === "projectlocation")
-    const hasCourierCompany = availableColumns.some((col: string) => col.toLowerCase() === "couriercompany")
-    const hasCourierNumber = availableColumns.some((col: string) => col.toLowerCase() === "couriernumber")
-    const hasReportByUserID = availableColumns.some((col: string) => col.toLowerCase() === "reportbyuserid" || col.toLowerCase() === "reportbyuserid")
+    const available = new Set(columns.recordset.map(row => row.COLUMN_NAME.toLowerCase()))
+    const required = ["Id", "DeviceSN", "ModelName", "Problem", "Status", "ReportByUserID", "BatchId"]
+    if (required.some(column => !available.has(column.toLowerCase())) ||
+      (form.getAll("deviceImages").length > 0 && !available.has("devicephotos")) ||
+      (form.getAll("damageImages").length > 0 && !available.has("damageimages"))) {
+      return NextResponse.json({ success: false, message: "数据库结构尚未完成升级，请联系管理员" }, { status: 503 })
+    }
 
-    const reportTime = new Date().toISOString().slice(0, 19).replace("T", " ")
-
-    // ⚠️ 统一编号体系：本路由是遗留的单设备报修入口（与主流程 /api/tickets/batch 并存），
-    // 曾经完全没有 BatchId 概念。现在统一改为"单设备也是一个只有1台设备的批次"，
-    // 用同一套并发安全的每日顺序工单号生成器（YYYYMMDD001，超过 999 后使用 a00-z99），
-    // 避免系统里同时存在两套工单编号规则。
-    // 工单号只能由服务端生成，不能采用客户端传入值。
-    const generatedWorkOrderNumber = (hasBatchId || hasWorkOrderNumber)
-      ? await generateSequentialBatchId(pool)
-      : null
-    const batchId = hasBatchId ? generatedWorkOrderNumber : null
-    const workOrderNumber = hasWorkOrderNumber ? generatedWorkOrderNumber : null
-
-    // ==========================================
-    // 分支 1：暂缓验证流程 (PENDING)
-    // ==========================================
-    if (isPendingVerify) {
-      // ✅ Rule 4 — 使用 TicketStatus 枚举替代 "Created" 字符串字面量
-      const requestPending = pool.request()
-        .input("deviceSn", "PENDING")
-        .input("modelName", selectedModelName)
-        .input("faultDesc", faultDesc)
-          .input("status", TicketStatus.WAREHOUSE_CONFIRMING)
-
-      // 动态构建 PENDING 流程的 SQL
-      let insertPending = `INSERT INTO Repair_Tickets (DeviceSN, ModelName, FaultDescription, Status`
-      let valuesPending = `VALUES (@deviceSn, @modelName, @faultDesc, @status`
-      
-      // 添加可选字段
-      if (hasProjectLocation) {
-        insertPending += `, ProjectLocation`
-        valuesPending += `, @projectLocation`
-        requestPending.input("projectLocation", projectLocation || null)
+    // The existing allocator reserves a number separately. Failed creations may
+    // leave numbering gaps, but all business records below commit together.
+    const batchId = await generateSequentialBatchId(pool)
+    transaction = new sql.Transaction(pool)
+    await transaction.begin()
+    const pending = fields.deviceSn === "PENDING_VERIFY" || fields.productSn === "PENDING_VERIFY"
+    const deviceSn = pending ? "PENDING" : fields.deviceSn
+    let inventory: InventoryRow | undefined
+    if (!pending) {
+      const deviceResult = await new sql.Request(transaction)
+        .input("serialNumber", sql.NVarChar(100), deviceSn)
+        .query<InventoryRow>(`
+          SELECT TOP 1 [SerialNumber], [Status], [ModelName], [MaterialCode]
+          FROM [dbo].[Device_Inventory] WITH (UPDLOCK, HOLDLOCK)
+          WHERE [SerialNumber] = @serialNumber;
+        `)
+      inventory = deviceResult.recordset[0]
+      if (!inventory) {
+        await transaction.rollback(); transaction = null
+        return NextResponse.json({ success: false, message: "设备序列号不存在于设备档案中，请先录入设备信息" }, { status: 400 })
       }
-      if (hasReportByUserID) {
-        insertPending += `, ReportByUserID`
-        valuesPending += `, @reportByUserID`
-        requestPending.input("reportByUserID", userIdRaw ? Number(userIdRaw) || null : null)
+    }
+
+    const photoPaths: Record<"deviceImages" | "damageImages", string[]> = { deviceImages: [], damageImages: [] }
+    for (const upload of uploads) {
+      const purpose = upload.kind === "deviceImages" ? "device_photo" : "damage_photo"
+      const key = createUploadStoragePath(purpose, auth.userId, upload.validation.extension)
+      // Track the generated key before I/O so even a partially failed write can be cleaned.
+      uploadedPaths.push(key)
+      const url = await getStorageAdapter().upload(key, upload.file, upload.validation.mimeType)
+      photoPaths[upload.kind].push(url)
+    }
+
+    if (inventory) {
+      const status = inventory.Status || ""
+      const availableStatuses: string[] = [SPECIAL_VALUES.DEVICE_STATUS_IN_STOCK, SPECIAL_VALUES.DEVICE_STATUS_OUT_STOCK,
+        SPECIAL_VALUES.DEVICE_STATUS_IN_STOCK_EN, SPECIAL_VALUES.DEVICE_STATUS_OUT_STOCK_EN]
+      if (availableStatuses.includes(status) || status.toLowerCase() === "instock") {
+        await new sql.Request(transaction).input("serialNumber", sql.NVarChar(100), deviceSn)
+          .input("status", sql.NVarChar(50), SPECIAL_VALUES.DEVICE_STATUS_REPAIRING)
+          .query("UPDATE [dbo].[Device_Inventory] SET [Status] = @status WHERE [SerialNumber] = @serialNumber;")
       }
-      if (hasCourierCompany) {
-        insertPending += `, CourierCompany`
-        valuesPending += `, @courierCompany`
-        requestPending.input("courierCompany", courierCompany || null)
-      }
-      if (hasCourierNumber) {
-        insertPending += `, CourierNumber`
-        valuesPending += `, @courierNumber`
-        requestPending.input("courierNumber", courierInfo || null)
-      }
-      insertPending += `, ReportTime`
-      valuesPending += `, @reportTime`
-      requestPending.input("reportTime", reportTime)
-
-      // 动态拼接待定字段 - 现场人员填报区
-      if (hasSubmitDate) { insertPending += `, SubmitDate`; valuesPending += `, @submitDate`; requestPending.input("submitDate", submitDate) }
-      if (hasTrackingNumberIn) { insertPending += `, TrackingNumber_In`; valuesPending += `, @trackingNumberIn`; requestPending.input("trackingNumberIn", trackingNumberIn) }
-      if (hasSenderAddress) { insertPending += `, SenderAddress`; valuesPending += `, @senderAddress`; requestPending.input("senderAddress", senderAddress) }
-      if (hasContactInfo) { insertPending += `, ContactInfo`; valuesPending += `, @contactInfo`; requestPending.input("contactInfo", contactInfo) }
-      if (hasProjectName) { insertPending += `, ProjectName`; valuesPending += `, @projectName`; requestPending.input("projectName", projectName) }
-      if (hasCategory) { insertPending += `, Category`; valuesPending += `, @category`; requestPending.input("category", category) }
-      if (hasQuantity) { insertPending += `, Quantity`; valuesPending += `, @quantity`; requestPending.input("quantity", quantity) }
-      if (hasProductSn) { insertPending += `, ProductSN`; valuesPending += `, @productSn`; requestPending.input("productSn", "PENDING") }
-      if (hasWorkOrderNumber) { insertPending += `, WorkOrderNumber`; valuesPending += `, @workOrderNumber`; requestPending.input("workOrderNumber", workOrderNumber) }
-      if (hasBatchId && batchId) { insertPending += `, BatchId`; valuesPending += `, @batchId`; requestPending.input("batchId", batchId) }
-      // 注意：FaultDescription 已经在基础字段中，不需要重复添加
-      
-      // 兼容旧字段
-      if (hasContactName && !hasContactInfo) { insertPending += `, ContactName`; valuesPending += `, @contactName`; requestPending.input("contactName", contactInfo) }
-      if (hasContactPhone && !hasContactInfo) { insertPending += `, ContactPhone`; valuesPending += `, @contactPhone`; requestPending.input("contactPhone", contactInfo) }
-      if (hasSubCategory) { insertPending += `, SubCategory`; valuesPending += `, @subCategory`; requestPending.input("subCategory", subCategory) }
-      
-      // 维修人员填写区（创建时可能为空）
-      if (hasFullSpec) { insertPending += `, FullSpec`; valuesPending += `, @fullSpec`; requestPending.input("fullSpec", fullSpec) }
-      if (hasFaultPoint) { insertPending += `, FaultPoint`; valuesPending += `, @faultPoint`; requestPending.input("faultPoint", faultPoint) }
-      
-      // 管理员填写区（创建时可能为空）
-      if (hasIsChargeable) { insertPending += `, IsChargeable`; valuesPending += `, @isChargeable`; requestPending.input("isChargeable", isChargeable) }
-      if (hasRepairCost) { insertPending += `, RepairCost`; valuesPending += `, @repairCost`; requestPending.input("repairCost", repairCost) }
-
-      // 图片处理
-      if (hasDevicePhotos) {
-        const savedDeviceImages = await saveUploadedFiles(deviceImageFiles)
-        if (savedDeviceImages.length > 0) {
-          insertPending += `, DevicePhotos`; valuesPending += `, @deviceImages`
-          requestPending.input("deviceImages", JSON.stringify(savedDeviceImages))
-        }
-      }
-      if (hasDamageImages) {
-        const savedDamageImages = await saveUploadedFiles(damageImageFiles)
-        if (savedDamageImages.length > 0) {
-          insertPending += `, DamageImages`; valuesPending += `, @damageImages`
-          requestPending.input("damageImages", JSON.stringify(savedDamageImages))
-        }
-      }
-
-      insertPending += `)`
-      valuesPending += `)`
-      await requestPending.query(insertPending + " " + valuesPending)
-
-      return NextResponse.json({ success: true, message: "报修工单创建成功（待核验序列号）" }, { status: 201 })
     }
 
-    // ==========================================
-    // 分支 2：正常 SN 验证流程 (严格校验库存)
-    // ==========================================
-    
-    // 1. 查库存（✅ Rule 4 — 显式列出所需字段，禁止 SELECT *）
-    const deviceResult = await pool.request()
-      .input("serialNumber", deviceSn)
-      .query(`
-        SELECT TOP 1
-          SerialNumber, Status, DeviceType,
-          ProjectLocation, ModelName, MaterialCode, Warehouse
-        FROM Device_Inventory
-        WHERE SerialNumber = @serialNumber
-      `)
-
-    if (deviceResult.recordset.length === 0) {
-      return NextResponse.json({ success: false, message: "设备序列号不存在于设备档案中，请先录入设备信息" }, { status: 400 })
+    // Server-owned, schema.prisma-verified identifier allowlist.
+    const values: Record<string, string | number | boolean | Date | null> = {
+      DeviceSN: deviceSn, ModelName: fields.modelName || inventory?.ModelName || null,
+      Problem: fields.faultDesc, Status: TicketStatus.WAREHOUSE_CONFIRMING,
+      ReportByUserID: userId, ReportedBy: auth.realName || auth.username,
+      BatchId: batchId, WorkOrderNumber: batchId, TicketId: batchId,
+      ReportTime: new Date(), SubmitDate: submitDate, Quantity: fields.quantity,
+      ProjectLocation: fields.projectLocation || null, ProjectName: fields.projectName || null,
+      SenderAddress: fields.senderAddress || null, ContactInfo: fields.contactInfo || null,
+      Category: fields.category || null, SubCategory: fields.subCategory || null,
+      CourierCompany: fields.courierCompany || null, CourierNumber: fields.courierInfo || null,
+      TrackingNumber_In: (fields.trackingNumberIn || fields.courierInfo).replace(/\s+/g, "") || null,
+      MaterialCode: fields.materialCode || inventory?.MaterialCode || null,
+      FullSpec: fields.fullSpec || null, FaultPoint: fields.faultPoint || null,
+      IsChargeable: fields.isChargeable === "true" || fields.isChargeable === "1",
+      RepairCost: fields.repairCost === "" ? null : fields.repairCost,
+      DevicePhotos: photoPaths.deviceImages.length ? JSON.stringify(photoPaths.deviceImages) : null,
+      DamageImages: photoPaths.damageImages.length ? JSON.stringify(photoPaths.damageImages) : null,
     }
-
-    const device = deviceResult.recordset[0]
-    
-    // 2. 更新库存状态（✅ Rule 4 — 使用 SPECIAL_VALUES 常量替代 Magic String）
-    const currentStatus: string = device.Status ?? ""
-    const isDeviceAvailable =
-      currentStatus === SPECIAL_VALUES.DEVICE_STATUS_IN_STOCK ||
-      currentStatus === SPECIAL_VALUES.DEVICE_STATUS_OUT_STOCK ||
-      currentStatus === SPECIAL_VALUES.DEVICE_STATUS_IN_STOCK_EN ||
-      currentStatus === SPECIAL_VALUES.DEVICE_STATUS_OUT_STOCK_EN ||
-      currentStatus.toLowerCase() === "instock"
-
-    if (isDeviceAvailable) {
-      await pool.request()
-        .input("serialNumber", deviceSn)
-        .input("newStatus", SPECIAL_VALUES.DEVICE_STATUS_REPAIRING)
-        .query(`UPDATE Device_Inventory SET Status = @newStatus WHERE SerialNumber = @serialNumber`)
+    const insertedFields = Object.keys(values).filter(column => available.has(column.toLowerCase()))
+    const insert = new sql.Request(transaction)
+    for (const column of insertedFields) insert.input(column, values[column])
+    const created = await insert.query<{ Id: number }>(`
+      INSERT INTO [dbo].[Repair_Tickets] (${insertedFields.map(column => `[${column}]`).join(", ")})
+      OUTPUT INSERTED.[Id] AS [Id]
+      VALUES (${insertedFields.map(column => `@${column}`).join(", ")});
+    `)
+    const ticketId = created.recordset[0]?.Id
+    if (!ticketId) throw new Error("No ticket identity returned")
+    await new sql.Request(transaction)
+      .input("ticketId", sql.NVarChar(50), String(ticketId)).input("batchId", sql.NVarChar(50), batchId)
+      .input("action", sql.NVarChar(50), TicketActionType.BATCH_CREATED)
+      .input("status", sql.NVarChar(50), TicketStatus.WAREHOUSE_CONFIRMING)
+      .input("operatorId", sql.Int, userId).input("operatorName", sql.NVarChar(100), auth.realName || auth.username)
+      .input("description", sql.NVarChar(sql.MAX), "创建报修工单")
+      .query(`INSERT INTO [dbo].[Repair_Ticket_History]
+        ([TicketID], [BatchId], [ActionType], [NewStatus], [OperatorId], [OperatorName], [Description], [CreatedAt])
+        VALUES (@ticketId, @batchId, @action, @status, @operatorId, @operatorName, @description, GETUTCDATE());`)
+    await transaction.commit(); transaction = null
+    return NextResponse.json({ success: true, message: "报修工单创建成功", data: { id: ticketId, batchId } }, { status: 201 })
+  } catch (error: unknown) {
+    if (transaction) {
+      try { await transaction.rollback() } catch { /* preserve the original failure */ } finally { transaction = null }
     }
-
-    // 3. 准备数据
-    const finalMaterialCode = materialCode || device.MaterialCode || null
-    // 如果用户没选型号，就用库存里的；如果选了，以用户的为准
-    const finalModelName = selectedModelName || device.ModelName || null 
-    const finalWarehouse = device.Warehouse || null
-    // 优先用用户填的项目地点，如果没填则用库存里的
-    const projectLocationForDb = projectLocation || device.ProjectLocation || null
-
-    // 4. 构建正常流程的 SQL
-    // ✅ Rule 4 — 使用 TicketStatus 枚举替代 "Created" 字符串字面量
-    const requestNormal = pool.request()
-      .input("deviceSn", deviceSn)
-      .input("modelName", finalModelName)
-      .input("faultDesc", faultDesc)
-        .input("status", TicketStatus.WAREHOUSE_CONFIRMING)
-
-    // 动态构建基础字段
-    let insertQuery = `INSERT INTO Repair_Tickets (DeviceSN, ModelName, FaultDescription, Status`
-    let valuesQuery = `VALUES (@deviceSn, @modelName, @faultDesc, @status`
-    
-    // 添加可选的基础字段
-    if (hasDeviceType) {
-      insertQuery += `, DeviceType`
-      valuesQuery += `, @deviceType`
-      requestNormal.input("deviceType", device.DeviceType || null)
-    }
-    if (hasProjectLocation) {
-      insertQuery += `, ProjectLocation`
-      valuesQuery += `, @projectLocation`
-      requestNormal.input("projectLocation", projectLocationForDb)
-    }
-    if (hasReportByUserID) {
-      insertQuery += `, ReportByUserID`
-      valuesQuery += `, @reportByUserID`
-      requestNormal.input("reportByUserID", userIdRaw ? Number(userIdRaw) || null : null)
-    }
-    if (hasCourierCompany) {
-      insertQuery += `, CourierCompany`
-      valuesQuery += `, @courierCompany`
-      requestNormal.input("courierCompany", courierCompany || null)
-    }
-    if (hasCourierNumber) {
-      insertQuery += `, CourierNumber`
-      valuesQuery += `, @courierNumber`
-      requestNormal.input("courierNumber", courierInfo || null)
-    }
-    insertQuery += `, ReportTime`
-    valuesQuery += `, @reportTime`
-    requestNormal.input("reportTime", reportTime)
-
-    // 动态拼接正常流程字段
-    if (hasMaterialCode) { insertQuery += `, MaterialCode`; valuesQuery += `, @materialCode`; requestNormal.input("materialCode", finalMaterialCode) }
-    if (hasWarehouse) { insertQuery += `, Warehouse`; valuesQuery += `, @warehouse`; requestNormal.input("warehouse", finalWarehouse) }
-    
-    // 现场人员填报区字段
-    if (hasSubmitDate) { insertQuery += `, SubmitDate`; valuesQuery += `, @submitDate`; requestNormal.input("submitDate", submitDate) }
-    if (hasTrackingNumberIn) { insertQuery += `, TrackingNumber_In`; valuesQuery += `, @trackingNumberIn`; requestNormal.input("trackingNumberIn", trackingNumberIn) }
-    if (hasSenderAddress) { insertQuery += `, SenderAddress`; valuesQuery += `, @senderAddress`; requestNormal.input("senderAddress", senderAddress) }
-    if (hasContactInfo) { insertQuery += `, ContactInfo`; valuesQuery += `, @contactInfo`; requestNormal.input("contactInfo", contactInfo) }
-    if (hasProjectName) { insertQuery += `, ProjectName`; valuesQuery += `, @projectName`; requestNormal.input("projectName", projectName) }
-    if (hasCategory) { insertQuery += `, Category`; valuesQuery += `, @category`; requestNormal.input("category", category) }
-    if (hasQuantity) { insertQuery += `, Quantity`; valuesQuery += `, @quantity`; requestNormal.input("quantity", quantity) }
-    if (hasProductSn) { insertQuery += `, ProductSN`; valuesQuery += `, @productSn`; requestNormal.input("productSn", deviceSn) } // 正常流程存真实SN
-    if (hasWorkOrderNumber) { insertQuery += `, WorkOrderNumber`; valuesQuery += `, @workOrderNumber`; requestNormal.input("workOrderNumber", workOrderNumber) }
-    if (hasBatchId && batchId) { insertQuery += `, BatchId`; valuesQuery += `, @batchId`; requestNormal.input("batchId", batchId) }
-    // 注意：FaultDescription 已经在基础字段中，不需要重复添加
-    
-    // 兼容旧字段
-    if (hasContactName && !hasContactInfo) { insertQuery += `, ContactName`; valuesQuery += `, @contactName`; requestNormal.input("contactName", contactInfo) }
-    if (hasContactPhone && !hasContactInfo) { insertQuery += `, ContactPhone`; valuesQuery += `, @contactPhone`; requestNormal.input("contactPhone", contactInfo) }
-    if (hasSubCategory) { insertQuery += `, SubCategory`; valuesQuery += `, @subCategory`; requestNormal.input("subCategory", subCategory) }
-    
-    // 维修人员填写区（创建时可能为空，但可以预填）
-    if (hasFullSpec) { insertQuery += `, FullSpec`; valuesQuery += `, @fullSpec`; requestNormal.input("fullSpec", fullSpec) }
-    if (hasFaultPoint) { insertQuery += `, FaultPoint`; valuesQuery += `, @faultPoint`; requestNormal.input("faultPoint", faultPoint) }
-    
-    // 管理员填写区（创建时可能为空）
-    if (hasIsChargeable) { insertQuery += `, IsChargeable`; valuesQuery += `, @isChargeable`; requestNormal.input("isChargeable", isChargeable) }
-    if (hasRepairCost) { insertQuery += `, RepairCost`; valuesQuery += `, @repairCost`; requestNormal.input("repairCost", repairCost) }
-
-    // 图片处理 (正常流程)
-    if (hasDevicePhotos) {
-        const savedDeviceImages = await saveUploadedFiles(deviceImageFiles)
-        if (savedDeviceImages.length > 0) {
-            insertQuery += `, DevicePhotos`; valuesQuery += `, @deviceImages`
-            requestNormal.input("deviceImages", JSON.stringify(savedDeviceImages))
-        }
-    }
-    if (hasDamageImages) {
-        const savedDamageImages = await saveUploadedFiles(damageImageFiles)
-        if (savedDamageImages.length > 0) {
-            insertQuery += `, DamageImages`; valuesQuery += `, @damageImages`
-            requestNormal.input("damageImages", JSON.stringify(savedDamageImages))
-        }
-    }
-
-    insertQuery += `)`
-    valuesQuery += `)`
-    await requestNormal.query(insertQuery + " " + valuesQuery)
-
-    return NextResponse.json({ success: true, message: "报修工单创建成功" }, { status: 201 })
-
-  } catch (error: any) {
+    const cleanup = await Promise.allSettled(uploadedPaths.map(storedPath => getStorageAdapter().delete(storedPath)))
+    if (cleanup.some(result => result.status === "rejected")) console.error("创建工单失败后的附件清理未完成，请检查存储服务")
     console.error("创建报修工单失败:", error)
-    return NextResponse.json(
-      { success: false, message: "创建报修工单时发生错误", error: error?.message || "未知错误" },
-      { status: 500 }
-    )
+    return NextResponse.json({ success: false, message: "创建报修工单时发生错误，请重试" }, { status: 500 })
   }
 }
