@@ -14,7 +14,7 @@
 import { Readable } from "stream";
 import { S3StorageClient } from "./s3-client";
 import { writeFile, mkdir } from "fs/promises";
-import { isAbsolute, relative, resolve, sep } from "path";
+import { isAbsolute, posix, relative, resolve, sep, win32 } from "path";
 import { existsSync } from "fs";
 import { getUploadDirectory } from "./upload-directory";
 
@@ -32,14 +32,20 @@ export function normalizeStorageKey(value: string): string {
     throw new Error("存储路径无效")
   }
 
-  const withoutPrefix = decoded
-    .replace(/^\/uploads\//, "")
-    .replace(/^uploads\//, "")
-    .replace(/^\/+/, "")
+  // Only the historical public URL prefix may start with a slash. Validate
+  // both path dialects: Linux otherwise treats C:/... as an ordinary key.
+  const withoutPrefix = decoded.replace(/^\/?uploads\//, "")
+  if (
+    posix.isAbsolute(withoutPrefix) || win32.isAbsolute(withoutPrefix) ||
+    /^[a-z][a-z0-9+.-]*:/i.test(withoutPrefix)
+  ) {
+    throw new Error("存储路径不能是绝对路径或 URL")
+  }
   const segments = withoutPrefix.split("/")
   if (
     segments.length === 0 ||
-    segments.some((segment) => !segment || segment === "." || segment === "..")
+    // Colons also introduce Windows drive-relative paths and NTFS streams.
+    segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes(":"))
   ) {
     throw new Error("存储路径越界")
   }
