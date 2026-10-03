@@ -20,7 +20,6 @@ import { format, isAfter, isBefore, parseISO } from "date-fns"
 import { zhCN } from "date-fns/locale"
 import { LOCATIONS, LOGISTICS } from "@/lib/mock-data"
 import { useRepairContext } from "@/context/RepairContext"
-import { useRouter } from "next/navigation"
 import { useDeviceModels } from "@/hooks/use-device-models"
 import { useDeviceCheck, DeviceCheckResult } from "@/hooks/use-device-check"
 import { useAuth } from "@/context/auth-context"
@@ -28,6 +27,8 @@ import { FORM_LABELS, FORM_PLACEHOLDERS, FORM_ERRORS, TOAST_MESSAGES, INFO_MESSA
 import { UserRole, WarrantyStatus, FaultCategory, RepairAction, isPendingSNPlaceholder } from "@/lib/enums"
 import { normalizeImageUrl } from "@/lib/storage/image-url-utils"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
+import { applyDeviceCheckResult } from "@/lib/device-check-state"
+import { collectDevicePhotoUrls, requirePhotoSaveSuccess } from "@/lib/device-photo-save"
 
 interface RepairFormProps {
   taskId: string | null
@@ -67,7 +68,6 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
   // 使用 RepairContext 和路由
   const { addRepair } = useRepairContext();
   const { user } = useAuth();
-  const router = useRouter();
   const { toast } = useToast();
   
   // 设备信息状态
@@ -114,6 +114,14 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
   // 表单提交状态
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isSubmitted, setIsSubmitted] = useState(false) // 标记是否已成功提交
+  const expectedDeviceIds = useRef((initialData?.devices ?? []).map((device) => Number(device.id)).filter((id) => Number.isSafeInteger(id) && id > 0))
+  const uploadedPhotoUrls = useRef(new WeakMap<File, string>())
+  const [pendingPhotoSave, setPendingPhotoSave] = useState<{
+    batchId: string
+    deviceIds: number[]
+    devices: Array<{ deviceId: number; photos: string[]; files: File[] }>
+  } | null>(null)
+  const [photoSaveError, setPhotoSaveError] = useState("")
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
   const [isSnPendingVerify, setIsSnPendingVerify] = useState(false)
   
@@ -375,6 +383,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
 
   // 为每个设备添加序列号检索功能
   useEffect(() => {
+    const controller = new AbortController()
     deviceInputs.forEach((device) => {
       // 清除之前的定时器
       if (snCheckTimers.current[device.id]) {
@@ -401,13 +410,15 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
               : d
           ))
 
-          const res = await fetch(`/api/device/check?sn=${encodeURIComponent(device.serialNumber.trim())}`)
+          const requestedSn = device.serialNumber.trim()
+          const res = await fetch(`/api/device/check?sn=${encodeURIComponent(requestedSn)}`, { signal: controller.signal })
           if (!res.ok) {
             const json = await res.json().catch(() => ({}))
             throw new Error(json.message || "查询设备信息失败")
           }
 
           const json = await res.json()
+          if (controller.signal.aborted) return
           if (json.exists) {
             const deviceData = json.data as DeviceCheckResult
             
@@ -415,32 +426,28 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
             // 注意：不自动填充型号到三级下拉框
             // 原因：Device_Inventory存储的是内部型号，Product_Catalog是客户型号，两者不同
             // 用户必须手动从三级下拉框选择客户型号
-            const updatedDevice = { 
-              ...device, 
-              snValid: true, 
-              snData: deviceData, 
-              deviceName: deviceData.deviceName || device.deviceName,
-              materialCode: deviceData.materialCode || device.materialCode,
-              checkingSn: false 
-            }
-            
-            // 更新状态（不修改 category/subCategory/modelSelected）
-            setDeviceInputs(prev => prev.map(d => 
-              d.id === device.id ? updatedDevice : d
+            setDeviceInputs(prev => prev.map(d =>
+              d.id === device.id ? applyDeviceCheckResult(d, requestedSn, {
+                snValid: true, snData: deviceData,
+                deviceName: deviceData.deviceName || d.deviceName,
+                materialCode: deviceData.materialCode || d.materialCode,
+                checkingSn: false,
+              }) : d
             ))
           } else {
             setDeviceInputs(prev => prev.map(d => 
               d.id === device.id 
-                ? { ...d, snValid: false, snData: null, checkingSn: false }
+                ? applyDeviceCheckResult(d, requestedSn, { snValid: false, snData: null, checkingSn: false })
                 : d
             ))
           }
         } catch (err: unknown) {
+          if (controller.signal.aborted) return
           const errorMessage = err instanceof Error ? err.message : "设备校验失败"
           console.error(`设备 ${device.id} 序列号校验失败:`, err)
           setDeviceInputs(prev => prev.map(d => 
             d.id === device.id 
-              ? { ...d, snValid: false, snError: errorMessage, snData: null, checkingSn: false }
+              ? applyDeviceCheckResult(d, device.serialNumber.trim(), { snValid: false, snError: errorMessage, snData: null, checkingSn: false })
               : d
           ))
         }
@@ -449,6 +456,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
 
     // 清理函数
     return () => {
+      controller.abort()
       Object.values(snCheckTimers.current).forEach((timer) => {
         if (timer) clearTimeout(timer)
       })
@@ -768,6 +776,51 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
     return errors
   }
 
+  const uploadDevicePhoto = async (file: File): Promise<string> => {
+    const cached = uploadedPhotoUrls.current.get(file)
+    if (cached) return cached
+    const formData = new FormData()
+    formData.append("file", file)
+    formData.append("type", "device_photo")
+    const result = await requirePhotoSaveSuccess(await fetch("/api/upload", { method: "POST", body: formData, credentials: "include" }))
+    const data = result.data
+    if (!data || typeof data !== "object" || !("filePath" in data) || typeof data.filePath !== "string") {
+      throw new Error("照片上传未返回有效路径，请重试")
+    }
+    uploadedPhotoUrls.current.set(file, data.filePath)
+    return data.filePath
+  }
+
+  const saveCreatedPhotos = async (pending: NonNullable<typeof pendingPhotoSave>) => {
+    if (!pending.batchId || pending.deviceIds.length !== pending.devices.length || pending.deviceIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+      throw new Error("工单已创建，但设备标识不完整，请进入工单详情补传照片")
+    }
+    const devices = await Promise.all(pending.devices.map(async (device) => ({
+      deviceId: device.deviceId,
+      deviceImages: await collectDevicePhotoUrls(device.photos, device.files, uploadDevicePhoto),
+    })))
+    await requirePhotoSaveSuccess(await fetch("/api/tickets/batch-update/" + pending.batchId, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedDeviceIds: pending.deviceIds, devices }),
+    }))
+  }
+
+  const retryCreatedPhotos = async () => {
+    if (!pendingPhotoSave || isSubmitting) return
+    setIsSubmitting(true)
+    setPhotoSaveError("")
+    try {
+      await saveCreatedPhotos(pendingPhotoSave)
+      setPendingPhotoSave(null)
+      toast({ title: "照片已补充保存", description: "已更新原工单，没有重复创建" })
+      onBack()
+    } catch (error: unknown) {
+      setPhotoSaveError(error instanceof Error ? error.message : "照片保存失败，请重试")
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
   // 表单提交
   const handleSubmit = async () => {
     // 防止重复提交
@@ -799,56 +852,20 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       if (updateMode?.enabled && updateMode?.batchId) {
         // 先上传所有设备的照片文件（如果有）
         const devicesWithPhotos = await Promise.all(
-          deviceInputs.map(async (device, index) => {
-            let deviceImages: string[] | undefined = undefined
-
-            // 分离"既有服务器 URL"与"新 blob: URL"
-            const existingUrls = device.devicePhotos.filter(p => !p.startsWith("blob:"))
-            const newFiles    = device.devicePhotoFiles  // 与 blob: URL 一一对应
-
-            // 并发上传所有新文件
-            const uploadedUrls: string[] = []
-            if (newFiles.length > 0) {
-              const uploadResults = await Promise.all(
-                newFiles.map(async (file) => {
-                  try {
-                    const formData = new FormData()
-                    formData.append("file", file)
-                    formData.append("type", "device_photo")
-                    const res = await fetch("/api/upload", {
-                      method: "POST",
-                      body: formData,
-                      credentials: "include",
-                    })
-                    const json = await res.json()
-                    if (json.success && json.data?.filePath) return json.data.filePath as string
-                    console.warn("照片上传失败:", json.message)
-                    return null
-                  } catch (err) {
-                    console.error("上传照片时出错:", err)
-                    return null
-                  }
-                })
-              )
-              uploadedUrls.push(...uploadResults.filter((u): u is string => u !== null))
-            }
-
-            const merged = [...existingUrls, ...uploadedUrls]
-            if (merged.length > 0) {
-              deviceImages = merged
-            }
+          deviceInputs.map(async (device) => {
+            const deviceImages = await collectDevicePhotoUrls(device.devicePhotos, device.devicePhotoFiles, uploadDevicePhoto)
 
             return {
               deviceId: device.existingDeviceId,
               serialNumber: device.isSnPendingVerify ? "待验证" : device.serialNumber,
               modelName: device.modelSelected || "通用型号",
-              deviceName: device.deviceName || device.snData?.deviceName || "",
+              ...(user?.role !== UserRole.REPORTER && { deviceName: device.deviceName || device.snData?.deviceName || "" }),
               faultDescription: device.faultDescription,
-              materialCode: device.materialCode || device.snData?.materialCode || "",
+              ...(user?.role !== UserRole.REPORTER && { materialCode: device.materialCode || device.snData?.materialCode || "" }),
               category: device.category,
               subCategory: device.subCategory,
               quantity: device.deviceQuantity || 1,
-              ...(deviceImages !== undefined && { deviceImages }), // 只在有照片时才包含此字段
+              deviceImages, // [] explicitly clears the final removed photo
             }
           })
         )
@@ -862,12 +879,16 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
           expressCompany: expressCompany.trim(),
           category: deviceInputs[0]?.category || "",
           subCategory: deviceInputs[0]?.subCategory || "",
+          expectedDeviceIds: expectedDeviceIds.current,
+          deletedDeviceIds: expectedDeviceIds.current.filter((id) => !deviceInputs.some((device) => device.existingDeviceId === id)),
           devices: devicesWithPhotos,
           // 维修工作台 3W1H 新字段（按批次维度保存）；故障分类已从 UI 移除，传空避免 API 校验异常
-          warrantyStatusOverride: warrantyStatusOverride ?? null,
-          faultCategory: faultCategory ?? null,
-          repairAction: repairAction ?? null,
-          repairNotes: repairNotes.trim() || null,
+          ...(userType === "technician" && {
+            warrantyStatusOverride: warrantyStatusOverride ?? null,
+            faultCategory: faultCategory ?? null,
+            repairAction: repairAction ?? null,
+            repairNotes: repairNotes.trim() || null,
+          }),
         }
 
         const response = await fetch(`/api/tickets/batch-update/${updateMode.batchId}`, {
@@ -1008,70 +1029,24 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       const successCount = result.data?.count || devicesToSubmit.length
       const batchId = result.data?.batchId || ""
 
-      // 上传设备照片并写入 DB（创建模式中照片独立处理）
-      if (batchId) {
-        const devicesWithPhotosForCreate = await Promise.all(
-          deviceInputs.map(async (device) => {
-            let deviceImages: string[] | undefined = undefined
-            if (device.devicePhotoFiles.length > 0) {
-              try {
-                const uploadedUrls = await Promise.all(
-                  device.devicePhotoFiles.map(async (file) => {
-                    const photoFormData = new FormData()
-                    photoFormData.append("file", file)
-                    photoFormData.append("type", "device_photo")
-                    const uploadResponse = await fetch("/api/upload", {
-                      method: "POST",
-                      body: photoFormData,
-                      credentials: "include",
-                    })
-                    const uploadResult = await uploadResponse.json()
-                    if (uploadResult.success && uploadResult.data?.filePath) {
-                      return uploadResult.data.filePath as string
-                    }
-                    return null
-                  })
-                )
-                const valid = uploadedUrls.filter((u): u is string => u !== null)
-                if (valid.length > 0) deviceImages = valid
-              } catch (uploadError) {
-                console.error("创建模式：上传设备照片失败:", uploadError)
-              }
-            }
-            return {
-              serialNumber: device.isSnPendingVerify ? "待验证" : device.serialNumber,
-              modelName: device.modelSelected || "通用型号",
-              deviceName: device.deviceName || device.snData?.deviceName || "",
-              faultDescription: device.faultDescription,
-              materialCode: device.materialCode || device.snData?.materialCode || "",
-              category: device.category,
-              subCategory: device.subCategory,
-              quantity: device.deviceQuantity || 1,
-              ...(deviceImages !== undefined && { deviceImages }),
-            }
-          })
-        )
-        const hasAnyPhotos = devicesWithPhotosForCreate.some((d) => d.deviceImages)
-        if (hasAnyPhotos) {
-          try {
-            await fetch(`/api/tickets/batch-update/${batchId}`, {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                senderAddress: senderAddress.trim(),
-                projectName: customerName.trim(),
-                contactInfo: `${contactPerson.trim()} ${contactPhone.trim()}`,
-                projectLocation: projectLocation.trim(),
-                trackingNumber: trackingNumber.trim(),
-                expressCompany: expressCompany.trim(),
-                category: deviceInputs[0]?.category || "",
-                subCategory: deviceInputs[0]?.subCategory || "",
-                devices: devicesWithPhotosForCreate,
-              }),
-            })
-          } catch (photoUpdateError) {
-            console.error("创建模式：写入照片到工单失败:", photoUpdateError)
-          }
+      setIsSubmitted(true)
+      if (deviceInputs.some((device) => device.devicePhotoFiles.length > 0)) {
+        const deviceIds = Array.isArray(result.data?.ticketIds)
+          ? result.data.ticketIds.map((id: unknown) => Number(id)) as number[]
+          : []
+        const pending = {
+          batchId,
+          deviceIds,
+          devices: deviceInputs.map((device, index) => ({ deviceId: deviceIds[index], photos: [...device.devicePhotos], files: [...device.devicePhotoFiles] })),
+        }
+        setPendingPhotoSave(pending)
+        try {
+          await saveCreatedPhotos(pending)
+          setPendingPhotoSave(null)
+        } catch (error: unknown) {
+          setPhotoSaveError(error instanceof Error ? error.message : "照片保存失败，请重试")
+          setIsSubmitting(false)
+          return
         }
       }
 
@@ -1123,11 +1098,7 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
       
       // 用户确认后跳转（使用 setTimeout 确保状态更新后再跳转）
       setTimeout(() => {
-        if (user?.role === UserRole.REPORTER) {
-          router.replace("/report")
-        } else {
-          router.replace("/")
-        }
+        onBack()
       }, 100)
     } catch (error: unknown) {
       const normalizedError = error instanceof Error ? error : new Error("提交失败，请稍后重试！")
@@ -1169,6 +1140,14 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
 
   return (
     <div className="min-h-screen bg-background">
+      {pendingPhotoSave && (
+        <div role="alert" className="m-4 rounded-lg border border-amber-400 bg-amber-50 p-4 space-y-3 text-amber-950">
+          <p className="font-semibold">工单 {pendingPhotoSave.batchId} 已创建，照片尚未保存完成</p>
+          <p>{photoSaveError || "正在保存照片，请保留当前页面"}</p>
+          <p className="text-sm">重试只补充原工单照片，不会重复创建工单。</p>
+          <Button disabled={isSubmitting} onClick={() => void retryCreatedPhotos()}>{isSubmitting ? "保存中…" : "重试保存照片"}</Button>
+        </div>
+      )}
       {/* 在库警告弹窗 */}
       <Dialog open={showInStockWarning} onOpenChange={setShowInStockWarning}>
         <DialogContent>
@@ -1192,6 +1171,11 @@ export default function RepairForm({ taskId, onBack, userType = "reporter", upda
         </DialogContent>
       </Dialog>
 
+      {updateMode?.enabled && (
+        <div className="m-4 rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
+          已签字的报告、客户信息和设备信息不能修改；物流单号及快递公司仍可按流程更正。
+        </div>
+      )}
       {/* Header */}
       <div className="sticky top-0 bg-card border-b border-border z-10">
         <div className="flex items-center gap-3 p-4 md:p-6">

@@ -105,6 +105,7 @@ export function RepairProvider({ children }: { children: ReactNode }) {
         // 401 表示用户未登录，属于预期行为，静默处理即可
         if (response.status === 401) {
           setRepairs([]);
+          setError("登录已失效，请重新登录后重试");
           return;
         }
         const errorMessage = result?.message || result?.error || `获取工单列表失败 (HTTP ${response.status})`;
@@ -169,6 +170,7 @@ export function RepairProvider({ children }: { children: ReactNode }) {
                 : 0,
               deviceName: ticket.deviceName || ticket.deviceModel || "",
               deviceModel: ticket.deviceModel || "",
+              quantity: Number(ticket.quantity) > 0 ? Number(ticket.quantity) : 1,
               problem: ticket.problem || "",
               status: mappedStatus,
               priority: "medium" as const,
@@ -204,8 +206,7 @@ export function RepairProvider({ children }: { children: ReactNode }) {
       console.error('加载工单失败:', err);
       const errorMessage = err?.message || '加载工单失败，请检查网络连接或联系管理员';
       setError(errorMessage);
-      // 即使失败也设置为空数组，避免显示旧数据
-      setRepairs([]);
+      // Preserve the last successful data; consumers display an explicit error and retry action.
     } finally {
       setLoading(false);
     }

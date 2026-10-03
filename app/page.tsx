@@ -84,7 +84,9 @@ function HomeContent() {
       // 保存批次上下文（如果有）
       setBatchContext(batchCtx || null);
     }
+    // Switch first; selecting a task afterwards preserves the detail target.
     handleTabChange("repair");
+    setSelectedTaskId(taskId === "all" ? null : taskId);
   }
 
   const handleBackToDashboard = async () => {

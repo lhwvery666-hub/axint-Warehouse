@@ -2,6 +2,8 @@ import { NextResponse } from "next/server"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 import { getDbConnection } from "@/lib/db-config"
 import { UserRole } from "@/lib/enums"
+import * as sql from "mssql"
+import { canReadTicketBatch, type TicketOwner } from "@/lib/ticket-access"
 
 const MESSAGE_ROLES: UserRole[] = [
   UserRole.ADMIN,
@@ -28,7 +30,7 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url)
     const ticketId = searchParams.get("ticketId")?.trim()
 
-    if (!ticketId) {
+    if (!ticketId || ticketId.length > 50) {
       return NextResponse.json(
         { success: false, message: "缺少工单号参数" },
         { status: 400 }
@@ -36,6 +38,11 @@ export async function GET(request: Request) {
     }
 
     const pool = await getDbConnection()
+    const owners = await pool.request().input("batchId", sql.NVarChar(50), ticketId)
+      .query<TicketOwner>("SELECT [ReportByUserID] FROM [Repair_Tickets] WHERE [BatchId] = @batchId")
+    if (!canReadTicketBatch(authResult, owners.recordset)) {
+      return NextResponse.json({ success: false, message: "工单不存在或无权访问" }, { status: 404 })
+    }
     const result = await pool
       .request()
       .input("ticketId", ticketId)
@@ -75,11 +82,15 @@ export async function POST(request: Request) {
   if (isErrorResponse(authResult)) return authResult
 
   try {
-    const body = (await request.json()) as MessageRequestBody
+    const value: unknown = await request.json().catch(() => null)
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return NextResponse.json({ success: false, message: "消息参数无效" }, { status: 400 })
+    }
+    const body = value as MessageRequestBody
     const ticketId = typeof body.ticketId === "string" ? body.ticketId.trim() : ""
     const content = typeof body.content === "string" ? body.content.trim() : ""
 
-    if (!ticketId || !content) {
+    if (!ticketId || ticketId.length > 50 || !content || content.length > 10000) {
       return NextResponse.json(
         { success: false, message: "工单号和消息内容不能为空" },
         { status: 400 }
@@ -88,6 +99,11 @@ export async function POST(request: Request) {
 
     const senderName = authResult.realName || authResult.username
     const pool = await getDbConnection()
+    const owners = await pool.request().input("batchId", sql.NVarChar(50), ticketId)
+      .query<TicketOwner>("SELECT [ReportByUserID] FROM [Repair_Tickets] WHERE [BatchId] = @batchId")
+    if (!canReadTicketBatch(authResult, owners.recordset)) {
+      return NextResponse.json({ success: false, message: "工单不存在或无权访问" }, { status: 404 })
+    }
     const result = await pool
       .request()
       .input("ticketId", ticketId)

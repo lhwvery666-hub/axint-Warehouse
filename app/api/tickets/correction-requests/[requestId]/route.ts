@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client"
 import { z } from "zod"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
 import { prisma } from "@/lib/prisma"
+import { isSignedRepairReport } from "@/lib/repair-report-policy"
 import { TicketStatus, UserRole, normalizeTicketStatus } from "@/lib/enums"
 import {
   CORRECTION_ACTION,
@@ -12,6 +13,7 @@ import {
   type CorrectionRequestPayload,
   correctionHistoryKey,
   correctionValueEquals,
+  correctionAffectsSignedReport,
   getCorrectionRollbackTarget,
 } from "@/lib/ticket-correction"
 
@@ -144,6 +146,11 @@ export async function PATCH(
       })
       if (rows.length === 0) throw new Error("BATCH_NOT_FOUND")
 
+      // Serializable isolation keeps the signature decision and writes on the same snapshot.
+      if (rows.some(isSignedRepairReport) && (
+        correctionAffectsSignedReport(payload.changes) || payload.impact !== CORRECTION_IMPACT.NONE
+      )) throw new Error("SIGNED_REPORT_LOCKED")
+
       const rowRecords = new Map(rows.map((row) => [row.id, row as unknown as Record<string, unknown>]))
       for (const change of payload.changes) {
         const row = change.scope === "device"
@@ -256,6 +263,9 @@ export async function PATCH(
     const code = error instanceof Error ? error.message : ""
     if (code === "CORRECTION_NOT_FOUND") {
       return NextResponse.json({ success: false, message: "修改申请不存在" }, { status: 404 })
+    }
+    if (code === "SIGNED_REPORT_LOCKED") {
+      return NextResponse.json({ success: false, message: "报告已签字，不能批准会修改报告或清除签字的更正；仅可更正物流信息" }, { status: 409 })
     }
     if (code === "CORRECTION_DECIDED") {
       return NextResponse.json({ success: false, message: "该修改申请已经处理，请刷新页面" }, { status: 409 })

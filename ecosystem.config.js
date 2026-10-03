@@ -18,6 +18,7 @@
  */
 
 const { loadEnvConfig } = require('@next/env');
+const path = require('node:path');
 
 loadEnvConfig(__dirname);
 
@@ -39,6 +40,7 @@ module.exports = {
 
       // standalone 模式下直接运行 server.js，比 next start 启动更快、内存更小
       script: '.next/standalone/server.js',
+      cwd: __dirname,
 
       // ── 运行模式 ─────────────────────────────────────────────────────────────
       // 'cluster' 模式会启动多个进程，利用多核 CPU，提高并发能力
@@ -85,7 +87,9 @@ module.exports = {
         // ── 文件存储 ───────────────────────────────────────────────────────
         // 本地存储（文件保存在服务器磁盘）
         STORAGE_MODE: process.env.STORAGE_MODE || 'local',
-        UPLOAD_DIR:   process.env.UPLOAD_DIR || '',  // 留空则默认用 ./public/uploads
+        AUTH_SESSION_SECRET: process.env.AUTH_SESSION_SECRET,
+        COOKIE_SECURE: process.env.COOKIE_SECURE || 'false',
+        UPLOAD_DIR:   path.resolve(__dirname, process.env.UPLOAD_DIR || 'uploads'), // 独立持久目录
 
         // 如果改用 MinIO / S3，取消下面的注释并填写真实值：
         // STORAGE_MODE:        's3',

@@ -81,15 +81,20 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
   const [batchInfo, setBatchInfo] = useState<BatchInfo | null>(null)
   const [devices, setDevices] = useState<Device[]>([])
   const [operationLogs, setOperationLogs] = useState<OperationLog[]>([])
-  const [shippingType, setShippingType] = useState<"return" | "stock">("return")
+  const [stockQuantities, setStockQuantities] = useState<Record<string, number>>({})
+  const [fixedStockQuantities, setFixedStockQuantities] = useState<Record<string, number>>({})
   const [returnDate, setReturnDate] = useState<Date | null>(null)
   const [returnTrackingNum, setReturnTrackingNum] = useState("")
-  const [returnQuantity, setReturnQuantity] = useState("")
+
   const [hasUnsavedShippingChanges, setHasUnsavedShippingChanges] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isSavingDates, setIsSavingDates] = useState(false)
   const [manufactureDates, setManufactureDates] = useState<Record<string, Date | null>>({})
   const totalDeviceQuantity = batchInfo?.deviceCount ?? sumDeviceQuantity(devices)
+  const stockDeviceQuantity = devices.reduce((sum, device) => sum + (stockQuantities[device.id] ?? 0), 0)
+  const returnDeviceQuantity = totalDeviceQuantity - stockDeviceQuantity
+  const returnQuantity = String(returnDeviceQuantity)
+  const shippingType: "return" | "stock" = returnDeviceQuantity > 0 ? "return" : "stock"
 
   // ── 返厂快递信息 ──────────────────────────────────────────────────────────────
   const [factoryTrackingInput, setFactoryTrackingInput] = useState("")
@@ -121,7 +126,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
 
       setBatchInfo(result.data.batchInfo)
       setDevices(result.data.devices)
-      setReturnQuantity(result.data.batchInfo.deviceCount.toString())
+
       setFactoryTrackingInput(result.data.batchInfo.factoryTrackingNum || "")
       
       // 初始化出厂日期
@@ -143,15 +148,20 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
       const response = await fetch(`/api/tickets/shipping-info/${batchId}`)
       const result = await response.json()
 
-      if (response.ok && result.success && result.data) {
-        if (result.data.shippingType) setShippingType(result.data.shippingType)
+      if (!response.ok || !result.success || !result.data) throw new Error(result.message || "发货信息加载失败")
+      if (result.data) {
+        if (Array.isArray(result.data.allocations)) {
+          setStockQuantities(Object.fromEntries(result.data.allocations.map((item: { deviceId: number; stockQuantity: number }) => [String(item.deviceId), item.stockQuantity])))
+          setFixedStockQuantities(Object.fromEntries(result.data.allocations.filter((item: { stockQuantityLocked: boolean }) => item.stockQuantityLocked).map((item: { deviceId: number; stockQuantity: number }) => [String(item.deviceId), item.stockQuantity])))
+        }
         if (result.data.returnDate) setReturnDate(new Date(result.data.returnDate))
         if (result.data.returnTrackingNum) setReturnTrackingNum(result.data.returnTrackingNum)
-        if (result.data.returnQuantity) setReturnQuantity(result.data.returnQuantity.toString())
+
         setHasUnsavedShippingChanges(false)
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("获取发货信息失败:", err)
+      setError(err instanceof Error ? err.message : "发货信息加载失败，请重试")
     }
   }
 
@@ -290,7 +300,8 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
           shippingType,
           returnDate: returnDate?.toISOString(),
           returnTrackingNum: returnTrackingNum.trim(),
-          returnQuantity: parseInt(returnQuantity) || totalDeviceQuantity
+          returnQuantity: returnDeviceQuantity,
+          allocations: devices.map(device => ({ deviceId: Number(device.id), stockQuantity: stockQuantities[device.id] ?? 0 }))
         })
       })
 
@@ -332,7 +343,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
       if (result.success) {
         toast.success(
           shippingType === "return"
-            ? `批次设备已发回客户，共 ${totalDeviceQuantity} 台`
+            ? `已一次发回客户 ${returnDeviceQuantity} 台，入库 ${stockDeviceQuantity} 台`
             : `批次设备已入库，共 ${totalDeviceQuantity} 台`
         )
         if (onCompleted) {
@@ -367,6 +378,9 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
       <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
         <AlertCircle className="w-12 h-12 text-destructive" />
         <p className="text-destructive font-medium">{error || "加载失败"}</p>
+        <Button onClick={() => { setError(null); void Promise.all([fetchBatchData(), fetchShippingInfo(), fetchOperationLogs()]) }}>
+          重新加载
+        </Button>
         <Button onClick={onBack} variant="outline">
           <ArrowLeft className="w-4 h-4 mr-2" />
           返回
@@ -841,7 +855,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
           <RadioGroup
             value={shippingType}
             onValueChange={(value) => {
-              setShippingType(value as "return" | "stock")
+              setStockQuantities(Object.fromEntries(devices.map(device => [device.id, fixedStockQuantities[device.id] ?? (value === "stock" ? (device.quantity ?? 1) : 0)])))
               setHasUnsavedShippingChanges(true)
             }}
             disabled={!isEditShippingMode && !isShippingStage}
@@ -850,7 +864,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
               <RadioGroupItem
                 value="return"
                 id="return"
-                disabled={!isEditShippingMode && !isShippingStage}
+                disabled={!isShippingStage}
               />
               <Label htmlFor="return" className="flex-1 cursor-pointer">
                 <div className="flex items-center gap-2">
@@ -866,7 +880,7 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
               <RadioGroupItem
                 value="stock"
                 id="stock"
-                disabled={!isEditShippingMode && !isShippingStage}
+                disabled={!isShippingStage}
               />
               <Label htmlFor="stock" className="flex-1 cursor-pointer">
                 <div className="flex items-center gap-2">
@@ -879,6 +893,24 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
               </Label>
             </div>
           </RadioGroup>
+
+          <div className="rounded-lg border p-4 space-y-3">
+            <p className="font-medium">设备去向：入库 {stockDeviceQuantity} 台，统一发回 {returnDeviceQuantity} 台</p>
+            <p className="text-sm text-muted-foreground">逐项填写留在仓库的数量，其余设备将在本次全部发回。已确认入库、不回寄或无需维修退回的设备按其最终去向锁定数量。</p>
+            {devices.map(device => (
+              <div key={device.id} className="flex items-center gap-3">
+                <Label htmlFor={`stock-${device.id}`} className="flex-1">{device.deviceSerialNumber || device.modelName}（共 {device.quantity ?? 1} 台）</Label>
+                <span className="text-sm">入库</span>
+                <Input id={`stock-${device.id}`} className="w-24" type="number" min={0} max={device.quantity ?? 1}
+                  value={stockQuantities[device.id] ?? 0} disabled={!isShippingStage || fixedStockQuantities[device.id] !== undefined}
+                  onChange={event => {
+                    setStockQuantities(previous => ({ ...previous, [device.id]: Number(event.target.value) }))
+                    setHasUnsavedShippingChanges(true)
+                  }} />
+                <span className="text-sm">台；发回 {(device.quantity ?? 1) - (stockQuantities[device.id] ?? 0)} 台</span>
+              </div>
+            ))}
+          </div>
 
           {/* 发回客户的详细信息 */}
           {shippingType === "return" && (
@@ -926,17 +958,14 @@ export default function WarehouseBatchShipping({ batchId, onBack, onCompleted, a
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="returnQuantity">发货数量 *</Label>
+                  <Label htmlFor="returnQuantity">本次一次发回数量（自动计算）</Label>
                   <Input
                     id="returnQuantity"
                     type="number"
                     min="1"
                     max={totalDeviceQuantity}
                     value={returnQuantity}
-                    onChange={(e) => {
-                      setReturnQuantity(e.target.value)
-                      setHasUnsavedShippingChanges(true)
-                    }}
+                    readOnly
                     placeholder="请输入发货数量"
                     disabled={!isEditShippingMode && !isShippingStage}
                   />

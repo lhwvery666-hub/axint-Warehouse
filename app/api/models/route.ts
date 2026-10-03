@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
 import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { UserRole } from "@/lib/enums"
 
 // GET /api/models
 // 从 SQL Server 的 Product_Catalog 表获取设备型号列表（支持分类，用于三级联动）
@@ -19,27 +20,32 @@ export async function GET() {
         { subCategory: 'asc' },
         { modelName: 'asc' },
       ],
+      select: {
+        productId: true, modelCode: true, modelName: true, category: true,
+        subCategory: true, specification: true, description: true, manufacturer: true,
+      },
     })
 
     // 映射到前端需要的字段格式
     const models = products.map((product) => ({
       id: product.productId,
-      code: product.modelCode,
       name: product.modelName,
       category: product.category,
       subCategory: product.subCategory,
-      fullSpec: product.specification || product.description,
-      manufacturer: product.manufacturer,
+      ...(authResult.normalizedRole !== UserRole.REPORTER ? {
+        code: product.modelCode,
+        fullSpec: product.specification || product.description,
+        manufacturer: product.manufacturer,
+      } : {}),
     }))
 
     return NextResponse.json({ success: true, data: models })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("获取设备型号列表失败:", error)
     return NextResponse.json(
       {
         success: false,
         message: "获取设备型号列表失败",
-        error: error?.message || "未知错误",
       },
       { status: 500 }
     )

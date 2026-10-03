@@ -5,6 +5,8 @@ import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
 import { z } from "zod"
 import { sumDeviceQuantity } from "@/lib/device-quantity"
+import { preserveBatchDeviceFields } from "@/lib/batch-device-fields"
+import { isSignedRepairReport } from "@/lib/repair-report-policy"
 import {
   BatchDeviceReconciliationError,
   planBatchDeviceReconciliation,
@@ -48,6 +50,8 @@ const batchUpdateSchema = z.object({
   faultCategory: z.string().trim().max(50).nullable().optional(),
   repairAction: z.string().trim().max(50).nullable().optional(),
   repairNotes: z.string().trim().max(10000).nullable().optional(),
+  expectedDeviceIds: z.array(z.number().int().positive()).min(1).max(500),
+  deletedDeviceIds: z.array(z.number().int().positive()).max(500).default([]),
   devices: z.array(batchDeviceSchema).min(1).max(500),
 }).strict()
 
@@ -140,6 +144,7 @@ function buildDeviceUpdateFields(
   userRole: string,
   body: Record<string, unknown>
 ): DeviceUpdateResult {
+  device = preserveBatchDeviceFields(device, existing)
   const changedLabels: string[] = []
 
   const newSn    = (device.serialNumber as string) || SPECIAL_VALUES.PENDING_VERIFY
@@ -287,7 +292,7 @@ export async function PUT(
     if (!parsedBody.success) {
       return NextResponse.json({ success: false, message: "请求参数无效" }, { status: 400 })
     }
-    const body: Record<string, unknown> = parsedBody.data
+    const body = parsedBody.data
     const {
       senderAddress,
       projectName,
@@ -335,7 +340,8 @@ export async function PUT(
           ${Prisma.raw(DB_FIELDS.TRACKING_NUMBER_IN)},
           ${Prisma.raw(DB_FIELDS.COURIER_COMPANY)},
           ${Prisma.raw(DB_FIELDS.CATEGORY)},
-          ${Prisma.raw(DB_FIELDS.SUB_CATEGORY)}
+          ${Prisma.raw(DB_FIELDS.SUB_CATEGORY)},
+          [SignedReportPhoto], [ReporterConfirmedAt]
         FROM Repair_Tickets WITH (UPDLOCK, HOLDLOCK)
         WHERE ${Prisma.raw(DB_FIELDS.BATCH_ID)} = ${batchId}
       `) as Record<string, unknown>[]
@@ -470,6 +476,14 @@ export async function PUT(
         }
       }
 
+      const reconciliationPlan = planBatchDeviceReconciliation(
+        existingDeviceIds,
+        devices.map((device) => ({
+          deviceId: typeof device.deviceId === "number" ? device.deviceId : undefined,
+        })),
+        { expectedDeviceIds: body.expectedDeviceIds, deletedDeviceIds: body.deletedDeviceIds },
+      )
+
       // 3. 更新批次基础信息（所有设备共享）
       // 收集批次级别真实变更摘要（空值归一化后对比新旧值）
       const batchChangedLabels: string[] = []
@@ -489,34 +503,43 @@ export async function PUT(
         batchChangedLabels.push("设备子类别")
       }
 
-      for (const deviceId of existingDeviceIds) {
-        await tx.$executeRaw(Prisma.sql`
-          UPDATE Repair_Tickets
-          SET
-            ${Prisma.raw(DB_FIELDS.SENDER_ADDRESS)}     = ${senderAddress    || null},
-            ${Prisma.raw(DB_FIELDS.PROJECT_NAME)}       = ${projectName      || null},
-            ${Prisma.raw(DB_FIELDS.CONTACT_INFO)}       = ${contactInfo      || null},
-            ${Prisma.raw(DB_FIELDS.PROJECT_LOCATION)}   = ${projectLocation  || null},
-            ${Prisma.raw(DB_FIELDS.TRACKING_NUMBER_IN)} = ${trackingNumber   || null},
-            ${Prisma.raw(DB_FIELDS.COURIER_COMPANY)}    = ${expressCompany   || null},
-            ${Prisma.raw(DB_FIELDS.CATEGORY)}           = ${hasPerDeviceClassification ? Prisma.raw(DB_FIELDS.CATEGORY) : (category || null)},
-            ${Prisma.raw(DB_FIELDS.SUB_CATEGORY)}       = ${hasPerDeviceClassification ? Prisma.raw(DB_FIELDS.SUB_CATEGORY) : (subCategory || null)},
-            ${Prisma.raw(DB_FIELDS.UPDATED_AT)}         = GETUTCDATE()
-          WHERE ${Prisma.raw(DB_FIELDS.ID)} = ${deviceId}
-        `)
+      // A saved signature protects report identity/content/amounts, not independent logistics or photos.
+      if (batchCheckResult.some(isSignedRepairReport)) {
+        const reportChanged = batchChangedLabels.some((label) => !["物流单号", "快递公司"].includes(label)) ||
+          reconciliationPlan.deletes.length > 0 || reconciliationPlan.inserts.length > 0 ||
+          reconciliationPlan.updates.some(({ submittedIndex, deviceId }) => {
+            const existing = existingDeviceMap.get(deviceId)
+            return !existing || buildDeviceUpdateFields(devices[submittedIndex], existing, user.role, body)
+              .changedLabels.some((label) => !["设备照片", "损坏照片"].includes(label))
+          })
+        if (reportChanged) throw new Error("SIGNED_REPORT_LOCKED")
       }
 
-      // 4. 按稳定设备 ID 处理修改/新增/删除；刚创建后的照片同步保留顺序兼容。
-      const deviceCount = sumDeviceQuantity(
-        devices.map((device) => ({ quantity: Number(device.quantity) || 1 }))
-      )
+      // Only submitted batch fields are changed; photo-only retries must not clear customer data.
+      const batchData: Prisma.Repair_TicketsUncheckedUpdateManyInput = {}
+      if (senderAddress !== undefined) batchData.senderAddress = senderAddress || null
+      if (projectName !== undefined) batchData.ProjectName = projectName || null
+      if (contactInfo !== undefined) batchData.contactInfo = contactInfo || null
+      if (projectLocation !== undefined) batchData.projectLocation = projectLocation || null
+      if (trackingNumber !== undefined) batchData.trackingNumberIn = trackingNumber || null
+      if (expressCompany !== undefined) batchData.CourierCompany = expressCompany || null
+      if (!hasPerDeviceClassification && category !== undefined) batchData.Category = category || null
+      if (!hasPerDeviceClassification && subCategory !== undefined) batchData.SubCategory = subCategory || null
+      if (Object.keys(batchData).length > 0) {
+        await tx.repair_Tickets.updateMany({ where: { batchId }, data: batchData })
+      }
+
+      // 4. 使用稳定 ID；删除必须显式提交，成员快照已在任何写入前校验。
+      const removedIds = new Set(reconciliationPlan.deletes)
+      const deviceCount = sumDeviceQuantity([
+        ...existingDeviceIds.filter((id) => !removedIds.has(id)).map((id) => {
+          const submitted = devices.find((device) => device.deviceId === id)
+          return { quantity: Number(submitted?.quantity ?? existingDeviceMap.get(id)?.quantity) || 1 }
+        }),
+        ...reconciliationPlan.inserts.map((index) => ({ quantity: Number(devices[index].quantity) || 1 })),
+      ])
       const allDeviceChangeSummaries: string[] = []
-      const reconciliationPlan = planBatchDeviceReconciliation(
-        existingDeviceIds,
-        devices.map((device) => ({
-          deviceId: typeof device.deviceId === "number" ? device.deviceId : undefined,
-        })),
-      )
+
 
       /** 执行单台已有设备的参数化 UPDATE。 */
       const processExistingDevice = async (device: Record<string, unknown>, deviceId: number) => {
@@ -633,6 +656,9 @@ export async function PUT(
       )
     }
 
+    if (errorMessage === "SIGNED_REPORT_LOCKED") {
+      return NextResponse.json({ success: false, message: "报告已签字，设备身份、数量、报告内容和金额不可修改" }, { status: 409 })
+    }
     if (errorMessage === "批次不存在") {
       return NextResponse.json({ success: false, message: errorMessage }, { status: 404 })
     }

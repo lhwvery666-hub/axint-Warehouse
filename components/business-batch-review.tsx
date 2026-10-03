@@ -91,6 +91,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
   const [isInvoiced, setIsInvoiced] = useState(false)
   const [totalCost, setTotalCost] = useState("")
   const [clientName, setClientName] = useState("")
+  const [reportLocked, setReportLocked] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [hasUnsavedBusinessChanges, setHasUnsavedBusinessChanges] = useState(false)
   // 根据工单状态自动判断是否为编辑模式
@@ -151,8 +152,9 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
         setIsChargeable(result.data.isChargeable || false)
         setIsPaymentReceived(result.data.isPaymentReceived || false)
         setIsInvoiced(result.data.isInvoiced || false)
-        setTotalCost(result.data.totalCost ? result.data.totalCost.toString() : "")
+        setTotalCost(String(result.data.totalCost ?? 0))
         setClientName(result.data.clientName || "")
+        setReportLocked(Boolean(result.data.reportLocked))
         setHasUnsavedBusinessChanges(false)
         
         // 检测是否已有商务信息（判断是首次审核还是重新编辑）
@@ -233,8 +235,8 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
           isChargeable,
           isPaymentReceived,
           isInvoiced,
-          totalCost: totalCost ? parseFloat(totalCost) : null,
-          clientName: clientName.trim() || null
+
+          ...(!reportLocked ? { clientName: clientName.trim() || null } : {})
         })
       })
 
@@ -443,16 +445,12 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
           <div className="flex items-center justify-between p-4 bg-muted/30 rounded-lg">
             <div>
               <Label htmlFor="isChargeable" className="text-base font-medium">是否需要收费</Label>
-              <p className="text-sm text-muted-foreground mt-1">过保维修或需更换配件的设备需要收费</p>
+              <p className="text-sm text-muted-foreground mt-1">收费状态由每台设备费用自动合计判定</p>
             </div>
             <Switch
               id="isChargeable"
               checked={isChargeable}
-              onCheckedChange={(checked) => {
-                setIsChargeable(checked)
-                setHasUnsavedBusinessChanges(true)
-              }}
-              disabled={!isEditMode}
+              disabled
             />
           </div>
 
@@ -460,16 +458,13 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
           {isChargeable && (
             <div className="space-y-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <div className="space-y-2">
-                <Label htmlFor="totalCost">维修总费用 (元) *</Label>
+                <Label htmlFor="totalCost">维修费用合计 (元，自动计算)</Label>
                 <Input
                   id="totalCost"
                   type="number"
                   value={totalCost}
-                  onChange={(e) => {
-                    setTotalCost(e.target.value)
-                    setHasUnsavedBusinessChanges(true)
-                  }}
-                  placeholder="请输入维修总费用"
+                  readOnly
+                  aria-label="各设备维修费用合计"
                   className="font-mono"
                   disabled={!isEditMode}
                 />
@@ -485,7 +480,7 @@ export default function BusinessBatchReview({ batchId, onBack, onCompleted, allo
                     setHasUnsavedBusinessChanges(true)
                   }}
                   placeholder="请输入客户名称"
-                  disabled={!isEditMode}
+                  disabled={!isEditMode || reportLocked}
                 />
               </div>
 

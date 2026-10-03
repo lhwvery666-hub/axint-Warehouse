@@ -3,7 +3,7 @@ import { cookies } from "next/headers"
 import { getDbConnection } from "@/lib/db-config"
 import { UserRole, normalizeUserRole } from "@/lib/enums"
 import { getUserQueryConfig } from "@/lib/field-checks"
-import { verifySessionToken } from "@/lib/session"
+import { getSessionUserId, verifySessionToken } from "@/lib/session"
 
 export const ALL_USER_ROLES: readonly UserRole[] = [
   UserRole.ADMIN,
@@ -30,6 +30,7 @@ interface UserRow {
   Username: string | null
   Role: string | null
   RealName: string | null
+  Password: string
 }
 
 /**
@@ -40,7 +41,8 @@ export async function getCurrentUserRole(): Promise<CurrentUser | null> {
   try {
     const cookieStore = await cookies()
     const userIdCookie = cookieStore.get("userId")?.value
-    const sessionUserId = verifySessionToken(cookieStore.get("session")?.value)
+    const sessionToken = cookieStore.get("session")?.value
+    const sessionUserId = getSessionUserId(sessionToken)
 
     if (
       !sessionUserId ||
@@ -57,6 +59,7 @@ export async function getCurrentUserRole(): Promise<CurrentUser | null> {
       "Username",
       "Role",
       "RealName",
+      "Password",
     ])
     const userResult = await pool
       .request()
@@ -73,6 +76,7 @@ export async function getCurrentUserRole(): Promise<CurrentUser | null> {
     }
 
     const user = userResult.recordset[0] as UserRow
+    if (verifySessionToken(sessionToken, user.Password) !== sessionUserId) return null
     const userRole = user.Role || ""
 
     return {

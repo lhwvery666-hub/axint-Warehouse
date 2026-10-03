@@ -11,7 +11,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Stage 1: 安装依赖 ─────────────────────────────────────────────────────────
-FROM node:20-alpine AS deps
+FROM node:24-alpine AS deps
 
 # 安装 libc 兼容层（某些 npm 包需要）
 RUN apk add --no-cache libc6-compat
@@ -40,7 +40,7 @@ RUN \
 
 
 # ── Stage 2: 构建 Next.js ─────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 
@@ -69,7 +69,7 @@ RUN \
 
 
 # ── Stage 3: 最终运行镜像 ──────────────────────────────────────────────────────
-FROM node:20-alpine AS runner
+FROM node:24-alpine AS runner
 
 WORKDIR /app
 
@@ -90,7 +90,9 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
 # 创建上传目录并赋权（本地存储模式使用）
-RUN mkdir -p ./public/uploads && chown -R nextjs:nodejs ./public/uploads
+ENV UPLOAD_DIR=/app/uploads
+RUN mkdir -p /app/uploads && chown -R nextjs:nodejs /app/uploads
+VOLUME ["/app/uploads"]
 
 USER nextjs
 

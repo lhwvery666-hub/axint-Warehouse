@@ -1,3 +1,4 @@
+import { isSignedRepairReport } from "@/lib/repair-report-policy"
 import { NextResponse } from "next/server"
 import * as sql from "mssql"
 import { z } from "zod"
@@ -22,6 +23,7 @@ interface BatchDeviceRow {
   RepairCost: number | string | null
   RepairReportContent: string | null
   SignedReportPhoto: string | null
+  ReporterConfirmedAt: Date | null
 }
 
 function parseExistingContent(raw: string | null): Record<string, unknown> {
@@ -127,7 +129,7 @@ export async function PUT(
     const precheck = await pool.request()
       .input("batchId", sql.NVarChar(100), batchId)
       .query<BatchDeviceRow>(`
-        SELECT [Id], [Status], [ReportByUserID], [RepairCost], [RepairReportContent], [SignedReportPhoto]
+        SELECT [Id], [Status], [ReportByUserID], [RepairCost], [RepairReportContent], [SignedReportPhoto], [ReporterConfirmedAt]
         FROM [dbo].[Repair_Tickets]
         WHERE [BatchId] = @batchId;
       `)
@@ -147,6 +149,9 @@ export async function PUT(
       )
     }
 
+    if (precheck.recordset.some(isSignedRepairReport) && (signedPhotoRaw instanceof File || devices.length > 0)) {
+      return NextResponse.json({ success: false, message: "签字凭证已保存，不能替换凭证或修改签字确认内容" }, { status: 409 })
+    }
     const storage = getStorageAdapter()
     let signedPhotoPath: string | null = null
     if (reuseExistingPhoto) {
@@ -204,7 +209,7 @@ export async function PUT(
     const lockedResult = await new sql.Request(transaction)
       .input("batchId", sql.NVarChar(100), batchId)
       .query<BatchDeviceRow>(`
-        SELECT [Id], [Status], [ReportByUserID], [RepairCost], [RepairReportContent], [SignedReportPhoto]
+        SELECT [Id], [Status], [ReportByUserID], [RepairCost], [RepairReportContent], [SignedReportPhoto], [ReporterConfirmedAt]
         FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BatchId] = @batchId;
       `)
@@ -230,6 +235,9 @@ export async function PUT(
       throw new Error("BATCH_CONFLICT")
     }
 
+    if (lockedRows.some(isSignedRepairReport) && (signedPhotoRaw instanceof File || devices.length > 0)) {
+      throw new Error("BATCH_CONFLICT")
+    }
     const rowById = new Map(lockedRows.map((row) => [row.Id, row]))
     for (const device of devices) {
       const currentRow = rowById.get(device.id)

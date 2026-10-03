@@ -4,21 +4,16 @@ import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { PrintButton } from '@/components/print-button';
 import { Button } from '@/components/ui/button';
-import { Switch } from '@/components/ui/switch';
-import { Label } from '@/components/ui/label';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Textarea } from '@/components/ui/textarea';
 import { useAuth } from '@/context/auth-context';
 import { useRepairContext } from '@/context/RepairContext';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { UserRole } from '@/lib/enums';
-import { X, ArrowLeft } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 import { WorkflowSteps } from '@/components/workflow-steps';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { getCompanyName, COMPANY_CONFIG } from '@/lib/company-config';
-import { format } from 'date-fns';
 import '@/styles/print.css';
 
 interface BatchDevice {
@@ -48,6 +43,7 @@ interface BatchReportData {
     customerAddress: string;
     receiveDate: string;
     signedReportPhoto?: string | null;
+    reportLocked?: boolean;
     isChargeable?: boolean;  // 是否收费
     status?: string;  // 工单状态
     signedPhotoViewedBy?: string | null;  // 查看人ID
@@ -110,8 +106,6 @@ export default function RepairReportPrintPage() {
   const [hasChanges, setHasChanges] = useState(false);
   
   // 申请修改对话框
-  const [isModifyRequestDialogOpen, setIsModifyRequestDialogOpen] = useState(false);
-  const [modifyReason, setModifyReason] = useState('');
   
   // 检测嵌入模式
   const [isEmbedMode, setIsEmbedMode] = useState(false);
@@ -214,106 +208,6 @@ export default function RepairReportPrintPage() {
     setHasChanges(true);
   };
   
-  // 删除签字照片（仅未被查看时可用）
-  const handleDeletePhoto = async () => {
-    if (!reportData) return;
-    
-    const confirmed = window.confirm('确定要删除签字照片吗？删除后需要重新上传。');
-    if (!confirmed) return;
-    
-    try {
-      const response = await fetch(`/api/tickets/signed-photo/${params.id}`, {
-        method: 'DELETE',
-      });
-      
-      const result = await response.json();
-      
-      if (result.success) {
-        toast({
-          title: '删除成功',
-          description: '签字照片已删除',
-        });
-        
-        // 重新加载数据
-        const fetchResponse = await fetch(`/api/tickets/batch-repair-report/${params.id}`);
-        const fetchResult = await fetchResponse.json();
-        if (fetchResult.success && fetchResult.data) {
-          setReportData(fetchResult.data);
-        }
-      } else {
-        toast({
-          title: '删除失败',
-          description: result.message,
-          variant: 'destructive',
-        });
-      }
-    } catch (error: any) {
-      console.error('删除照片失败:', error);
-      toast({
-        title: '删除失败',
-        description: error.message || '请稍后重试',
-        variant: 'destructive',
-      });
-    }
-  };
-  
-  // 申请修改签字照片
-  const handleRequestModify = async () => {
-    if (!modifyReason.trim()) {
-      toast({
-        title: '请填写修改原因',
-        description: '申请修改需要说明原因',
-        variant: 'destructive',
-      });
-      return;
-    }
-    
-    try {
-      const response = await fetch(`/api/tickets/signed-photo/${params.id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          reason: modifyReason.trim(),
-        }),
-      });
-      
-      const result = await response.json();
-      
-      if (result.success) {
-        toast({
-          title: '申请已提交',
-          description: '修改申请已提交，等待管理员审批',
-        });
-        
-        setIsModifyRequestDialogOpen(false);
-        setModifyReason('');
-        
-        // 重新加载数据
-        const fetchResponse = await fetch(`/api/tickets/batch-repair-report/${params.id}`);
-        const fetchResult = await fetchResponse.json();
-        if (fetchResult.success && fetchResult.data) {
-          setReportData(fetchResult.data);
-        }
-      } else {
-        toast({
-          title: '提交失败',
-          description: result.message,
-          variant: 'destructive',
-        });
-      }
-    } catch (error: any) {
-      console.error('提交申请失败:', error);
-      toast({
-        title: '提交失败',
-        description: error.message || '请稍后重试',
-        variant: 'destructive',
-      });
-    }
-  };
-
-  // 处理签字照片上传
   const handlePhotoUpload = async () => {
     if (!reportData) return;
 
@@ -457,14 +351,13 @@ export default function RepairReportPrintPage() {
 
   // 判断当前用户角色
   const isReporter = user?.role === UserRole.REPORTER;
-  const isTechnician = user?.role === UserRole.TECHNICIAN;
   
   // 判断是否收费
   const isChargeable = batchInfo.isChargeable || false;
   const isPendingReporterConfirm = batchInfo.status === 'Pending_Reporter_Confirm' || batchInfo.status === 'pending_reporter_confirm';
   
   // ⚠️ 现场人员只能在工作状态为 PENDING_REPORTER_CONFIRM 时上传签字
-  const canUploadSignature = isReporter && isPendingReporterConfirm;
+  const canUploadSignature = isReporter && isPendingReporterConfirm && !batchInfo.reportLocked && !batchInfo.signedReportPhoto;
 
   return (
     <div className="print-container">
@@ -574,7 +467,7 @@ export default function RepairReportPrintPage() {
               {batchInfo.signedPhotoViewedBy && (
                 <div className="mb-2 px-3 py-2 bg-orange-100 border border-orange-200 rounded-md">
                   <p className="text-xs text-orange-900">
-                    <strong>已锁定</strong> - 维修人员已查看，如需修改请申请
+                    <strong>已锁定</strong> - 签字凭证已保存，报告和凭证不可修改
                   </p>
                 </div>
               )}
@@ -629,32 +522,7 @@ export default function RepairReportPrintPage() {
                     </Button>
                   )}
                   
-                  {/* 现场人员的操作按钮 */}
-                  {isReporter && batchInfo.signedReportPhoto && (
-                    <>
-                      {!batchInfo.signedPhotoViewedBy ? (
-                        // 未被查看：可以直接删除
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          onClick={handleDeletePhoto}
-                        >
-                          删除照片
-                        </Button>
-                      ) : (
-                        // 已被查看：需要申请修改
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="border-orange-500 text-orange-700 hover:bg-orange-50"
-                          onClick={() => setIsModifyRequestDialogOpen(true)}
-                        >
-                          申请修改
-                        </Button>
-                      )}
-                    </>
-                  )}
-                  
+                  <p className="text-sm text-muted-foreground">签字凭证保存后不可删除或替换。</p>
                   {isReporter && !batchInfo.signedReportPhoto && signedPhoto && (
                     <Button
                       size="sm"
@@ -907,52 +775,7 @@ export default function RepairReportPrintPage() {
         </div>
       </div>
       
-      {/* 申请修改签字照片对话框 */}
-      <Dialog open={isModifyRequestDialogOpen} onOpenChange={setIsModifyRequestDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>申请修改签字照片</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <p className="text-sm text-gray-700 mb-2">
-                签字照片已被维修人员查看并锁定，无法直接修改。
-              </p>
-              <p className="text-sm text-orange-700 mb-4">
-                如需修改，请说明原因并提交申请，等待管理员审批。
-              </p>
-            </div>
-            <div>
-              <Label htmlFor="modifyReason">修改原因 *</Label>
-              <Textarea
-                id="modifyReason"
-                placeholder="请详细说明需要修改签字照片的原因..."
-                value={modifyReason}
-                onChange={(e) => setModifyReason(e.target.value)}
-                rows={4}
-                className="mt-1"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setIsModifyRequestDialogOpen(false);
-                setModifyReason('');
-              }}
-            >
-              取消
-            </Button>
-            <Button
-              onClick={handleRequestModify}
-              disabled={!modifyReason.trim()}
-            >
-              提交申请
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+
     </div>
   );
 }

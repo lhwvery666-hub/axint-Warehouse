@@ -42,3 +42,6 @@ database
 
 # 本地上传的文件（运行时通过 Volume 挂载）
 public/uploads
+
+# Persistent attachments are mounted, never included in the image
+uploads

@@ -1,5 +1,6 @@
 "use client"
 
+import { APP_VERSION } from "@/lib/app-version"
 import { useState, useEffect } from "react"
 import { useAuth } from "@/context/auth-context"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
@@ -139,7 +140,7 @@ export default function LoginPage() {
               注册新账号
             </Link>
           </div>
-          {/* 出于安全考虑，这里不再在前端展示具体账号与密码示例 */}
+          <p className="text-xs text-muted-foreground">版本 {APP_VERSION}</p>
         </CardFooter>
       </Card>
     </div>

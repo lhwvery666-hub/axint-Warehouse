@@ -1,156 +1,104 @@
 import { NextResponse } from "next/server"
+import * as sql from "mssql"
+import { z } from "zod"
 import { getDbConnection } from "@/lib/db-config"
-import { DB_FIELDS, UserRole } from "@/lib/enums"
+import { TicketStatus, UserRole, TicketActionType } from "@/lib/enums"
 import { checkUserRole, isErrorResponse } from "@/lib/auth-utils"
+import { isSignedRepairReport, sumRepairCosts } from "@/lib/repair-report-policy"
 
-// GET /api/tickets/business-info/[batchId]
-// 获取批次的商务审核信息
-export async function GET(
-  request: Request,
-  context: { params: Promise<{ batchId: string }> }
-) {
-  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.BUSINESS])
-  if (isErrorResponse(authResult)) return authResult
+interface BusinessRow {
+  Id: number; Status: string; RepairCost: number | null; IsPaymentReceived: boolean | null
+  IsInvoiced: boolean | null; ClientName: string | null; BusinessReviewedAt: Date | null; BusinessReviewedBy: string | null
+  SignedReportPhoto: string | null; ReporterConfirmedAt: Date | null
+}
+const batchSchema = z.string().trim().min(1).max(100)
+const bodySchema = z.object({
+  isChargeable: z.boolean().optional(),
+  isPaymentReceived: z.boolean(), isInvoiced: z.boolean(),
+  // Accept a matching legacy total, but never use it to update device amounts.
+  totalCost: z.number().finite().nonnegative().nullable().optional(),
+  clientName: z.string().trim().max(200).nullable().optional(),
+}).strict()
 
+export async function GET(_request: Request, context: { params: Promise<{ batchId: string }> }) {
+  const auth = await checkUserRole([UserRole.ADMIN, UserRole.BUSINESS])
+  if (isErrorResponse(auth)) return auth
   try {
-    const resolvedParams = await context.params
-
-    const batchId = resolvedParams.batchId
-
-    if (!batchId) {
-      return NextResponse.json(
-        { success: false, message: "批次ID不能为空" },
-        { status: 400 }
-      )
-    }
-
+    const batch = batchSchema.safeParse((await context.params).batchId)
+    if (!batch.success) return NextResponse.json({ success: false, message: "批次号无效" }, { status: 400 })
     const pool = await getDbConnection()
-
-    const result = await pool
-      .request()
-      .input("batchId", batchId)
-      .query(`
-        SELECT TOP 1
-          IsChargeable,
-          IsPaymentReceived,
-          IsInvoiced,
-          RepairCost,
-          ClientName,
-          BusinessReviewedAt,
-          BusinessReviewedBy
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-      `)
-
-    if (result.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "批次不存在" },
-        { status: 404 }
-      )
-    }
-
-    const data = result.recordset[0]
-
-    return NextResponse.json({
-      success: true,
-      data: {
-        isChargeable: data.IsChargeable || false,
-        isPaymentReceived: data.IsPaymentReceived || false,
-        isInvoiced: data.IsInvoiced || false,
-        totalCost: data.RepairCost || null,
-        clientName: data.ClientName || null,
-        reviewedAt: data.BusinessReviewedAt || null,
-        reviewedBy: data.BusinessReviewedBy || null
-      }
-    })
-  } catch (error: any) {
+    const result = await pool.request().input("batchId", sql.NVarChar(100), batch.data).query<BusinessRow>(`
+      SELECT [Id], [Status], [RepairCost], [IsPaymentReceived], [IsInvoiced], [ClientName], [BusinessReviewedAt], [BusinessReviewedBy], [SignedReportPhoto], [ReporterConfirmedAt]
+      FROM [dbo].[Repair_Tickets] WHERE [BatchId] = @batchId AND [Status] <> 'Deleted' ORDER BY [Id];
+    `)
+    if (!result.recordset.length) return NextResponse.json({ success: false, message: "批次不存在" }, { status: 404 })
+    const rows = result.recordset
+    const totalCost = sumRepairCosts(rows)
+    return NextResponse.json({ success: true, data: {
+      isChargeable: totalCost > 0, isPaymentReceived: rows.every(row => Boolean(row.IsPaymentReceived)),
+      isInvoiced: rows.every(row => Boolean(row.IsInvoiced)), totalCost,
+      clientName: rows[0].ClientName, reviewedAt: rows[0].BusinessReviewedAt, reviewedBy: rows[0].BusinessReviewedBy,
+      reportLocked: rows.some(isSignedRepairReport),
+    } })
+  } catch (error: unknown) {
     console.error("获取商务信息失败:", error)
-    return NextResponse.json(
-      { success: false, message: error.message || "获取商务信息失败" },
-      { status: 500 }
-    )
+    return NextResponse.json({ success: false, message: "获取商务信息失败" }, { status: 500 })
   }
 }
 
-// PUT /api/tickets/business-info/[batchId]
-// 更新批次的商务审核信息
-export async function PUT(
-  request: Request,
-  context: { params: Promise<{ batchId: string }> }
-) {
-  const authResult = await checkUserRole([UserRole.ADMIN, UserRole.BUSINESS])
-  if (isErrorResponse(authResult)) return authResult
-
+export async function PUT(request: Request, context: { params: Promise<{ batchId: string }> }) {
+  const auth = await checkUserRole([UserRole.ADMIN, UserRole.BUSINESS])
+  if (isErrorResponse(auth)) return auth
+  let transaction: sql.Transaction | null = null
   try {
-    const resolvedParams = await context.params
-
-    const batchId = resolvedParams.batchId
-    const body = await request.json()
-    const { isChargeable, isPaymentReceived, isInvoiced, totalCost, clientName } = body
-
-    if (!batchId) {
-      return NextResponse.json(
-        { success: false, message: "批次ID不能为空" },
-        { status: 400 }
-      )
-    }
-
-    // ⚠️ 任务3：本接口是"保存财务跟进进度"的接口，不推进工单状态，
-    // 硬阻断"未收款不能保存"在这里没有意义，且会阻止财务跟进视图对中间状态的持续更新。
-    // 不再强制要求收费项目必须先确认收款才能保存。
-
+    const batch = batchSchema.safeParse((await context.params).batchId)
+    const body = bodySchema.safeParse(await request.json().catch(() => null))
+    if (!batch.success || !body.success) return NextResponse.json({ success: false, message: "请求参数无效" }, { status: 400 })
     const pool = await getDbConnection()
-
-    // 验证批次存在
-    const batchResult = await pool
-      .request()
-      .input("batchId", batchId)
-      .query(`
-        SELECT TOP 1 ${DB_FIELDS.ID}
-        FROM Repair_Tickets
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-      `)
-
-    if (batchResult.recordset.length === 0) {
-      return NextResponse.json(
-        { success: false, message: "批次不存在" },
-        { status: 404 }
-      )
+    transaction = new sql.Transaction(pool)
+    await transaction.begin()
+    const result = await new sql.Request(transaction).input("batchId", sql.NVarChar(100), batch.data).query<BusinessRow>(`
+      SELECT [Id], [Status], [RepairCost], [IsPaymentReceived], [IsInvoiced], [ClientName], [BusinessReviewedAt], [BusinessReviewedBy], [SignedReportPhoto], [ReporterConfirmedAt]
+      FROM [dbo].[Repair_Tickets] WITH (UPDLOCK, HOLDLOCK)
+      WHERE [BatchId] = @batchId AND [Status] <> 'Deleted' ORDER BY [Id];
+    `)
+    const rows = result.recordset
+    const allowed = new Set<string>([TicketStatus.BUSINESS_REVIEW, TicketStatus.WAREHOUSE_SHIPPING, TicketStatus.COMPLETED])
+    const totalCost = sumRepairCosts(rows)
+    if (!rows.length || rows.some(row => !allowed.has(row.Status)) ||
+      (body.data.totalCost != null && Math.round(body.data.totalCost * 100) !== Math.round(totalCost * 100))) {
+      await transaction.rollback(); transaction = null
+      return NextResponse.json({ success: false, message: "批次状态或费用已变化，请刷新；费用由各设备维修费用自动合计" }, { status: 409 })
     }
-
-    // 更新商务信息
-    await pool
-      .request()
-      .input("batchId", batchId)
-      .input("isChargeable", isChargeable || false)
-      .input("isPaymentReceived", isPaymentReceived || false)
-      .input("isInvoiced", isInvoiced || false)
-      .input("totalCost", totalCost || null)
-      .input("clientName", clientName || null)
-      .input("reviewedBy", authResult.userId)
-      .query(`
-        UPDATE Repair_Tickets
-        SET IsChargeable = @isChargeable,
-            IsPaymentReceived = @isPaymentReceived,
-            IsInvoiced = @isInvoiced,
-            RepairCost = @totalCost,
-            ClientName = @clientName,
-            BusinessReviewedAt = GETUTCDATE(),
-            BusinessReviewedBy = @reviewedBy
-        WHERE ${DB_FIELDS.BATCH_ID} = @batchId
-      `)
-
-    console.log(`✅ 商务信息已更新: ${batchId}`)
-
-    return NextResponse.json({
-      success: true,
-      message: "商务信息已更新"
-    })
-  } catch (error: any) {
-    console.error("更新商务信息失败:", error)
-    return NextResponse.json(
-      { success: false, message: error.message || "更新商务信息失败" },
-      { status: 500 }
-    )
+    if (rows.some(isSignedRepairReport) && body.data.clientName !== undefined &&
+      rows.some(row => String(row.ClientName ?? "").trim() !== String(body.data.clientName ?? "").trim())) {
+      await transaction.rollback(); transaction = null
+      return NextResponse.json({ success: false, message: "报告已签字，客户名称不能再修改；收款和开票信息可继续更新" }, { status: 409 })
+    }
+    await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batch.data)
+      .input("isChargeable", sql.Bit, totalCost > 0)
+      .input("isPaymentReceived", sql.Bit, body.data.isPaymentReceived)
+      .input("isInvoiced", sql.Bit, body.data.isInvoiced)
+      .input("updateClientName", sql.Bit, body.data.clientName !== undefined)
+      .input("clientName", sql.NVarChar(200), body.data.clientName ?? null)
+      .query(`UPDATE [dbo].[Repair_Tickets] SET [IsChargeable] = @isChargeable,
+        [IsPaymentReceived] = @isPaymentReceived, [IsInvoiced] = @isInvoiced,
+        [ClientName] = CASE WHEN @updateClientName = 1 THEN @clientName ELSE [ClientName] END, [UpdatedAt] = GETUTCDATE()
+        WHERE [BatchId] = @batchId AND [Status] <> 'Deleted';`)
+    await new sql.Request(transaction)
+      .input("batchId", sql.NVarChar(100), batch.data)
+      .input("actionType", sql.NVarChar(50), TicketActionType.BATCH_UPDATED)
+      .input("operatorId", sql.Int, Number(auth.userId))
+      .input("operatorName", sql.NVarChar(100), auth.realName || auth.username)
+      .input("description", sql.NVarChar(sql.MAX), `保存财务跟进：总费用 ${totalCost} 元，${body.data.isPaymentReceived ? "已收款" : "未收款"}，${body.data.isInvoiced ? "已开票" : "未开票"}；设备费用保持原值`)
+      .query(`INSERT INTO [dbo].[Repair_Ticket_History] ([BatchId], [ActionType], [OperatorId], [OperatorName], [Description], [CreatedAt])
+        VALUES (@batchId, @actionType, @operatorId, @operatorName, @description, GETUTCDATE());`)
+    await transaction.commit(); transaction = null
+    return NextResponse.json({ success: true, message: "财务信息已保存", data: { totalCost } })
+  } catch (error: unknown) {
+    if (transaction) { try { await transaction.rollback() } catch {} finally { transaction = null } }
+    console.error("保存商务信息失败:", error)
+    return NextResponse.json({ success: false, message: "保存商务信息失败" }, { status: 500 })
   }
 }

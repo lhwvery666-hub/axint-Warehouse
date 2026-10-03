@@ -4,7 +4,7 @@ import * as sql from "mssql"
 import { TicketStatus, UserRole } from "@/lib/enums"
 import { prisma } from "@/lib/prisma"
 import { ALL_USER_ROLES, checkUserRole, isErrorResponse } from "@/lib/auth-utils"
-import { getVisibleTicketStatus } from "@/lib/ticket-visibility"
+import { getVisibleTicketStatus, projectTicketForViewer } from "@/lib/ticket-visibility"
 
 // ==================== 类型定义 ====================
 
@@ -426,7 +426,10 @@ export async function GET() {
       ticket.messageCount = ticket.batchId ? (messageCountMap[ticket.batchId] ?? 0) : 0
     })
 
-    return NextResponse.json({ success: true, data: tickets })
+    return NextResponse.json({
+      success: true,
+      data: tickets.map((ticket) => projectTicketForViewer(ticket, authResult.normalizedRole)),
+    })
   } catch (error: unknown) {
     console.error("获取维修工单失败:", error)
     return NextResponse.json(

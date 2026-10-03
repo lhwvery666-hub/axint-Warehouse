@@ -31,13 +31,25 @@ test("安全上传拒绝伪造 MIME 的文件", async () => {
 
 test("存储路径拒绝编码穿越、远程 URL 和绝对路径", () => {
   const baseDir = join(tmpdir(), "upload-boundary-test")
-  assert.throws(() => normalizeStorageKey("/uploads/photos/%2e%2e/secret.jpg"))
-  assert.throws(() => resolveLocalUploadPath(baseDir, "https://example.com/file.jpg"))
-  assert.throws(() => resolveLocalUploadPath(baseDir, "C:/Windows/system.ini"))
-  assert.match(
-    resolveLocalUploadPath(baseDir, "/uploads/photos/2026/07/safe.jpg"),
-    /photos[\\/]2026[\\/]07[\\/]safe\.jpg$/
-  )
+  // Every spelling must be rejected on every host, including POSIX hosts that
+  // regard Windows drive paths as relative. Check normalization and resolution.
+  for (const unsafe of [
+    "/uploads/photos/%2e%2e/secret.jpg", "../secret.jpg", "/etc/passwd",
+    "C:/Windows/system.ini", "C:relative.jpg", "C%3A%2FWindows%2Fsystem.ini",
+    "C:\\Windows\\system.ini", "//server/share/file.jpg", "\\\\server\\share\\file.jpg",
+    "https://example.com/file.jpg", "HTTPS%3A%2F%2Fexample.com%2Ffile.jpg",
+    "file:///etc/passwd", "s3://bucket/file.jpg", "data:image/png;base64,test",
+    "/uploads/C:/Windows/system.ini", "/uploads//etc/passwd", "uploads//server/file.jpg",
+    "photos/file.jpg:stream", "photos/file.jpg%3Astream",
+  ]) {
+    assert.throws(() => normalizeStorageKey(unsafe), unsafe)
+    assert.throws(() => resolveLocalUploadPath(baseDir, unsafe), unsafe)
+  }
+  for (const prefix of ["", "uploads/", "/uploads/", "%2Fuploads%2F"]) {
+    const stored = `${prefix}photos/2026/07/safe.jpg`
+    assert.equal(normalizeStorageKey(stored), "photos/2026/07/safe.jpg")
+    assert.equal(resolveLocalUploadPath(baseDir, stored), join(baseDir, "photos", "2026", "07", "safe.jpg"))
+  }
 })
 
 test("服务端文件名不保留客户端路径", () => {

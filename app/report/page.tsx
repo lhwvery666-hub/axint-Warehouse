@@ -84,6 +84,7 @@ export default function ReportPage() {
   // 获取最新的工单数据
   const [tasks, setTasks] = useState<any[]>([])
   const [loadingTasks, setLoadingTasks] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
 
   useEffect(() => {
@@ -102,6 +103,7 @@ export default function ReportPage() {
       if (view !== "tasks") return; // 只在任务列表视图时加载
       
       setLoadingTasks(true)
+      setLoadError(null)
       try {
         // 获取当前用户ID（从 user context 获取，不再使用 localStorage）
         const userId = user?.id || null
@@ -264,11 +266,10 @@ export default function ReportPage() {
             setTasks([])
           }
         } else {
-          // API 返回失败
-          setTasks([])
+          throw new Error("工单加载失败")
         }
-      } catch (error: any) {
-        setTasks([])
+      } catch {
+        setLoadError("工单加载失败，请检查连接或登录状态后重试")
       } finally {
         setLoadingTasks(false)
       }
@@ -427,6 +428,8 @@ export default function ReportPage() {
                 <p className="text-sm text-muted-foreground">加载工单中...</p>
               </div>
             </div>
+          ) : loadError ? (
+            <div role="alert" className="space-y-3"><p className="text-destructive">{loadError}</p><Button onClick={() => setRefreshVersion((version) => version + 1)}>重新加载</Button></div>
           ) : (
             <>
           <div className="flex items-center justify-between pb-4 border-b border-border/50">
